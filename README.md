@@ -5,8 +5,6 @@ The libips crate contains all modules and functions one needs to implement an Im
 
 Be that a server, client or other utilities. 
 
-Includes Python bindings with PyO3.
-
 This project is intended to gradually replace the 
 [current python based implementation of IPS](https://github.com/openindiana/pkg5). 
 Most things are documented in the [docs](https://github.com/OpenIndiana/pkg5/tree/oi/doc) directory 
