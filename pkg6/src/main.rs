@@ -762,21 +762,14 @@ fn main() -> Result<()> {
                 let mut idx = 0usize;
                 for rp in &plan.add {
                     image.install_package(&rp.fmri, &rp.manifest)?;
+                    // Save original manifest text to disk — required for pkg verify/fix
+                    let path = image.save_manifest(&rp.fmri, &rp.manifest_text)?;
+                    if *verbose && !quiet {
+                        eprintln!("Saved manifest for {} to {}", rp.fmri, path.display());
+                    }
                     idx += 1;
                     if !quiet && (idx % 5 == 0 || idx == total_pkgs) {
                         println!("Recorded {}/{} packages", idx, total_pkgs);
-                    }
-                    // Save full manifest into manifests directory for reproducibility
-                    match image.save_manifest(&rp.fmri, &rp.manifest) {
-                        Ok(path) => {
-                            if *verbose && !*quiet {
-                                eprintln!("Saved manifest for {} to {}", rp.fmri, path.display());
-                            }
-                        }
-                        Err(e) => {
-                            // Non-fatal: log error but continue install
-                            error!("Failed to save manifest for {}: {}", rp.fmri, e);
-                        }
                     }
                 }
                 if !quiet {

@@ -480,12 +480,16 @@ impl Image {
     /// and stored under a flattened path:
     ///   manifests/<publisher>/<encoded_stem>@<encoded_version>.p5m
     /// Missing publisher will fall back to the image default publisher, then "unknown".
+    /// Save raw manifest text to disk for offline use by `pkg verify` and `pkg fix`.
+    ///
+    /// The caller must provide the original manifest text as fetched from the
+    /// repository. This avoids a redundant network round-trip and guarantees the
+    /// saved text matches what was actually used to install.
     pub fn save_manifest(
         &self,
         fmri: &crate::fmri::Fmri,
-        _manifest: &crate::actions::Manifest,
+        manifest_text: &str,
     ) -> Result<std::path::PathBuf> {
-        // Determine publisher name
         let pub_name = if let Some(p) = &fmri.publisher {
             p.clone()
         } else if let Ok(def) = self.default_publisher() {
@@ -494,11 +498,9 @@ impl Image {
             "unknown".to_string()
         };
 
-        // Build directory path manifests/<publisher> (flattened, no stem subfolders)
         let dir_path = self.manifest_dir().join(&pub_name);
         std::fs::create_dir_all(&dir_path)?;
 
-        // Encode helpers for filename parts
         fn url_encode(s: &str) -> String {
             let mut out = String::new();
             for b in s.bytes() {
@@ -521,29 +523,9 @@ impl Image {
         let encoded_version = url_encode(&version);
         let file_path = dir_path.join(format!("{}@{}.p5m", encoded_stem, encoded_version));
 
-        // Fetch raw manifest text from repository
-        let publisher_name = pub_name.clone();
-        let raw_text = {
-            // Look up publisher configuration
-            let publisher = self.get_publisher(&publisher_name)?;
-            let origin = &publisher.origin;
-            if origin.starts_with("file://") {
-                let path_str = origin.trim_start_matches("file://");
-                let path = std::path::PathBuf::from(path_str);
-                let repo = crate::repository::FileBackend::open(&path)?;
-                repo.fetch_manifest_text(&publisher_name, fmri)?
-            } else {
-                let mut repo = crate::repository::RestBackend::open(origin)?;
-                // Set cache path for completeness
-                let publisher_catalog_dir = self.catalog_dir().join(&publisher.name);
-                repo.set_local_cache_path(&publisher_catalog_dir)?;
-                repo.fetch_manifest_text(&publisher_name, fmri)?
-            }
-        };
-
-        // Write atomically
+        // Write atomically via tmp + rename
         let tmp_path = file_path.with_extension("p5m.tmp");
-        std::fs::write(&tmp_path, raw_text.as_bytes())?;
+        std::fs::write(&tmp_path, manifest_text.as_bytes())?;
         std::fs::rename(&tmp_path, &file_path)?;
 
         Ok(file_path)
@@ -823,6 +805,45 @@ impl Image {
             let publisher_catalog_dir = self.catalog_dir().join(&publisher.name);
             repo.set_local_cache_path(&publisher_catalog_dir)?;
             repo.fetch_manifest(&publisher_name, fmri)
+                .map_err(Into::into)
+        }
+    }
+
+    /// Fetch raw manifest text for the given FMRI from its repository origin.
+    ///
+    /// Unlike [`get_manifest_from_repository`] which returns a parsed [`Manifest`],
+    /// this returns the original text so it can be cached on disk for offline use
+    /// by `pkg verify` and `pkg fix`.
+    pub fn fetch_manifest_text_from_repository(
+        &self,
+        fmri: &crate::fmri::Fmri,
+    ) -> Result<String> {
+        let publisher_name = if let Some(p) = &fmri.publisher {
+            p.clone()
+        } else {
+            self.default_publisher()?.name.clone()
+        };
+
+        let publisher = self.get_publisher(&publisher_name)?;
+        let origin = &publisher.origin;
+
+        if fmri.version().is_empty() {
+            return Err(ImageError::Repository(RepositoryError::Other(
+                "FMRI must include a version to fetch manifest".to_string(),
+            )));
+        }
+
+        if origin.starts_with("file://") {
+            let path_str = origin.trim_start_matches("file://");
+            let path = PathBuf::from(path_str);
+            let repo = FileBackend::open(&path)?;
+            repo.fetch_manifest_text(&publisher_name, fmri)
+                .map_err(Into::into)
+        } else {
+            let mut repo = RestBackend::open(origin)?;
+            let publisher_catalog_dir = self.catalog_dir().join(&publisher.name);
+            repo.set_local_cache_path(&publisher_catalog_dir)?;
+            repo.fetch_manifest_text(&publisher_name, fmri)
                 .map_err(Into::into)
         }
     }

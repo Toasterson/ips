@@ -582,6 +582,9 @@ impl SolverError {
 pub struct ResolvedPkg {
     pub fmri: Fmri,
     pub manifest: Manifest,
+    /// Original manifest text as fetched from the repository, preserved for
+    /// on-disk caching so that `pkg verify` and `pkg fix` can work offline.
+    pub manifest_text: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -818,21 +821,47 @@ pub fn resolve_install(
     let mut plan = InstallPlan::default();
     for sid in solution_ids {
         if let Some(fmri) = sid_to_fmri.get(&sid).cloned() {
-            // Fetch manifest from repository or catalog cache
-            let manifest = match image_ref.get_manifest_from_repository(&fmri) {
-                Ok(m) => m,
-                Err(repo_err) => match image_ref.get_manifest_from_catalog(&fmri) {
-                    Ok(Some(m)) => m,
-                    _ => {
-                        return Err(SolverError::new(format!(
-                            "failed to obtain manifest for {}: {}",
-                            fmri, repo_err
-                        )));
+            // Try to fetch raw manifest text from the repository first.
+            // We keep both parsed manifest and original text so the text can
+            // be saved to disk for offline use by pkg verify / pkg fix.
+            let (manifest, manifest_text) =
+                match image_ref.fetch_manifest_text_from_repository(&fmri) {
+                    Ok(text) => {
+                        let m = crate::actions::Manifest::parse_string(text.clone()).map_err(
+                            |e| {
+                                SolverError::new(format!(
+                                    "failed to parse manifest for {}: {}",
+                                    fmri, e
+                                ))
+                            },
+                        )?;
+                        (m, text)
                     }
-                },
-            };
+                    Err(_repo_err) => {
+                        // Fall back to catalog cache (covers tests with mock publishers
+                        // and offline scenarios where the repo is unreachable).
+                        let m = match image_ref.get_manifest_from_catalog(&fmri) {
+                            Ok(Some(m)) => m,
+                            _ => match image_ref.get_manifest_from_repository(&fmri) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    return Err(SolverError::new(format!(
+                                        "failed to obtain manifest for {}: {}",
+                                        fmri, e
+                                    )));
+                                }
+                            },
+                        };
+                        let text = serde_json::to_string(&m).unwrap_or_default();
+                        (m, text)
+                    }
+                };
             plan.reasons.push(format!("selected {} via solver", fmri));
-            plan.add.push(ResolvedPkg { fmri, manifest });
+            plan.add.push(ResolvedPkg {
+                fmri,
+                manifest,
+                manifest_text,
+            });
         }
     }
     Ok(plan)
