@@ -13,10 +13,10 @@ use crate::actions::Manifest;
 use crate::fmri::Fmri;
 use crate::repository::catalog::CatalogManager;
 use miette::Diagnostic;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
@@ -71,7 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_obsolete_fmri ON obsolete_packages(fmri);
 pub const FTS_SCHEMA: &str = r#"
 CREATE VIRTUAL TABLE IF NOT EXISTS package_search
     USING fts5(stem, publisher, summary, description,
-               content='', tokenize='unicode61');
+               tokenize='unicode61');
 "#;
 
 /// Schema for installed.db - tracks installed packages with manifest blobs.
@@ -494,3 +494,257 @@ pub fn populate_obsolete_db(db_path: &Path, fmri: &Fmri) -> Result<(), ShardBuil
 // Note: compress_json_lz4, decode_manifest_bytes, and is_package_obsolete
 // are available as pub(crate) in crate::image::catalog and can be used
 // within libips but not re-exported.
+
+/// Result from an FTS5 search query.
+#[derive(Debug, Clone)]
+pub struct FtsSearchResult {
+    pub stem: String,
+    pub publisher: String,
+    pub summary: String,
+    pub description: String,
+    pub rank: f64,
+}
+
+/// Sanitize a user query string for safe use in an FTS5 MATCH expression.
+///
+/// Wraps each whitespace-delimited token in double quotes to treat it as a
+/// literal phrase, preventing FTS5 syntax injection. Glob-style `*` at the end
+/// of a token is converted to FTS5 prefix syntax (e.g. `web*` → `"web" *`).
+pub fn sanitize_fts_query(raw: &str) -> String {
+    let tokens: Vec<&str> = raw.split_whitespace().collect();
+    if tokens.is_empty() {
+        return String::new();
+    }
+
+    let mut parts = Vec::new();
+    for token in tokens {
+        // Strip surrounding quotes if present
+        let token = token.trim_matches('"');
+        if token.is_empty() {
+            continue;
+        }
+
+        if token.ends_with('*') {
+            let prefix = &token[..token.len() - 1];
+            if !prefix.is_empty() {
+                // FTS5 prefix query: "term" *  (but FTS5 prefix is just term*)
+                // Actually FTS5 prefix syntax is: term*
+                // We need to escape the term part but keep the *
+                let escaped = prefix.replace('"', "\"\"");
+                parts.push(format!("\"{}\"*", escaped));
+            }
+        } else {
+            let escaped = token.replace('"', "\"\"");
+            parts.push(format!("\"{}\"", escaped));
+        }
+    }
+    parts.join(" ")
+}
+
+/// Search the FTS5 index in fts.db for packages matching a query.
+pub fn search_fts(
+    fts_db_path: &Path,
+    query: &str,
+    publisher_filter: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<FtsSearchResult>, ShardBuildError> {
+    let conn = Connection::open_with_flags(fts_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+
+    let sanitized = sanitize_fts_query(query);
+    if sanitized.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let effective_limit = limit.unwrap_or(100) as i64;
+
+    // FTS5 columns cannot be filtered with standard WHERE clauses,
+    // so we fetch all matches and filter by publisher in Rust.
+    let mut stmt = conn.prepare(
+        "SELECT stem, publisher, summary, description, rank \
+         FROM package_search \
+         WHERE package_search MATCH ?1 \
+         ORDER BY rank \
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![sanitized, effective_limit], |row| {
+        Ok(FtsSearchResult {
+            stem: row.get(0)?,
+            publisher: row.get(1)?,
+            summary: row.get(2)?,
+            description: row.get(3)?,
+            rank: row.get(4)?,
+        })
+    })?;
+    let mut results: Vec<FtsSearchResult> = rows.collect::<Result<Vec<_>, _>>()?;
+
+    if let Some(publisher) = publisher_filter {
+        results.retain(|r| r.publisher == publisher);
+    }
+
+    Ok(results)
+}
+
+/// Look up the latest FMRI for each (stem, publisher) pair from active.db.
+pub fn resolve_latest_fmris(
+    active_db_path: &Path,
+    stems: &[(String, String)],
+) -> Result<HashMap<(String, String), String>, ShardBuildError> {
+    let conn = Connection::open_with_flags(active_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(
+        "SELECT fmri FROM packages WHERE stem = ?1 AND publisher = ?2 ORDER BY rowid DESC LIMIT 1",
+    )?;
+
+    let mut result = HashMap::new();
+    for (stem, publisher) in stems {
+        if let Ok(fmri) = stmt.query_row(rusqlite::params![stem, publisher], |row| {
+            row.get::<_, String>(0)
+        }) {
+            result.insert((stem.clone(), publisher.clone()), fmri);
+        }
+    }
+
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_fts_db(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(FTS_SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO package_search (stem, publisher, summary, description) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["web/server/nginx", "openindiana.org", "NGINX web server", "High performance HTTP server and reverse proxy"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO package_search (stem, publisher, summary, description) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["web/server/apache", "openindiana.org", "Apache HTTP Server", "The Apache HTTP Server Project"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO package_search (stem, publisher, summary, description) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["database/postgresql", "openindiana.org", "PostgreSQL database", "PostgreSQL object-relational database management"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO package_search (stem, publisher, summary, description) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["runtime/coreutils", "otherpub", "Core utilities", "Essential command line utilities"],
+        ).unwrap();
+    }
+
+    fn create_test_active_db(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(ACTIVE_SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO packages (stem, version, publisher) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["web/server/nginx", "1.24.0,5.11-2024.0.1.0", "openindiana.org"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO packages (stem, version, publisher) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["web/server/apache", "2.4.58,5.11-2024.0.1.0", "openindiana.org"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO packages (stem, version, publisher) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["database/postgresql", "16.1,5.11-2024.0.1.0", "openindiana.org"],
+        ).unwrap();
+    }
+
+    #[test]
+    fn test_search_fts_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let fts_path = dir.path().join("fts.db");
+        create_test_fts_db(&fts_path);
+
+        let results = search_fts(&fts_path, "nginx", None, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].stem, "web/server/nginx");
+    }
+
+    #[test]
+    fn test_search_fts_multiple_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let fts_path = dir.path().join("fts.db");
+        create_test_fts_db(&fts_path);
+
+        // "server" appears in both nginx and apache summaries
+        let results = search_fts(&fts_path, "server", None, None).unwrap();
+        assert!(results.len() >= 2);
+    }
+
+    #[test]
+    fn test_search_fts_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let fts_path = dir.path().join("fts.db");
+        create_test_fts_db(&fts_path);
+
+        let results = search_fts(&fts_path, "post*", None, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].stem, "database/postgresql");
+    }
+
+    #[test]
+    fn test_search_fts_no_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let fts_path = dir.path().join("fts.db");
+        create_test_fts_db(&fts_path);
+
+        let results = search_fts(&fts_path, "nonexistent", None, None).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_fts_publisher_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let fts_path = dir.path().join("fts.db");
+        create_test_fts_db(&fts_path);
+
+        // "coreutils" matches the otherpub entry only
+        let results =
+            search_fts(&fts_path, "coreutils", Some("otherpub"), None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].publisher, "otherpub");
+
+        // Same query but filtered to openindiana.org should return nothing
+        let results =
+            search_fts(&fts_path, "coreutils", Some("openindiana.org"), None).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_fts_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let fts_path = dir.path().join("fts.db");
+        create_test_fts_db(&fts_path);
+
+        let results = search_fts(&fts_path, "server", None, Some(1)).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_resolve_latest_fmris() {
+        let dir = tempfile::tempdir().unwrap();
+        let active_path = dir.path().join("active.db");
+        create_test_active_db(&active_path);
+
+        let stems = vec![
+            ("web/server/nginx".to_string(), "openindiana.org".to_string()),
+            ("database/postgresql".to_string(), "openindiana.org".to_string()),
+            ("nonexistent/pkg".to_string(), "openindiana.org".to_string()),
+        ];
+
+        let fmris = resolve_latest_fmris(&active_path, &stems).unwrap();
+        assert_eq!(fmris.len(), 2); // nonexistent should not be in results
+        assert!(fmris[&("web/server/nginx".to_string(), "openindiana.org".to_string())]
+            .contains("nginx"));
+        assert!(fmris[&("database/postgresql".to_string(), "openindiana.org".to_string())]
+            .contains("postgresql"));
+    }
+
+    #[test]
+    fn test_sanitize_fts_query() {
+        assert_eq!(sanitize_fts_query("nginx"), "\"nginx\"");
+        assert_eq!(sanitize_fts_query("web server"), "\"web\" \"server\"");
+        assert_eq!(sanitize_fts_query("post*"), "\"post\"*");
+        assert_eq!(sanitize_fts_query(""), "");
+        assert_eq!(sanitize_fts_query("  "), "");
+    }
+}

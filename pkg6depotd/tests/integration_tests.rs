@@ -483,3 +483,118 @@ async fn test_multiple_publishers_default_route() {
     assert!(names.contains(&"pub1".to_string()));
     assert!(names.contains(&"pub2".to_string()));
 }
+
+#[tokio::test]
+async fn test_search_endpoint() {
+    // Setup repo with a published package (rebuild builds fts.db)
+    let temp_dir = TempDir::new().unwrap();
+    let repo_path = setup_repo(&temp_dir);
+
+    let config = Config {
+        server: ServerConfig {
+            bind: vec!["127.0.0.1:0".to_string()],
+            workers: None,
+            max_connections: None,
+            reuseport: None,
+            cache_max_age: Some(3600),
+            tls_cert: None,
+            tls_key: None,
+        },
+        repository: RepositoryConfig {
+            root: repo_path.clone(),
+            mode: Some("readonly".to_string()),
+        },
+        telemetry: None,
+        publishers: None,
+        admin: None,
+        oauth2: None,
+    };
+
+    let repo = DepotRepo::new(&config).unwrap();
+    let state = Arc::new(repo);
+    let router = http::routes::app_router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        http::server::run(router, listener).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{}", addr);
+
+    // 1. Test versions endpoint now advertises search
+    let resp = client
+        .get(format!("{}/versions/0/", base_url))
+        .send()
+        .await
+        .unwrap();
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("search 0 1"), "versions should advertise search");
+
+    // 2. Test search v0 - search for "example" (the package stem)
+    let resp = client
+        .get(format!("{}/test/search/0/example", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "search v0 should succeed");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("example"), "search v0 should find 'example' package");
+
+    // 3. Test search v1 - search for "example"
+    let resp = client
+        .get(format!(
+            "{}/test/search/1/False_2_None_None_example",
+            base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "search v1 should succeed");
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("Return from search v1"),
+        "search v1 should have header"
+    );
+    assert!(body.contains("example"), "search v1 should find 'example' package");
+
+    // 4. Test search v0 - no results
+    let resp = client
+        .get(format!("{}/test/search/0/nonexistentpackage", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let body = resp.text().await.unwrap();
+    assert!(body.is_empty(), "search for nonexistent should return empty body");
+
+    // 5. Test search v1 - no results returns 204
+    let resp = client
+        .get(format!(
+            "{}/test/search/1/False_2_None_None_nonexistentpackage",
+            base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "search v1 with no results should return 204"
+    );
+
+    // 6. Test search by summary keyword "Test Package"
+    let resp = client
+        .get(format!("{}/test/search/0/Test", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("example"),
+        "search by summary keyword should find the package"
+    );
+}

@@ -82,10 +82,10 @@ pub async fn get_versions() -> impl IntoResponse {
                 op: Operation::Publisher,
                 versions: vec![0, 1],
             },
-            //SupportedOperation {
-            //    op: Operation::Search,
-            //    versions: vec![0, 1],
-            //},
+            SupportedOperation {
+                op: Operation::Search,
+                versions: vec![0, 1],
+            },
         ],
     };
 
