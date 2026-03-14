@@ -92,3 +92,5 @@ sample_data
 
 .vagrant
 /.output.txt
+/repo/
+/artifacts/

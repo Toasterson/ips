@@ -1,0 +1,8 @@
+target/
+repo/
+artifacts/
+.git/
+.idea/
+.vagrant/
+sample_data/
+*.md
