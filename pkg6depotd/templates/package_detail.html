@@ -1,56 +1,109 @@
 {% extends "base.html" %}
 
-{% block title %}{{ name }} - Package Detail{% endblock %}
+{% block title %}{{ name }} — Package Detail{% endblock %}
 
 {% block content %}
-<h1>{{ name }}</h1>
-{% if let Some(summary) = summary %}
-<p>{{ summary }}</p>
-{% endif %}
+<div class="page-header">
+    <div class="breadcrumb">
+        <a href="/ui/">Publishers</a><span class="sep">/</span><a href="/ui/packages/{{ publisher }}">{{ publisher }}</a><span class="sep">/</span>{{ name }}
+    </div>
+    <h1>{{ name }}</h1>
+    {% if let Some(summary) = summary %}
+    <p class="detail-summary">{{ summary }}</p>
+    {% endif %}
+</div>
 
-<table class="info-table">
-    <tr><th>Publisher</th><td>{{ publisher }}</td></tr>
-    <tr><th>Version</th><td>{{ version }}</td></tr>
-    {% if let Some(br) = build_release %}
-    <tr><th>Build Release</th><td>{{ br }}</td></tr>
-    {% endif %}
-    {% if let Some(b) = branch %}
-    <tr><th>Branch</th><td>{{ b }}</td></tr>
-    {% endif %}
-    {% if let Some(date) = packaging_date %}
-    <tr><th>Packaging Date</th><td>{{ date }}</td></tr>
-    {% endif %}
-    <tr><th>Size</th><td>{{ size }}</td></tr>
-    <tr><th>Compressed Size</th><td>{{ csize }}</td></tr>
-    <tr><th>FMRI</th><td><code>{{ fmri_str }}</code></td></tr>
-</table>
+<div class="detail-grid">
+    <div class="detail-card">
+        <h3>Package Information</h3>
+        <div class="info-rows">
+            <div class="info-row">
+                <span class="label">Publisher</span>
+                <span class="value">{{ publisher }}</span>
+            </div>
+            <div class="info-row">
+                <span class="label">Version</span>
+                <span class="value">{{ version }}</span>
+            </div>
+            {% if let Some(br) = build_release %}
+            <div class="info-row">
+                <span class="label">Build Release</span>
+                <span class="value">{{ br }}</span>
+            </div>
+            {% endif %}
+            {% if let Some(b) = branch %}
+            <div class="info-row">
+                <span class="label">Branch</span>
+                <span class="value">{{ b }}</span>
+            </div>
+            {% endif %}
+            {% if let Some(date) = packaging_date %}
+            <div class="info-row">
+                <span class="label">Packaged</span>
+                <span class="value">{{ date }}</span>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    <div class="detail-card">
+        <h3>Size</h3>
+        <div class="info-rows">
+            <div class="info-row">
+                <span class="label">Uncompressed</span>
+                <span class="value">{{ size }}</span>
+            </div>
+            <div class="info-row">
+                <span class="label">Compressed</span>
+                <span class="value">{{ csize }}</span>
+            </div>
+            <div class="info-row">
+                <span class="label">FMRI</span>
+                <span class="value">
+                    <span class="fmri-badge">{{ fmri_str }}</span>
+                </span>
+            </div>
+        </div>
+    </div>
+</div>
 
-<h2>Install</h2>
-<pre><code>pkg install {{ fmri_str }}</code></pre>
+<div class="install-cmd">
+    <span class="prompt">$</span> pkg install {{ fmri_str }}
+</div>
 
 {% if !dependencies.is_empty() %}
-<h2>Dependencies</h2>
+<h2 class="section-heading">Dependencies</h2>
 <ul class="dep-list">
     {% for dep in &dependencies %}
     <li>
-        <span class="dep-type">{{ dep.dep_type }}</span>
+        {% if dep.dep_type == "require" %}
+        <span class="dep-type dep-type-require">{{ dep.dep_type }}</span>
+        {% else if dep.dep_type == "optional" %}
+        <span class="dep-type dep-type-optional">{{ dep.dep_type }}</span>
+        {% else if dep.dep_type == "incorporate" %}
+        <span class="dep-type dep-type-incorporate">{{ dep.dep_type }}</span>
+        {% else %}
+        <span class="dep-type dep-type-default">{{ dep.dep_type }}</span>
+        {% endif %}
         {% if let Some(link) = dep.link %}
         <a href="{{ link }}">{{ dep.fmri }}</a>
         {% else %}
-        {{ dep.fmri }}
+        <span style="color: var(--d-text);">{{ dep.fmri }}</span>
         {% endif %}
     </li>
     {% endfor %}
 </ul>
 {% endif %}
 
-<h2>Manifest</h2>
-<button hx-get="/ui/package/{{ publisher }}/{{ fmri_encoded }}/manifest"
+<h2 class="section-heading">Manifest</h2>
+<button class="manifest-trigger"
+        hx-get="/ui/package/{{ publisher }}/{{ fmri_encoded }}/manifest"
         hx-target="#manifest-content"
         hx-swap="innerHTML"
         hx-indicator="#manifest-spinner">
-    Show Manifest
+    Show Raw Manifest
 </button>
-<span id="manifest-spinner" class="htmx-indicator" aria-busy="true">Loading...</span>
+<span id="manifest-spinner" class="htmx-indicator">
+    <span class="spinner"></span> Loading manifest...
+</span>
 <div id="manifest-content"></div>
 {% endblock %}

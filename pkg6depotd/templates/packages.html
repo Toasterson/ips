@@ -1,42 +1,50 @@
 {% extends "base.html" %}
 
-{% block title %}{{ publisher }} - Packages{% endblock %}
+{% block title %}{{ publisher }} — Packages{% endblock %}
+{% block nav_publishers %} class="active"{% endblock %}
 
 {% block content %}
-<h1>{{ publisher }}</h1>
-<p>{{ total_packages }} packages</p>
+<div class="page-header">
+    <div class="breadcrumb">
+        <a href="/ui/">Publishers</a><span class="sep">/</span>{{ publisher }}
+    </div>
+    <h1>{{ publisher }}</h1>
+    <p class="subtitle">{{ total_packages }} packages</p>
+</div>
 
-<table class="packages" role="grid">
-    <thead>
-        <tr>
-            <th style="width: 40px;"></th>
-            <th>Package</th>
-            <th>Version</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for pkg in packages %}
-        <tr>
-            <td>
-                <input type="checkbox"
-                       onchange="toggleP5i(this, '{{ publisher }}', '{{ pkg.fmri_str }}')"
-                       aria-label="Select {{ pkg.name }}">
-            </td>
-            <td class="pkg-name">
-                <a href="/ui/package/{{ publisher }}/{{ pkg.fmri_encoded }}">{{ pkg.name }}</a>
-            </td>
-            <td>{{ pkg.version }}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
+<div class="pkg-table-wrap">
+    <table class="pkg-table">
+        <thead>
+            <tr>
+                <th class="col-select"></th>
+                <th>Package</th>
+                <th>Version</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for pkg in packages %}
+            <tr>
+                <td class="col-select">
+                    <input type="checkbox"
+                           onchange="toggleP5i(this, '{{ publisher }}', '{{ pkg.fmri_str }}')"
+                           aria-label="Select {{ pkg.name }}">
+                </td>
+                <td class="pkg-name-cell">
+                    <a href="/ui/package/{{ publisher }}/{{ pkg.fmri_encoded }}">{{ pkg.name }}</a>
+                </td>
+                <td class="pkg-version">{{ pkg.version }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
 
 {% if total_pages > 1 %}
 <div class="pagination">
     {% if page > 1 %}
-    <a href="/ui/packages/{{ publisher }}?page={{ page - 1 }}&per_page={{ per_page }}">&#8592; Prev</a>
+    <a href="/ui/packages/{{ publisher }}?page={{ page - 1 }}&per_page={{ per_page }}">&#8592; Previous</a>
     {% endif %}
-    <span>Page {{ page }} of {{ total_pages }}</span>
+    <span class="page-info">{{ page }} / {{ total_pages }}</span>
     {% if page < total_pages %}
     <a href="/ui/packages/{{ publisher }}?page={{ page + 1 }}&per_page={{ per_page }}">Next &#8594;</a>
     {% endif %}

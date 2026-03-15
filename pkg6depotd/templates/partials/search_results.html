@@ -1,28 +1,32 @@
 {% if results.is_empty() %}
-<p>No packages found.</p>
+<div class="empty-state">
+    <p>No packages found.</p>
+</div>
 {% else %}
-<table class="packages" role="grid">
-    <thead>
-        <tr>
-            <th style="width: 40px;"></th>
-            <th>Package</th>
-            <th>Publisher</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for r in &results %}
-        <tr>
-            <td>
-                <input type="checkbox"
-                       onchange="toggleP5i(this, '{{ r.publisher }}', '{{ r.fmri }}')"
-                       aria-label="Select {{ r.name }}">
-            </td>
-            <td class="pkg-name">
-                <a href="/ui/package/{{ r.publisher }}/{{ r.fmri_encoded }}">{{ r.name }}</a>
-            </td>
-            <td>{{ r.publisher }}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
+<div class="pkg-table-wrap">
+    <table class="pkg-table">
+        <thead>
+            <tr>
+                <th class="col-select"></th>
+                <th>Package</th>
+                <th>Publisher</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in &results %}
+            <tr>
+                <td class="col-select">
+                    <input type="checkbox"
+                           onchange="toggleP5i(this, '{{ r.publisher }}', '{{ r.fmri }}')"
+                           aria-label="Select {{ r.name }}">
+                </td>
+                <td class="pkg-name-cell">
+                    <a href="/ui/package/{{ r.publisher }}/{{ r.fmri_encoded }}">{{ r.name }}</a>
+                </td>
+                <td class="pkg-publisher">{{ r.publisher }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
 {% endif %}

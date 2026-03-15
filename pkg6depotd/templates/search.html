@@ -1,37 +1,48 @@
 {% extends "base.html" %}
 
 {% block title %}Search Packages{% endblock %}
+{% block nav_search %} class="active"{% endblock %}
 
 {% block content %}
-<h1>Search Packages</h1>
-
-<div class="search-input">
-    <input type="search"
-           name="q"
-           placeholder="Search packages..."
-           hx-get="/ui/search/results"
-           hx-trigger="input changed delay:300ms, search"
-           hx-target="#search-results"
-           hx-indicator="#search-spinner"
-           hx-include="[name='publisher']"
-           autofocus>
+<div class="page-header">
+    <h1>Search Packages</h1>
+    <p class="subtitle">Find packages by name, summary, or description</p>
 </div>
 
-{% if !publishers.is_empty() %}
-<details>
-    <summary>Filter by publisher</summary>
-    <select name="publisher">
-        <option value="">All publishers</option>
-        {% for p in &publishers %}
-        <option value="{{ p }}">{{ p }}</option>
-        {% endfor %}
-    </select>
-</details>
-{% endif %}
+<div class="search-wrapper">
+    <div class="search-field">
+        <span class="search-icon">&#x1F50D;</span>
+        <input type="search"
+               name="q"
+               placeholder="Search packages..."
+               hx-get="/ui/search/results"
+               hx-trigger="input changed delay:300ms, search"
+               hx-target="#search-results"
+               hx-indicator="#search-spinner"
+               hx-include="[name='publisher']"
+               autofocus>
+    </div>
 
-<span id="search-spinner" class="htmx-indicator" aria-busy="true">Searching...</span>
+    {% if !publishers.is_empty() %}
+    <details class="search-filter">
+        <summary>Filter by publisher</summary>
+        <select name="publisher">
+            <option value="">All publishers</option>
+            {% for p in &publishers %}
+            <option value="{{ p }}">{{ p }}</option>
+            {% endfor %}
+        </select>
+    </details>
+    {% endif %}
+</div>
+
+<span id="search-spinner" class="htmx-indicator">
+    <span class="spinner"></span> Searching...
+</span>
 
 <div id="search-results">
-    <p><em>Type to search packages by name, summary, or description.</em></p>
+    <div class="empty-state">
+        <p>Type to search packages across all publishers.</p>
+    </div>
 </div>
 {% endblock %}

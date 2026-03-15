@@ -218,10 +218,22 @@ pub async fn ui_index(
     let publishers = info
         .publishers
         .into_iter()
-        .map(|p| PublisherDisplay {
-            name: p.name,
-            package_count: p.package_count,
-            updated: p.updated,
+        .map(|p| {
+            let updated = format_packaging_date(&p.updated)
+                .unwrap_or(p.updated);
+            // If backend reports 0 packages, try counting via list_packages
+            let package_count = if p.package_count == 0 {
+                repo.list_packages(Some(&p.name), None)
+                    .map(|pkgs| pkgs.len())
+                    .unwrap_or(0)
+            } else {
+                p.package_count
+            };
+            PublisherDisplay {
+                name: p.name,
+                package_count,
+                updated,
+            }
         })
         .collect();
     render_template(&IndexTemplate { publishers })

@@ -1,17 +1,28 @@
 {% extends "base.html" %}
 
 {% block title %}Package Repository{% endblock %}
+{% block nav_publishers %} class="active"{% endblock %}
 
 {% block content %}
-<h1>Package Repository</h1>
+<div class="page-header">
+    <h1>Package Repository</h1>
+    <p class="subtitle">Browse publishers and packages served by this depot</p>
+</div>
+
 <div class="publisher-grid">
     {% for pub_info in publishers %}
     <a href="/ui/packages/{{ pub_info.name }}" class="publisher-card">
-        <h3>{{ pub_info.name }}</h3>
-        <div class="meta">
-            {{ pub_info.package_count }} packages
+        <div class="pub-name">{{ pub_info.name }}</div>
+        <div class="pub-stats">
+            <div class="stat">
+                <span class="stat-value">{{ pub_info.package_count }}</span>
+                <span class="stat-label">Packages</span>
+            </div>
             {% if !pub_info.updated.is_empty() %}
-            &middot; Updated {{ pub_info.updated }}
+            <div class="stat">
+                <span class="stat-value" style="font-size: 0.85rem;">{{ pub_info.updated }}</span>
+                <span class="stat-label">Last Updated</span>
+            </div>
             {% endif %}
         </div>
     </a>

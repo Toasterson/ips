@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -12,16 +12,19 @@
     <nav class="depot-nav">
         <div class="nav-inner">
             <a href="/ui/" class="brand">pkg depot</a>
-            <a href="/ui/">Publishers</a>
-            <a href="/ui/search">Search</a>
+            <div class="nav-links">
+                <a href="/ui/"{% block nav_publishers %}{% endblock %}>Publishers</a>
+                <a href="/ui/search"{% block nav_search %}{% endblock %}>Search</a>
+            </div>
         </div>
     </nav>
     <main class="container">
         {% block content %}{% endblock %}
     </main>
-    <div id="p5i-cart" class="p5i-cart">
-        <span id="p5i-count">0</span> selected &mdash;
-        <a href="#" id="p5i-download" onclick="downloadP5i(); return false;">Download P5I</a>
+    <div id="p5i-cart" class="p5i-cart" style="display:none">
+        <span class="cart-count" id="p5i-count">0</span>
+        <span class="cart-label">selected</span>
+        <a href="#" class="cart-action" id="p5i-download" onclick="downloadP5i(); return false;">Download P5I</a>
     </div>
     <script>
     const p5iSelection = new Set();
@@ -35,21 +38,21 @@
         const cart = document.getElementById('p5i-cart');
         const count = document.getElementById('p5i-count');
         count.textContent = p5iSelection.size;
-        cart.style.display = p5iSelection.size > 0 ? 'block' : 'none';
+        cart.style.display = p5iSelection.size > 0 ? 'flex' : 'none';
     }
     function downloadP5i() {
         const byPub = {};
         for (const key of p5iSelection) {
-            const [pub, fmri] = key.split('|', 2);
-            if (!byPub[pub]) byPub[pub] = [];
-            byPub[pub].push(fmri);
+            const [pub_, fmri] = key.split('|', 2);
+            if (!byPub[pub_]) byPub[pub_] = [];
+            byPub[pub_].push(fmri);
         }
         const publishers = Object.keys(byPub);
         if (publishers.length === 0) return;
-        const pub = publishers[0];
+        const pub_ = publishers[0];
         const params = new URLSearchParams();
-        params.set('publisher', pub);
-        for (const fmri of byPub[pub]) {
+        params.set('publisher', pub_);
+        for (const fmri of byPub[pub_]) {
             params.append('pkg', fmri);
         }
         window.location.href = '/ui/p5i?' + params.toString();
