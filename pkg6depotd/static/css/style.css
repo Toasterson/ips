@@ -1,0 +1,180 @@
+/* pkg6depotd Web UI */
+
+:root {
+    --depot-accent: #0969da;
+}
+
+/* Navigation */
+nav.depot-nav {
+    background: var(--pico-card-background-color, #fff);
+    border-bottom: 1px solid var(--pico-muted-border-color, #dee2e6);
+    padding: 0.75rem 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+nav.depot-nav .nav-inner {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+}
+
+nav.depot-nav .brand {
+    font-weight: 700;
+    font-size: 1.25rem;
+    text-decoration: none;
+    color: var(--pico-color, #333);
+}
+
+nav.depot-nav a {
+    text-decoration: none;
+    color: var(--pico-muted-color, #666);
+}
+
+nav.depot-nav a:hover {
+    color: var(--pico-color, #333);
+}
+
+/* Publisher cards */
+.publisher-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+}
+
+.publisher-card {
+    border: 1px solid var(--pico-muted-border-color, #dee2e6);
+    border-radius: 8px;
+    padding: 1.25rem;
+    text-decoration: none;
+    color: inherit;
+    transition: box-shadow 0.15s;
+}
+
+.publisher-card:hover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.publisher-card h3 {
+    margin: 0 0 0.5rem 0;
+}
+
+.publisher-card .meta {
+    color: var(--pico-muted-color, #666);
+    font-size: 0.9rem;
+}
+
+/* Package table */
+table.packages td.pkg-name {
+    font-family: var(--pico-font-family-monospace, monospace);
+    font-size: 0.9rem;
+}
+
+/* Manifest code block */
+.manifest-block {
+    max-height: 600px;
+    overflow: auto;
+    background: var(--pico-card-background-color, #f8f9fa);
+    border: 1px solid var(--pico-muted-border-color, #dee2e6);
+    border-radius: 4px;
+    padding: 1rem;
+}
+
+.manifest-block pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-size: 0.85rem;
+}
+
+/* P5I cart */
+.p5i-cart {
+    position: fixed;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    background: var(--depot-accent);
+    color: #fff;
+    padding: 0.75rem 1.25rem;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    display: none;
+    z-index: 1000;
+    font-size: 0.95rem;
+}
+
+.p5i-cart a {
+    color: #fff;
+    font-weight: 600;
+}
+
+/* Search */
+.search-input {
+    max-width: 600px;
+}
+
+/* Pagination */
+.pagination {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    justify-content: center;
+    margin-top: 1.5rem;
+}
+
+.pagination a, .pagination span {
+    padding: 0.4rem 0.8rem;
+    border-radius: 4px;
+    text-decoration: none;
+}
+
+.pagination .current {
+    background: var(--depot-accent);
+    color: #fff;
+}
+
+/* Detail info table */
+.info-table {
+    width: 100%;
+}
+
+.info-table th {
+    width: 180px;
+    text-align: right;
+    padding-right: 1rem;
+    white-space: nowrap;
+    vertical-align: top;
+}
+
+/* HTMX loading indicator */
+.htmx-indicator {
+    opacity: 0;
+    transition: opacity 200ms ease-in;
+}
+
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+    opacity: 1;
+}
+
+/* Dependencies list */
+.dep-list {
+    list-style: none;
+    padding: 0;
+}
+
+.dep-list li {
+    padding: 0.25rem 0;
+    font-family: var(--pico-font-family-monospace, monospace);
+    font-size: 0.9rem;
+}
+
+.dep-type {
+    display: inline-block;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-right: 0.5rem;
+    background: var(--pico-muted-border-color, #dee2e6);
+}

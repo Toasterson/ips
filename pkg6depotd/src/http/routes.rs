@@ -1,14 +1,20 @@
 use crate::http::admin;
-use crate::http::handlers::{catalog, file, info, manifest, publisher, search, shard, versions};
+use crate::http::handlers::{catalog, file, info, manifest, publisher, search, shard, ui, versions};
 use crate::repo::DepotRepo;
 use axum::{
     Router,
     routing::{get, post},
 };
 use std::sync::Arc;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 pub fn app_router(state: Arc<DepotRepo>) -> Router {
+    // Static file serving for the web UI
+    let static_dir = ServeDir::new(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static"),
+    );
+
     Router::new()
         .route("/versions/0", get(versions::get_versions))
         .route("/versions/0/", get(versions::get_versions))
@@ -64,6 +70,14 @@ pub fn app_router(state: Arc<DepotRepo>) -> Router {
         // Admin API over HTTP
         .route("/admin/health", get(admin::health))
         .route("/admin/auth/check", post(admin::auth_check))
+        // Web UI routes
+        .route("/ui/", get(ui::ui_index))
+        .route("/ui/packages/{publisher}", get(ui::ui_packages))
+        .route("/ui/search", get(ui::ui_search))
+        .route("/ui/search/results", get(ui::ui_search_results))
+        .route("/ui/package/{publisher}/{*fmri}", get(ui::ui_package_detail))
+        .route("/ui/p5i", get(ui::ui_p5i_generate))
+        .nest_service("/ui/static", static_dir)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

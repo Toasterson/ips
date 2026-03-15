@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block title %}Package Repository{% endblock %}
+
+{% block content %}
+<h1>Package Repository</h1>
+<div class="publisher-grid">
+    {% for pub_info in publishers %}
+    <a href="/ui/packages/{{ pub_info.name }}" class="publisher-card">
+        <h3>{{ pub_info.name }}</h3>
+        <div class="meta">
+            {{ pub_info.package_count }} packages
+            {% if !pub_info.updated.is_empty() %}
+            &middot; Updated {{ pub_info.updated }}
+            {% endif %}
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% endblock %}

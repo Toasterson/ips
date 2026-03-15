@@ -146,7 +146,7 @@ pub async fn get_info(
 // - Prefer publisher-scoped file path; fallback to global location.
 // - If content appears to be gzip-compressed (magic 1f 8b), decompress.
 // - Decode as UTF-8 (lossy) and enforce a maximum output size to avoid huge responses.
-fn resolve_license_text(repo: &DepotRepo, publisher: &str, digest: &str) -> Option<String> {
+pub(crate) fn resolve_license_text(repo: &DepotRepo, publisher: &str, digest: &str) -> Option<String> {
     let path = repo.get_file_path(publisher, digest)?;
     let bytes = fs::read(&path).ok()?;
 
@@ -181,7 +181,7 @@ fn resolve_license_text(repo: &DepotRepo, publisher: &str, digest: &str) -> Opti
     Some(text)
 }
 
-fn find_attr(manifest: &Manifest, key: &str) -> Option<String> {
+pub(crate) fn find_attr(manifest: &Manifest, key: &str) -> Option<String> {
     for attr in &manifest.attributes {
         if attr.key == key {
             return attr.values.first().cloned();
@@ -208,7 +208,7 @@ fn month_name(month: u32) -> &'static str {
     }
 }
 
-fn format_packaging_date(ts: &str) -> Option<String> {
+pub(crate) fn format_packaging_date(ts: &str) -> Option<String> {
     // Expect formats like YYYYMMDDThhmmssZ or with fractional seconds before Z
     let clean_ts = if let Some((base, _frac)) = ts.split_once('.') {
         format!("{}Z", base)
@@ -239,7 +239,7 @@ fn format_packaging_date(ts: &str) -> Option<String> {
 }
 
 // Sum pkg.size (uncompressed) and pkg.csize (compressed) over all file actions
-fn compute_sizes(manifest: &Manifest) -> (u128, u128) {
+pub(crate) fn compute_sizes(manifest: &Manifest) -> (u128, u128) {
     let mut size: u128 = 0;
     let mut csize: u128 = 0;
 
@@ -260,7 +260,7 @@ fn compute_sizes(manifest: &Manifest) -> (u128, u128) {
     (size, csize)
 }
 
-fn human_bytes(bytes: u128) -> String {
+pub(crate) fn human_bytes(bytes: u128) -> String {
     // Use binary (IEC-like) units for familiarity; format with two decimals for KB and above
     const KIB: u128 = 1024;
     const MIB: u128 = 1024 * 1024;

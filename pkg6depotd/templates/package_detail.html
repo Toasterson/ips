@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block title %}{{ name }} - Package Detail{% endblock %}
+
+{% block content %}
+<h1>{{ name }}</h1>
+{% if let Some(summary) = summary %}
+<p>{{ summary }}</p>
+{% endif %}
+
+<table class="info-table">
+    <tr><th>Publisher</th><td>{{ publisher }}</td></tr>
+    <tr><th>Version</th><td>{{ version }}</td></tr>
+    {% if let Some(br) = build_release %}
+    <tr><th>Build Release</th><td>{{ br }}</td></tr>
+    {% endif %}
+    {% if let Some(b) = branch %}
+    <tr><th>Branch</th><td>{{ b }}</td></tr>
+    {% endif %}
+    {% if let Some(date) = packaging_date %}
+    <tr><th>Packaging Date</th><td>{{ date }}</td></tr>
+    {% endif %}
+    <tr><th>Size</th><td>{{ size }}</td></tr>
+    <tr><th>Compressed Size</th><td>{{ csize }}</td></tr>
+    <tr><th>FMRI</th><td><code>{{ fmri_str }}</code></td></tr>
+</table>
+
+<h2>Install</h2>
+<pre><code>pkg install {{ fmri_str }}</code></pre>
+
+{% if !dependencies.is_empty() %}
+<h2>Dependencies</h2>
+<ul class="dep-list">
+    {% for dep in &dependencies %}
+    <li>
+        <span class="dep-type">{{ dep.dep_type }}</span>
+        {% if let Some(link) = dep.link %}
+        <a href="{{ link }}">{{ dep.fmri }}</a>
+        {% else %}
+        {{ dep.fmri }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ul>
+{% endif %}
+
+<h2>Manifest</h2>
+<button hx-get="/ui/package/{{ publisher }}/{{ fmri_encoded }}/manifest"
+        hx-target="#manifest-content"
+        hx-swap="innerHTML"
+        hx-indicator="#manifest-spinner">
+    Show Manifest
+</button>
+<span id="manifest-spinner" class="htmx-indicator" aria-busy="true">Loading...</span>
+<div id="manifest-content"></div>
+{% endblock %}

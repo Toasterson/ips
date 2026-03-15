@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}{{ publisher }} - Packages{% endblock %}
+
+{% block content %}
+<h1>{{ publisher }}</h1>
+<p>{{ total_packages }} packages</p>
+
+<table class="packages" role="grid">
+    <thead>
+        <tr>
+            <th style="width: 40px;"></th>
+            <th>Package</th>
+            <th>Version</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for pkg in packages %}
+        <tr>
+            <td>
+                <input type="checkbox"
+                       onchange="toggleP5i(this, '{{ publisher }}', '{{ pkg.fmri_str }}')"
+                       aria-label="Select {{ pkg.name }}">
+            </td>
+            <td class="pkg-name">
+                <a href="/ui/package/{{ publisher }}/{{ pkg.fmri_encoded }}">{{ pkg.name }}</a>
+            </td>
+            <td>{{ pkg.version }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if total_pages > 1 %}
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="/ui/packages/{{ publisher }}?page={{ page - 1 }}&per_page={{ per_page }}">&#8592; Prev</a>
+    {% endif %}
+    <span>Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="/ui/packages/{{ publisher }}?page={{ page + 1 }}&per_page={{ per_page }}">Next &#8594;</a>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

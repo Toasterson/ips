@@ -49,6 +49,10 @@ tracing-opentelemetry = "0.32"
 thiserror = "2"
 miette = { version = "7.6.0", features = ["fancy"] }
 
+# Templating & Web UI
+askama = "0.15"
+urlencoding = "2"
+
 # Project Dependencies
 libips = { path = "../libips" }
 

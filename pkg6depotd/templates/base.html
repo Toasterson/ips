@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Package Repository{% endblock %}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <link rel="stylesheet" href="/ui/static/css/style.css">
+    <script src="/ui/static/js/htmx.min.js"></script>
+</head>
+<body>
+    <nav class="depot-nav">
+        <div class="nav-inner">
+            <a href="/ui/" class="brand">pkg depot</a>
+            <a href="/ui/">Publishers</a>
+            <a href="/ui/search">Search</a>
+        </div>
+    </nav>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <div id="p5i-cart" class="p5i-cart">
+        <span id="p5i-count">0</span> selected &mdash;
+        <a href="#" id="p5i-download" onclick="downloadP5i(); return false;">Download P5I</a>
+    </div>
+    <script>
+    const p5iSelection = new Set();
+    function toggleP5i(checkbox, publisher, fmri) {
+        const key = publisher + '|' + fmri;
+        if (checkbox.checked) {
+            p5iSelection.add(key);
+        } else {
+            p5iSelection.delete(key);
+        }
+        const cart = document.getElementById('p5i-cart');
+        const count = document.getElementById('p5i-count');
+        count.textContent = p5iSelection.size;
+        cart.style.display = p5iSelection.size > 0 ? 'block' : 'none';
+    }
+    function downloadP5i() {
+        const byPub = {};
+        for (const key of p5iSelection) {
+            const [pub, fmri] = key.split('|', 2);
+            if (!byPub[pub]) byPub[pub] = [];
+            byPub[pub].push(fmri);
+        }
+        const publishers = Object.keys(byPub);
+        if (publishers.length === 0) return;
+        const pub = publishers[0];
+        const params = new URLSearchParams();
+        params.set('publisher', pub);
+        for (const fmri of byPub[pub]) {
+            params.append('pkg', fmri);
+        }
+        window.location.href = '/ui/p5i?' + params.toString();
+    }
+    </script>
+</body>
+</html>
