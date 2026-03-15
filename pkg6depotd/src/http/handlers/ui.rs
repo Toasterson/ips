@@ -524,3 +524,34 @@ pub async fn ui_p5i_generate(
     )
         .into_response())
 }
+
+// ===========================================================================
+// Embedded static assets
+// ===========================================================================
+
+static CSS_CONTENT: &str = include_str!("../../../static/css/style.css");
+static HTMX_JS_CONTENT: &str = include_str!("../../../static/js/htmx.min.js");
+
+/// GET /ui/static/css/style.css
+pub async fn static_css() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        CSS_CONTENT,
+    )
+        .into_response()
+}
+
+/// GET /ui/static/js/htmx.min.js
+pub async fn static_htmx_js() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        HTMX_JS_CONTENT,
+    )
+        .into_response()
+}

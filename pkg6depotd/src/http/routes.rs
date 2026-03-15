@@ -7,15 +7,9 @@ use axum::{
     routing::{get, post},
 };
 use std::sync::Arc;
-use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 pub fn app_router(state: Arc<DepotRepo>) -> Router {
-    // Static file serving for the web UI
-    let static_dir = ServeDir::new(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static"),
-    );
-
     Router::new()
         .route("/", get(|| async { Redirect::permanent("/ui/") }))
         .route("/versions/0", get(versions::get_versions))
@@ -79,7 +73,9 @@ pub fn app_router(state: Arc<DepotRepo>) -> Router {
         .route("/ui/search/results", get(ui::ui_search_results))
         .route("/ui/package/{publisher}/{*fmri}", get(ui::ui_package_detail))
         .route("/ui/p5i", get(ui::ui_p5i_generate))
-        .nest_service("/ui/static", static_dir)
+        // Embedded static assets
+        .route("/ui/static/css/style.css", get(ui::static_css))
+        .route("/ui/static/js/htmx.min.js", get(ui::static_htmx_js))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
