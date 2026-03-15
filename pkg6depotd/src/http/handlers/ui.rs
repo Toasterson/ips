@@ -267,7 +267,13 @@ pub async fn ui_packages(
             } else {
                 format!("pkg://{}/{}@{}", publisher, name, version)
             };
-            let fmri_encoded = encode_fmri(&fmri_str);
+            // URL path uses just name@version (publisher is a separate path segment)
+            let path_fmri = if version.is_empty() {
+                name.clone()
+            } else {
+                format!("{}@{}", name, version)
+            };
+            let fmri_encoded = encode_fmri(&path_fmri);
             PackageRow {
                 name,
                 version,
@@ -322,17 +328,22 @@ pub async fn ui_search_results(
     let mut results = Vec::new();
     for entry in entries {
         if seen.insert(entry.fmri.clone()) {
-            // Extract publisher and name from the FMRI string
-            let (pub_name, pkg_name) = if let Ok(fmri) = Fmri::from_str(&entry.fmri) {
-                (
-                    fmri.publisher.unwrap_or_default(),
-                    fmri.name.clone(),
-                )
-            } else {
-                // Fallback: try to parse manually
-                (String::new(), entry.fmri.clone())
-            };
-            let fmri_encoded = encode_fmri(&entry.fmri);
+            // Extract publisher, name, and version from the FMRI string
+            let (pub_name, pkg_name, path_fmri) =
+                if let Ok(fmri) = Fmri::from_str(&entry.fmri) {
+                    let pub_name = fmri.publisher.clone().unwrap_or_default();
+                    let name = fmri.name.clone();
+                    let version = fmri.version();
+                    let path = if version.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}@{}", name, version)
+                    };
+                    (pub_name, name, path)
+                } else {
+                    (String::new(), entry.fmri.clone(), entry.fmri.clone())
+                };
+            let fmri_encoded = encode_fmri(&path_fmri);
             results.push(SearchResultRow {
                 name: pkg_name,
                 publisher: pub_name,
@@ -380,7 +391,13 @@ pub async fn ui_package_detail(
     } else {
         format!("pkg://{}/{}@{}", publisher, name, version_full)
     };
-    let fmri_encoded = encode_fmri(&fmri_display);
+    // URL path uses just name@version (publisher is a separate path segment)
+    let path_fmri = if version_full.is_empty() {
+        name.clone()
+    } else {
+        format!("{}@{}", name, version_full)
+    };
+    let fmri_encoded = encode_fmri(&path_fmri);
 
     let summary = find_attr(&manifest, "pkg.summary");
 
@@ -394,17 +411,12 @@ pub async fn ui_package_detail(
             let link = if dep_fmri.publisher.is_none()
                 || dep_fmri.publisher.as_deref() == Some(&publisher)
             {
-                let full = if dep_fmri.version().is_empty() {
-                    format!("pkg://{}/{}", publisher, dep_fmri.stem())
+                let dep_path = if dep_fmri.version().is_empty() {
+                    dep_fmri.stem().to_string()
                 } else {
-                    format!(
-                        "pkg://{}/{}@{}",
-                        publisher,
-                        dep_fmri.stem(),
-                        dep_fmri.version()
-                    )
+                    format!("{}@{}", dep_fmri.stem(), dep_fmri.version())
                 };
-                Some(format!("/ui/package/{}/{}", publisher, encode_fmri(&full)))
+                Some(format!("/ui/package/{}/{}", publisher, encode_fmri(&dep_path)))
             } else {
                 None
             };
