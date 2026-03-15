@@ -516,40 +516,70 @@ main.container {
     word-break: break-all;
 }
 
-/* Install command */
-.install-cmd {
+/* Copyable blocks (FMRI, install command) */
+.copyable-block { margin-bottom: 0.75rem; }
+
+.copyable-label {
+    display: block;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--d-text-muted);
+    font-weight: 600;
+    margin-bottom: 0.3rem;
+}
+
+.copyable-row {
     background: var(--d-bg-surface);
     border: 1px solid var(--d-border);
     border-radius: var(--d-radius);
-    padding: 0.65rem 1rem;
-    font-family: var(--d-mono);
-    font-size: 0.84rem;
-    color: var(--d-heading);
+    padding: 0.55rem 0.75rem;
     display: flex;
     align-items: center;
-    gap: 0.6rem;
-    margin-bottom: 2rem;
-    overflow-x: auto;
-    white-space: nowrap;
+    justify-content: space-between;
+    gap: 0.75rem;
 }
 
-.install-cmd .prompt {
+.copyable-text {
+    font-family: var(--d-mono);
+    font-size: 0.82rem;
+    color: var(--d-heading);
+    white-space: nowrap;
+    overflow-x: auto;
+    flex: 1;
+    scrollbar-width: thin;
+}
+
+.copyable-text .prompt {
     color: var(--d-accent);
     user-select: none;
     font-weight: 600;
 }
 
-/* FMRI badge */
-.fmri-badge {
-    display: inline-block;
-    background: var(--d-bg-surface);
-    border: 1px solid var(--d-border);
+.copy-btn {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
     border-radius: 4px;
-    padding: 0.15rem 0.5rem;
-    font-family: var(--d-mono);
-    font-size: 0.78rem;
-    color: var(--d-text);
-    word-break: break-all;
+    background: transparent;
+    border: 1px solid var(--d-border);
+    color: var(--d-text-muted);
+    cursor: pointer;
+    transition: all var(--d-transition);
+}
+
+.copy-btn:hover {
+    background: var(--d-bg-hover);
+    color: var(--d-heading);
+    border-color: var(--d-accent-dim);
+}
+
+.copy-btn.copied {
+    color: var(--d-success);
+    border-color: var(--d-success);
 }
 
 /* ==========================================================================

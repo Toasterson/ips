@@ -56,18 +56,28 @@
                 <span class="label">Compressed</span>
                 <span class="value">{{ csize }}</span>
             </div>
-            <div class="info-row">
-                <span class="label">FMRI</span>
-                <span class="value">
-                    <span class="fmri-badge">{{ fmri_str }}</span>
-                </span>
-            </div>
         </div>
     </div>
 </div>
 
-<div class="install-cmd">
-    <span class="prompt">$</span> pkg install {{ fmri_str }}
+<div class="copyable-block">
+    <span class="copyable-label">FMRI</span>
+    <div class="copyable-row">
+        <code class="copyable-text" id="fmri-text">{{ fmri_str }}</code>
+        <button class="copy-btn" onclick="copyText('fmri-text')" title="Copy FMRI">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+    </div>
+</div>
+
+<div class="copyable-block">
+    <span class="copyable-label">Install</span>
+    <div class="copyable-row">
+        <code class="copyable-text" id="install-text"><span class="prompt">$</span> pkg install {{ fmri_str }}</code>
+        <button class="copy-btn" onclick="copyText('install-text', true)" title="Copy install command">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+    </div>
 </div>
 
 {% if !dependencies.is_empty() %}
@@ -106,4 +116,21 @@
     <span class="spinner"></span> Loading manifest...
 </span>
 <div id="manifest-content"></div>
+
+<script>
+function copyText(id, stripPrompt) {
+    const el = document.getElementById(id);
+    let text = el.textContent;
+    if (stripPrompt) text = text.replace(/^\$\s*/, '');
+    navigator.clipboard.writeText(text.trim()).then(() => {
+        const btn = el.parentElement.querySelector('.copy-btn');
+        btn.classList.add('copied');
+        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        setTimeout(() => {
+            btn.classList.remove('copied');
+            btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+        }, 1500);
+    });
+}
+</script>
 {% endblock %}
