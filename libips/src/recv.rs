@@ -12,7 +12,7 @@ use crate::repository::{
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use tempfile::tempdir;
+use tempfile::tempdir_in;
 use tracing::{debug, info};
 
 /// PackageReceiver handles downloading packages from a source repository
@@ -208,7 +208,7 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
         txn.set_publisher(publisher);
         txn.set_legacy_manifest(manifest_text);
 
-        let temp_dir = tempdir().map_err(RepositoryError::IoError)?;
+        let temp_dir = tempdir_in(&self.dest.path).map_err(RepositoryError::IoError)?;
 
         let payload_files: Vec<_> = manifest
             .files
@@ -227,6 +227,16 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
             .par_iter()
             .map(|file| {
                 let payload = file.payload.as_ref().unwrap();
+
+                // Collect all candidate digests: primary first, then additional (compressed hash)
+                // Use Display format (source:algorithm:hash) so fetch_payload parses correctly
+                let mut digests = vec![payload.primary_identifier.to_string()];
+                for additional in &payload.additional_identifiers {
+                    if !additional.hash.is_empty() {
+                        digests.push(additional.to_string());
+                    }
+                }
+
                 let digest = &payload.primary_identifier.hash;
                 let temp_file_path = temp_dir_path.join(digest);
 
@@ -236,9 +246,23 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
                     temp_file_path.display()
                 );
 
-                // Download the payload (now works with &self)
-                self.source
-                    .fetch_payload(&publisher_str, digest, &temp_file_path)?;
+                // Try each digest until one succeeds (primary hash may differ from storage hash)
+                let mut last_err = None;
+                for d in &digests {
+                    match self.source.fetch_payload(&publisher_str, d, &temp_file_path) {
+                        Ok(()) => {
+                            last_err = None;
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("Failed to fetch payload with digest {}: {}", d, e);
+                            last_err = Some(e);
+                        }
+                    }
+                }
+                if let Some(e) = last_err {
+                    return Err(e);
+                }
 
                 // Update progress atomically
                 let current_count = {
@@ -315,7 +339,13 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
                     digest,
                     dest_path.display()
                 );
-                std::fs::copy(&temp_file_path, &dest_path).map_err(RepositoryError::IoError)?;
+                std::fs::rename(&temp_file_path, &dest_path).map_err(|e| {
+                    RepositoryError::FileRenameError {
+                        from: temp_file_path.clone(),
+                        to: dest_path,
+                        source: e,
+                    }
+                })?;
             }
         }
 
@@ -490,6 +520,108 @@ mod tests {
         let final_path = if expected_sig_path.exists() { expected_sig_path } else { global_sig_path };
         let content = std::fs::read(&final_path).unwrap();
         assert_eq!(content, payload_content);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_receive_multi_file_package() -> Result<()> {
+        use crate::actions::File as FileAction;
+
+        let source_dir = tempdir().map_err(RepositoryError::IoError)?;
+        let dest_dir = tempdir().map_err(RepositoryError::IoError)?;
+
+        // Create source repo
+        let mut source_repo = FileBackend::create(source_dir.path(), RepositoryVersion::V4)?;
+        source_repo.add_publisher("test")?;
+
+        // Create a prototype directory with multiple files
+        let proto_dir = source_dir.path().join("proto");
+        std::fs::create_dir_all(&proto_dir).map_err(RepositoryError::IoError)?;
+
+        let file_contents: Vec<(&str, &[u8])> = vec![
+            ("etc/config.txt", b"config-content-1"),
+            ("usr/bin/tool", b"binary-content-2"),
+            ("usr/lib/libfoo.so", b"library-content-3"),
+            ("var/data/db.dat", b"data-content-4"),
+            ("opt/extra/readme", b"readme-content-5"),
+        ];
+
+        let mut file_actions = Vec::new();
+        for (path, content) in &file_contents {
+            let full_path = proto_dir.join(path);
+            std::fs::create_dir_all(full_path.parent().unwrap())
+                .map_err(RepositoryError::IoError)?;
+            std::fs::write(&full_path, content).map_err(RepositoryError::IoError)?;
+
+            let mut fa = FileAction::default();
+            fa.path = path.to_string();
+            fa.payload = Some(crate::payload::Payload::compute_payload(&full_path).unwrap());
+            file_actions.push((fa, full_path));
+        }
+
+        // Create the package with files via transaction
+        let fmri = Fmri::parse("pkg://test/multifile@1.0").unwrap();
+        let mut manifest = Manifest::new();
+        manifest.attributes.push(Attr {
+            key: "pkg.fmri".to_string(),
+            values: vec![fmri.to_string()],
+            ..Default::default()
+        });
+
+        let mut txn = source_repo.begin_transaction()?;
+        txn.set_publisher("test");
+        for (fa, path) in file_actions {
+            txn.add_file(fa, &path)?;
+        }
+        txn.update_manifest(manifest);
+        txn.commit()?;
+        source_repo.rebuild(Some("test"), false, false)?;
+
+        // Receive into destination repo
+        let dest_repo = FileBackend::create(dest_dir.path(), RepositoryVersion::V4)?;
+        let mut receiver = PackageReceiver::new(&source_repo, dest_repo);
+        receiver.receive(Some("test"), &[Fmri::new("multifile")], false)?;
+
+        // Verify destination has the package
+        let dest_repo_check = FileBackend::open(dest_dir.path())?;
+        let pkgs = dest_repo_check.list_packages(Some("test"), Some("multifile"))?;
+        assert_eq!(pkgs.len(), 1, "Package should exist in destination");
+
+        // Verify the manifest contains all files
+        let dest_manifest = dest_repo_check.fetch_manifest(
+            "test",
+            &Fmri::parse("pkg://test/multifile@1.0").unwrap(),
+        )?;
+        assert_eq!(
+            dest_manifest.files.len(),
+            file_contents.len(),
+            "All {} files should be in the manifest",
+            file_contents.len()
+        );
+
+        // Verify payload files exist in the destination repo's file store.
+        // The dest re-compresses files so hashes differ from source. Count files in file store.
+        let file_store = dest_dir.path().join("publisher/test/file");
+        let mut payload_count = 0;
+        if file_store.exists() {
+            for bucket in std::fs::read_dir(&file_store).unwrap() {
+                let bucket = bucket.unwrap();
+                if bucket.path().is_dir() {
+                    for entry in std::fs::read_dir(bucket.path()).unwrap() {
+                        if entry.unwrap().path().is_file() {
+                            payload_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            payload_count,
+            file_contents.len(),
+            "All {} payload files should exist in destination file store",
+            file_contents.len()
+        );
 
         Ok(())
     }

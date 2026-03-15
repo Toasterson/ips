@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info};
 use crate::actions::{File as FileAction, Manifest};
-use crate::digest::Digest;
+use crate::digest::{Digest, DigestAlgorithm, DigestSource};
 use crate::fmri::Fmri;
 use crate::payload::{Payload, PayloadCompressionAlgorithm};
 
@@ -280,15 +280,26 @@ impl Transaction {
         self.files
             .push((temp_file_path.clone(), compressed_hash.clone()));
 
-        // Set the primary identifier (uncompressed hash)
-        payload.primary_identifier = Digest::from_str(&hash)?;
+        // Set the primary identifier (uncompressed SHA256 hash)
+        payload.primary_identifier = Digest {
+            hash: hash.clone(),
+            algorithm: DigestAlgorithm::SHA256,
+            source: DigestSource::UncompressedFile,
+        };
 
         // Set the compression algorithm
         payload.compression_algorithm = compression_algorithm;
 
         // Add the compressed hash as an additional identifier
-        let compressed_digest = Digest::from_str(&compressed_hash)?;
-        payload.additional_identifiers.push(compressed_digest);
+        let compressed_source = match payload.compression_algorithm {
+            PayloadCompressionAlgorithm::Gzip => DigestSource::GzipCompressed,
+            PayloadCompressionAlgorithm::LZ4 => DigestSource::GzipCompressed, // LZ4 shares file storage pattern
+        };
+        payload.additional_identifiers.push(Digest {
+            hash: compressed_hash.clone(),
+            algorithm: DigestAlgorithm::SHA256,
+            source: compressed_source,
+        });
 
         // Update the FileAction with the payload
         updated_file_action.payload = Some(payload);
@@ -365,30 +376,6 @@ impl Transaction {
             }
         };
 
-        // Copy files to their final location
-        for (source_path, hash) in self.files {
-            // Create the destination path using the helper function with publisher
-            let dest_path =
-                FileBackend::construct_file_path_with_publisher(&self.repo, &publisher, &hash);
-
-            // Create parent directories if they don't exist
-            if let Some(parent) = dest_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| RepositoryError::DirectoryCreateError {
-                    path: parent.to_path_buf(),
-                    source: e,
-                })?;
-            }
-
-            // Copy the file if it doesn't already exist
-            if !dest_path.exists() {
-                fs::copy(&source_path, &dest_path).map_err(|e| RepositoryError::FileCopyError {
-                    from: source_path.clone(),
-                    to: dest_path,
-                    source: e,
-                })?;
-            }
-        }
-
         // Extract package information from manifest
         let mut package_stem = String::from("unknown");
         let mut package_version = String::from("");
@@ -404,40 +391,26 @@ impl Transaction {
             }
         }
 
-        // Determine the publisher to use
-        let publisher = match &self.publisher {
-            Some(pub_name) => {
-                debug!("Using specified publisher: {}", pub_name);
-                pub_name.clone()
+        // Move files to their final location (atomic rename, same filesystem)
+        for (source_path, hash) in self.files {
+            let dest_path =
+                FileBackend::construct_file_path_with_publisher(&self.repo, &publisher, &hash);
+
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| RepositoryError::DirectoryCreateError {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
             }
-            None => {
-                debug!("No publisher specified, trying to use default publisher");
-                // If no publisher is specified, use the default publisher from the repository config
-                let config_path = self.repo.join(REPOSITORY_CONFIG_FILENAME);
-                if config_path.exists() {
-                    let config_content = fs::read_to_string(&config_path)?;
-                    let config: RepositoryConfig = serde_json::from_str(&config_content)?;
-                    match config.default_publisher {
-                        Some(default_pub) => {
-                            debug!("Using default publisher: {}", default_pub);
-                            default_pub
-                        }
-                        None => {
-                            debug!("No default publisher set in repository");
-                            return Err(RepositoryError::Other(
-                                "No publisher specified and no default publisher set in repository"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                } else {
-                    debug!("Repository configuration not found");
-                    return Err(RepositoryError::Other(
-                        "No publisher specified and repository configuration not found".to_string(),
-                    ));
-                }
+
+            if !dest_path.exists() {
+                fs::rename(&source_path, &dest_path).map_err(|e| RepositoryError::FileRenameError {
+                    from: source_path.clone(),
+                    to: dest_path,
+                    source: e,
+                })?;
             }
-        };
+        }
 
         // Create the package directory if it doesn't exist
         let pkg_dir = FileBackend::construct_package_dir(&self.repo, &publisher, &package_stem);
@@ -474,30 +447,30 @@ impl Transaction {
             })?;
         }
 
-        // Copy to pkg directory
-        // 1. Copy JSON manifest
+        // Move manifests to pkg directory (atomic rename, same filesystem)
+        // 1. JSON manifest
         let pkg_manifest_json_path = PathBuf::from(format!("{}.json", pkg_manifest_path.display()));
         debug!(
-            "Copying JSON manifest from {} to {}",
+            "Moving JSON manifest from {} to {}",
             manifest_json_path.display(),
             pkg_manifest_json_path.display()
         );
-        fs::copy(&manifest_json_path, &pkg_manifest_json_path).map_err(|e| {
-            RepositoryError::FileCopyError {
+        fs::rename(&manifest_json_path, &pkg_manifest_json_path).map_err(|e| {
+            RepositoryError::FileRenameError {
                 from: manifest_json_path,
                 to: pkg_manifest_json_path,
                 source: e,
             }
         })?;
 
-        // 2. Copy legacy manifest
+        // 2. Legacy manifest
         debug!(
-            "Copying legacy manifest from {} to {}",
+            "Moving legacy manifest from {} to {}",
             manifest_legacy_path.display(),
             pkg_manifest_path.display()
         );
-        fs::copy(&manifest_legacy_path, &pkg_manifest_path).map_err(|e| {
-            RepositoryError::FileCopyError {
+        fs::rename(&manifest_legacy_path, &pkg_manifest_path).map_err(|e| {
+            RepositoryError::FileRenameError {
                 from: manifest_legacy_path,
                 to: pkg_manifest_path,
                 source: e,
