@@ -101,6 +101,17 @@ fn parse_version_parts(version_full: &str) -> VersionParts {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Helper: read last-modified from catalog.attrs for a publisher
+// ---------------------------------------------------------------------------
+fn read_catalog_last_modified(repo: &DepotRepo, publisher: &str) -> Option<String> {
+    let attrs_path = repo.shard_dir(publisher).join("catalog.attrs");
+    let content = std::fs::read_to_string(&attrs_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let last_modified = json.get("last-modified")?.as_str()?;
+    format_packaging_date(last_modified)
+}
+
 // ===========================================================================
 // Templates
 // ===========================================================================
@@ -219,8 +230,6 @@ pub async fn ui_index(
         .publishers
         .into_iter()
         .map(|p| {
-            let updated = format_packaging_date(&p.updated)
-                .unwrap_or(p.updated);
             // If backend reports 0 packages, try counting via list_packages
             let package_count = if p.package_count == 0 {
                 repo.list_packages(Some(&p.name), None)
@@ -229,6 +238,10 @@ pub async fn ui_index(
             } else {
                 p.package_count
             };
+            // Try to get last-modified from catalog.attrs (more accurate than get_info)
+            let updated = read_catalog_last_modified(&repo, &p.name)
+                .or_else(|| format_packaging_date(&p.updated))
+                .unwrap_or(p.updated);
             PublisherDisplay {
                 name: p.name,
                 package_count,
