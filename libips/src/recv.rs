@@ -228,12 +228,22 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
             .map(|file| {
                 let payload = file.payload.as_ref().unwrap();
 
-                // Collect all candidate digests: primary first, then additional (compressed hash)
-                // Use Display format (source:algorithm:hash) so fetch_payload parses correctly
-                let mut digests = vec![payload.primary_identifier.to_string()];
+                // Collect candidate digests to try: raw primary hash first (works with
+                // REST servers that use SHA1), then formatted digests with algorithm info
+                // (works with FileBackend that may store under compressed hash)
+                let mut digests = vec![payload.primary_identifier.hash.clone()];
+                // Add formatted primary with algorithm info as second attempt
+                let formatted_primary = payload.primary_identifier.to_string();
+                if formatted_primary != payload.primary_identifier.hash {
+                    digests.push(formatted_primary);
+                }
                 for additional in &payload.additional_identifiers {
                     if !additional.hash.is_empty() {
-                        digests.push(additional.to_string());
+                        digests.push(additional.hash.clone());
+                        let formatted = additional.to_string();
+                        if formatted != additional.hash {
+                            digests.push(formatted);
+                        }
                     }
                 }
 
