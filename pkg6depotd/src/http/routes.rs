@@ -3,6 +3,7 @@ use crate::http::handlers::{catalog, file, info, manifest, publisher, search, sh
 use crate::repo::DepotRepo;
 use axum::{
     Router,
+    response::Redirect,
     routing::{get, post},
 };
 use std::sync::Arc;
@@ -16,6 +17,7 @@ pub fn app_router(state: Arc<DepotRepo>) -> Router {
     );
 
     Router::new()
+        .route("/", get(|| async { Redirect::permanent("/ui/") }))
         .route("/versions/0", get(versions::get_versions))
         .route("/versions/0/", get(versions::get_versions))
         .route(
