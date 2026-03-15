@@ -81,9 +81,15 @@ impl FromStr for Digest {
     fn from_str(s: &str) -> StdResult<Self, Self::Err> {
         let str = String::from(s);
         if !s.contains(':') {
+            // Detect algorithm from hash length for bare hex strings
+            let algorithm = match s.len() {
+                64 => DigestAlgorithm::SHA256,
+                128 => DigestAlgorithm::SHA512,
+                _ => DigestAlgorithm::SHA1, // 40 chars or other lengths default to SHA1
+            };
             return Ok(Digest {
                 hash: String::from(s),
-                algorithm: DigestAlgorithm::SHA1,
+                algorithm,
                 source: DigestSource::PrimaryPayloadHash,
             });
         }

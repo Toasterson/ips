@@ -228,25 +228,6 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
             .map(|file| {
                 let payload = file.payload.as_ref().unwrap();
 
-                // Collect candidate digests to try: raw primary hash first (works with
-                // REST servers that use SHA1), then formatted digests with algorithm info
-                // (works with FileBackend that may store under compressed hash)
-                let mut digests = vec![payload.primary_identifier.hash.clone()];
-                // Add formatted primary with algorithm info as second attempt
-                let formatted_primary = payload.primary_identifier.to_string();
-                if formatted_primary != payload.primary_identifier.hash {
-                    digests.push(formatted_primary);
-                }
-                for additional in &payload.additional_identifiers {
-                    if !additional.hash.is_empty() {
-                        digests.push(additional.hash.clone());
-                        let formatted = additional.to_string();
-                        if formatted != additional.hash {
-                            digests.push(formatted);
-                        }
-                    }
-                }
-
                 let digest = &payload.primary_identifier.hash;
                 let temp_file_path = temp_dir_path.join(digest);
 
@@ -256,23 +237,10 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
                     temp_file_path.display()
                 );
 
-                // Try each digest until one succeeds (primary hash may differ from storage hash)
-                let mut last_err = None;
-                for d in &digests {
-                    match self.source.fetch_payload(&publisher_str, d, &temp_file_path) {
-                        Ok(()) => {
-                            last_err = None;
-                            break;
-                        }
-                        Err(e) => {
-                            debug!("Failed to fetch payload with digest {}: {}", d, e);
-                            last_err = Some(e);
-                        }
-                    }
-                }
-                if let Some(e) = last_err {
-                    return Err(e);
-                }
+                // Fetch payload using the primary hash from the manifest.
+                // This is the hash the source repository knows the file by.
+                self.source
+                    .fetch_payload(&publisher_str, digest, &temp_file_path)?;
 
                 // Update progress atomically
                 let current_count = {
