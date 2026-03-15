@@ -372,7 +372,37 @@ pub async fn ui_package_detail(
     let fmri = Fmri::from_str(&decoded_fmri)
         .map_err(|e| DepotError::Repo(libips::repository::RepositoryError::Other(e.to_string())))?;
 
-    let content = repo.get_manifest_text(&publisher, &fmri)?;
+    // If get_manifest_text fails (e.g. name-only FMRI from a dependency link),
+    // try to find the latest version of this package and redirect
+    let content = match repo.get_manifest_text(&publisher, &fmri) {
+        Ok(c) => c,
+        Err(_) if fmri.version().is_empty() || !fmri.version().contains(':') => {
+            // Likely a partial/missing version — find latest from package list
+            let pkg_name = fmri.stem();
+            if let Ok(packages) = repo.list_packages(Some(&publisher), None) {
+                if let Some(latest) = packages
+                    .into_iter()
+                    .filter(|p| p.fmri.name == pkg_name)
+                    .max_by(|a, b| a.fmri.version().cmp(&b.fmri.version()))
+                {
+                    let version = latest.fmri.version();
+                    let path = format!("{}@{}", pkg_name, version);
+                    let redirect_url = format!(
+                        "/ui/package/{}/{}",
+                        publisher,
+                        encode_fmri(&path)
+                    );
+                    return Ok(axum::response::Redirect::to(&redirect_url).into_response());
+                }
+            }
+            return Err(DepotError::Repo(
+                libips::repository::RepositoryError::NotFound(
+                    format!("Package {} not found in {}", pkg_name, publisher),
+                ),
+            ));
+        }
+        Err(e) => return Err(e),
+    };
     let manifest = parse_manifest(&content)?;
 
     let name = fmri.stem().to_string();
@@ -411,11 +441,9 @@ pub async fn ui_package_detail(
             let link = if dep_fmri.publisher.is_none()
                 || dep_fmri.publisher.as_deref() == Some(&publisher)
             {
-                let dep_path = if dep_fmri.version().is_empty() {
-                    dep_fmri.stem().to_string()
-                } else {
-                    format!("{}@{}", dep_fmri.stem(), dep_fmri.version())
-                };
+                // Link to package name only — dependency versions are constraints,
+                // not exact versions, so they won't match a specific manifest
+                let dep_path = dep_fmri.stem().to_string();
                 Some(format!("/ui/package/{}/{}", publisher, encode_fmri(&dep_path)))
             } else {
                 None
