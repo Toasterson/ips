@@ -102,8 +102,8 @@ pub struct Transaction {
     path: PathBuf,
     /// Manifest being updated
     manifest: Manifest,
-    /// Files to be published
-    files: Vec<(PathBuf, String)>, // (source_path, sha256)
+    /// Files to be published: (source_path, compressed_hash, primary_hash)
+    files: Vec<(PathBuf, String, String)>,
     /// Repository reference
     repo: PathBuf,
     /// Publisher name
@@ -277,8 +277,9 @@ impl Transaction {
         };
 
         // Add a file to the list for later processing during commit
+        // Track both compressed hash (storage key) and primary hash (for compatibility lookups)
         self.files
-            .push((temp_file_path.clone(), compressed_hash.clone()));
+            .push((temp_file_path.clone(), compressed_hash.clone(), hash.clone()));
 
         // Set the primary identifier (uncompressed SHA256 hash)
         payload.primary_identifier = Digest {
@@ -392,9 +393,9 @@ impl Transaction {
         }
 
         // Move files to their final location (atomic rename, same filesystem)
-        for (source_path, hash) in self.files {
+        for (source_path, compressed_hash, primary_hash) in self.files {
             let dest_path =
-                FileBackend::construct_file_path_with_publisher(&self.repo, &publisher, &hash);
+                FileBackend::construct_file_path_with_publisher(&self.repo, &publisher, &compressed_hash);
 
             if let Some(parent) = dest_path.parent() {
                 fs::create_dir_all(parent).map_err(|e| RepositoryError::DirectoryCreateError {
@@ -406,9 +407,33 @@ impl Transaction {
             if !dest_path.exists() {
                 fs::rename(&source_path, &dest_path).map_err(|e| RepositoryError::FileRenameError {
                     from: source_path.clone(),
-                    to: dest_path,
+                    to: dest_path.clone(),
                     source: e,
                 })?;
+            }
+
+            // Create a hardlink from the primary (uncompressed) hash so clients
+            // that look up files by the manifest's primary hash can find them
+            if primary_hash != compressed_hash {
+                let primary_path =
+                    FileBackend::construct_file_path_with_publisher(&self.repo, &publisher, &primary_hash);
+                if !primary_path.exists() {
+                    if let Some(parent) = primary_path.parent() {
+                        fs::create_dir_all(parent).map_err(|e| RepositoryError::DirectoryCreateError {
+                            path: parent.to_path_buf(),
+                            source: e,
+                        })?;
+                    }
+                    if let Err(e) = fs::hard_link(&dest_path, &primary_path) {
+                        debug!("Failed to create hardlink from {} to {}: {}, falling back to copy",
+                            dest_path.display(), primary_path.display(), e);
+                        fs::copy(&dest_path, &primary_path).map_err(|e| RepositoryError::FileCopyError {
+                            from: dest_path.clone(),
+                            to: primary_path,
+                            source: e,
+                        })?;
+                    }
+                }
             }
         }
 
