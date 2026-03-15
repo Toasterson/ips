@@ -74,7 +74,6 @@ pub fn app_router(state: Arc<DepotRepo>) -> Router {
         .route("/ui/package/{publisher}/{*fmri}", get(ui::ui_package_detail))
         .route("/ui/p5i", get(ui::ui_p5i_generate))
         // Embedded static assets
-        .route("/ui/static/css/style.css", get(ui::static_css))
         .route("/ui/static/js/htmx.min.js", get(ui::static_htmx_js))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
