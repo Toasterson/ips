@@ -1467,36 +1467,29 @@ impl ObsoletedPackageManager {
         // Ensure the index is fresh
         if let Err(e) = self.ensure_index_is_fresh() {
             warn!("Failed to ensure index is fresh: {}", e);
-            // Fall back to the filesystem check if the index is not available
             return self.get_obsoleted_package_metadata_from_filesystem(publisher, fmri);
         }
 
-        // Check the index
+        // Check the index — scope the read lock so it's dropped before any fallback
         let key = ObsoletedPackageKey::new(publisher, fmri);
+        let index_result = {
+            let index = match self.index.read() {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!("Failed to acquire read lock on index: {}", e);
+                    return self.get_obsoleted_package_metadata_from_filesystem(publisher, fmri);
+                }
+            };
+            index.get_entry(&key)
+        }; // read lock dropped here
 
-        // Try to get a read lock on the index
-        let index_read_result = self.index.read();
-        if let Err(e) = index_read_result {
-            warn!("Failed to acquire read lock on index: {}", e);
-            // Fall back to the filesystem check if the index is not available
-            return self.get_obsoleted_package_metadata_from_filesystem(publisher, fmri);
-        }
-
-        let index = index_read_result.unwrap();
-
-        // Check if the package is in the index
-        match index.get_entry(&key) {
-            Ok(Some((metadata, _))) => {
-                // Return the metadata directly from the index
-                Ok(Some(metadata))
-            }
+        match index_result {
+            Ok(Some((metadata, _))) => Ok(Some(metadata)),
             Ok(None) => {
-                // Package not found in the index, fall back to the filesystem check
                 self.get_obsoleted_package_metadata_from_filesystem(publisher, fmri)
             }
             Err(e) => {
                 warn!("Failed to get entry from index: {}", e);
-                // Fall back to the filesystem to check if there's an error
                 self.get_obsoleted_package_metadata_from_filesystem(publisher, fmri)
             }
         }
@@ -1580,27 +1573,24 @@ impl ObsoletedPackageManager {
         // Ensure the index is fresh
         if let Err(e) = self.ensure_index_is_fresh() {
             warn!("Failed to ensure index is fresh: {}", e);
-            // Fall back to the filesystem check if the index is not available
             return self.get_obsoleted_package_manifest_from_filesystem(publisher, fmri);
         }
 
-        // Check the index
+        // Check the index — scope the read lock so it's dropped before any fallback
         let key = ObsoletedPackageKey::new(publisher, fmri);
+        let index_result = {
+            let index = match self.index.read() {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!("Failed to acquire read lock on index: {}", e);
+                    return self.get_obsoleted_package_manifest_from_filesystem(publisher, fmri);
+                }
+            };
+            index.get_entry(&key)
+        }; // read lock dropped here
 
-        // Try to get a read lock on the index
-        let index_read_result = self.index.read();
-        if let Err(e) = index_read_result {
-            warn!("Failed to acquire read lock on index: {}", e);
-            // Fall back to the filesystem check if the index is not available
-            return self.get_obsoleted_package_manifest_from_filesystem(publisher, fmri);
-        }
-
-        let index = index_read_result.unwrap();
-
-        // Check if the package is in the index
-        match index.get_entry(&key) {
+        match index_result {
             Ok(Some((metadata, manifest))) => {
-                // If the content hash is NULL_HASH, generate a minimal manifest
                 if metadata.content_hash == NULL_HASH {
                     debug!(
                         "Generating minimal manifest for obsoleted package with null hash: {}",
@@ -1608,17 +1598,13 @@ impl ObsoletedPackageManager {
                     );
                     return Ok(Some(self.generate_minimal_obsoleted_manifest(fmri)));
                 }
-
-                // Return the manifest content directly from the index
                 Ok(Some(manifest))
             }
             Ok(None) => {
-                // Package not found in the index, fall back to the filesystem check
                 self.get_obsoleted_package_manifest_from_filesystem(publisher, fmri)
             }
             Err(e) => {
                 warn!("Failed to get entry from index: {}", e);
-                // Fall back to the filesystem to check if there's an error
                 self.get_obsoleted_package_manifest_from_filesystem(publisher, fmri)
             }
         }
@@ -1860,46 +1846,38 @@ impl ObsoletedPackageManager {
             }
         }
 
-        // Remove the package from the index
+        // Remove the package from the index — scope the write lock to avoid deadlock
         let key = ObsoletedPackageKey::new(publisher, fmri);
-
-        // Try to get a write lock on the index
-        match self.index.write() {
-            Ok(index) => {
-                // Try to remove the entry from the index
-                match index.remove_entry(&key) {
-                    Ok(true) => {
-                        debug!("Removed package from index: {}", fmri);
-                    }
-                    Ok(false) => {
-                        debug!("Package not found in index: {}", fmri);
-                        // If the package is not in the index, we need to rebuild the index
-                        // This is a fallback in case the index is out of sync with the filesystem
-                        if let Err(e) = self.build_index() {
-                            warn!("Failed to rebuild index after package not found: {}", e);
+        let mut needs_rebuild = false;
+        {
+            match self.index.write() {
+                Ok(index) => {
+                    match index.remove_entry(&key) {
+                        Ok(true) => {
+                            debug!("Removed package from index: {}", fmri);
+                        }
+                        Ok(false) => {
+                            debug!("Package not found in index: {}", fmri);
+                            needs_rebuild = true;
+                        }
+                        Err(e) => {
+                            warn!("Failed to remove package from index: {}: {}", fmri, e);
+                            needs_rebuild = true;
                         }
                     }
-                    Err(e) => {
-                        warn!("Failed to remove package from index: {}: {}", fmri, e);
-                        // If there's an error removing the entry, rebuild the index
-                        if let Err(e) = self.build_index() {
-                            warn!("Failed to rebuild index after error: {}", e);
-                        }
-                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to acquire write lock on index, package not removed from index: {}: {}",
+                        fmri, e
+                    );
                 }
             }
-            Err(e) => {
-                warn!(
-                    "Failed to acquire write lock on index, package not removed from index: {}: {}",
-                    fmri, e
-                );
-                // If we can't get a write lock, mark the index as dirty so it will be rebuilt next time
-                if let Ok(index) = self.index.write() {
-                    // This is a new writing attempt, so it might succeed even if the previous one failed
-                    if let Err(e) = index.clear() {
-                        warn!("Failed to clear index: {}", e);
-                    }
-                }
+        } // write lock dropped here
+
+        if needs_rebuild {
+            if let Err(e) = self.build_index() {
+                warn!("Failed to rebuild index: {}", e);
             }
         }
 
@@ -2139,25 +2117,24 @@ impl ObsoletedPackageManager {
             return self.search_obsoleted_packages_fallback(publisher, pattern);
         }
 
-        // Try to get a read lock on the index
-        let index_read_result = self.index.read();
-        if let Err(e) = index_read_result {
-            warn!("Failed to acquire read lock on index: {}", e);
-            // Fall back to the filesystem-based search
-            return self.search_obsoleted_packages_fallback(publisher, pattern);
-        }
-
-        let index = index_read_result.unwrap();
-
-        // Get all entries from the index
-        let entries = match index.get_all_entries() {
-            Ok(entries) => entries,
-            Err(e) => {
-                warn!("Failed to get entries from index: {}", e);
-                // Fall back to the filesystem-based search
-                return self.search_obsoleted_packages_fallback(publisher, pattern);
+        // Get all entries from the index — scope the read lock
+        let entries = {
+            let index = match self.index.read() {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!("Failed to acquire read lock on index: {}", e);
+                    return self.search_obsoleted_packages_fallback(publisher, pattern);
+                }
+            };
+            match index.get_all_entries() {
+                Ok(entries) => entries,
+                Err(e) => {
+                    warn!("Failed to get entries from index: {}", e);
+                    drop(index); // ensure lock is dropped before fallback
+                    return self.search_obsoleted_packages_fallback(publisher, pattern);
+                }
             }
-        };
+        }; // read lock dropped here
 
         // Check if the pattern looks like a version number
         if pattern.chars().all(|c| c.is_digit(10) || c == '.') {
