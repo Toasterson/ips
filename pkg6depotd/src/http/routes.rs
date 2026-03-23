@@ -1,5 +1,7 @@
 use crate::http::admin;
-use crate::http::handlers::{catalog, file, info, manifest, publisher, search, shard, ui, versions};
+use crate::http::handlers::{
+    catalog, file, index, info, manifest, publisher, search, shard, ui, versions,
+};
 use crate::repo::DepotRepo;
 use axum::{
     Router,
@@ -63,6 +65,11 @@ pub fn app_router(state: Arc<DepotRepo>) -> Router {
         .route("/publisher/1/", get(publisher::get_default_publisher_v1))
         .route("/{publisher}/search/0/{token}", get(search::get_search_v0))
         .route("/{publisher}/search/1/{token}", get(search::get_search_v1))
+        .route("/{publisher}/search/1/", post(search::post_search_v1))
+        .route(
+            "/{publisher}/index/0/{command}",
+            get(index::get_index_v0),
+        )
         // Admin API over HTTP
         .route("/admin/health", get(admin::health))
         .route("/admin/auth/check", post(admin::auth_check))

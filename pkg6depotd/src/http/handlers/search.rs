@@ -2,28 +2,21 @@ use crate::errors::DepotError;
 use crate::repo::DepotRepo;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
+use libips::repository::IndexEntry;
 use std::sync::Arc;
 
 pub async fn get_search_v0(
     State(repo): State<Arc<DepotRepo>>,
     Path((publisher, token)): Path<(String, String)>,
 ) -> Result<Response, DepotError> {
-    // Decode the token (it might be URL encoded in the path, but axum usually decodes path params?
-    // Actually, axum decodes percent-encoded path segments automatically if typed as String?
-    // Let's assume yes or use it as is.
-    // However, typical search tokens might contain chars that need decoding.
-    // If standard axum decoding is not enough, we might need manual decoding.
-    // But let's start with standard.
-
-    // Call search
     let results = repo.search(Some(&publisher), &token, false)?;
 
-    // Format output: index action value package
+    // Format: {index_type} {fmri} {action_type} {value}
     let mut body = String::new();
     for entry in results {
         body.push_str(&format!(
             "{} {} {} {}\n",
-            entry.index_type, entry.action_type, entry.value, entry.fmri
+            entry.index_type, entry.fmri, entry.action_type, entry.value
         ));
     }
 
@@ -34,69 +27,87 @@ pub async fn get_search_v1(
     State(repo): State<Arc<DepotRepo>>,
     Path((publisher, token)): Path<(String, String)>,
 ) -> Result<Response, DepotError> {
+    search_v1_impl(&repo, &publisher, &token)
+}
+
+pub async fn post_search_v1(
+    State(repo): State<Arc<DepotRepo>>,
+    Path(publisher): Path<String>,
+    body: String,
+) -> Result<Response, DepotError> {
+    // The POST body contains the token directly
+    let token = body.trim();
+    search_v1_impl(&repo, &publisher, token)
+}
+
+fn search_v1_impl(
+    repo: &DepotRepo,
+    publisher: &str,
+    token: &str,
+) -> Result<Response, DepotError> {
     // Search v1 token format: "<case>_<rtype>_<trans>_<installroot>_<query>"
     // Example: "False_2_None_None_%3A%3A%3Apostgres" -> query ":::postgres"
-    let (prefix, query) = if let Some((p, q)) = split_v1_token(&token) {
+    let (prefix, query) = if let Some((p, q)) = split_v1_token(token) {
         (p, q)
     } else {
-        ("False_2_None_None", token.as_str())
+        ("False_2_None_None", token)
     };
 
     // Parse prefix fields
     let parts: Vec<&str> = prefix.split('_').collect();
-    let case_sensitive = parts.get(0).map(|s| *s == "True").unwrap_or(false);
-    let p1 = if case_sensitive { "1" } else { "0" }; // query number/flag
-    let p2 = parts.get(1).copied().unwrap_or("2"); // return type
+    let case_sensitive = parts.first().map(|s| *s == "True").unwrap_or(false);
+    let return_type = parts.get(1).copied().unwrap_or("2");
 
-    // Run search with provided publisher and query
-    let results = repo.search(Some(&publisher), query, case_sensitive)?;
+    // Run search
+    let results = repo.search(Some(publisher), query, case_sensitive)?;
 
     // No results -> 204 No Content per v1 spec
     if results.is_empty() {
         return Ok((axum::http::StatusCode::NO_CONTENT).into_response());
     }
 
-    // Format: "p1 p2 <fmri> <index_type> <action_type> <value> [k=v ...]"
-    let mut body = String::from("Return from search v1\n");
-    for entry in results {
-        let mut line = format!(
-            "{} {} {} {} {} {}",
-            p1, p2, entry.fmri, entry.index_type, entry.action_type, entry.value
-        );
-        // Attributes are already in a BTreeMap, so iteration order is stable
-        for (k, v) in &entry.attributes {
-            line.push_str(&format!(" {}={}", k, v));
-        }
-        line.push('\n');
-        body.push_str(&line);
-    }
-
+    let body = format_v1_results(&results, return_type);
     Ok(([(axum::http::header::CONTENT_TYPE, "text/plain")], body).into_response())
 }
 
-fn split_v1_token(token: &str) -> Option<(&str, &str)> {
-    // Try to find the 4th underscore
-    let mut parts = token.splitn(5, '_');
-    if let (Some(_), Some(_), Some(_), Some(_), Some(_)) = (
-        parts.next(),
-        parts.next(),
-        parts.next(),
-        parts.next(),
-        parts.next(),
-    ) {
-        // We found 4 parts and a remainder.
-        // We need to reconstruct where the split happened to return slices
-        // Actually, splitn(5) returns 5 parts. The last part is the remainder.
-        // But we want to be careful about the length of the prefix.
+/// Format v1 search results.
+///
+/// return_type "1" -> package-only: `{query_number} {return_type} {fmri}`
+/// return_type "2" (default) -> actions: `{query_number} {return_type} {fmri} {matched_value_urlencoded} {action_line}`
+fn format_v1_results(results: &[IndexEntry], return_type: &str) -> String {
+    let mut body = String::from("Return from search v1\n");
+    let query_number = 0;
 
-        // Let's iterate chars to find 4th underscore
-        let mut underscore_count = 0;
-        for (i, c) in token.chars().enumerate() {
-            if c == '_' {
-                underscore_count += 1;
-                if underscore_count == 4 {
-                    return Some((&token[..i], &token[i + 1..]));
+    for entry in results {
+        match return_type {
+            "1" => {
+                body.push_str(&format!("{} {} {}\n", query_number, return_type, entry.fmri));
+            }
+            _ => {
+                let matched_value = urlencoding::encode(&entry.value);
+                let mut action_line = entry.action_type.clone();
+                for (k, v) in &entry.attributes {
+                    action_line.push_str(&format!(" {}={}", k, v));
                 }
+                body.push_str(&format!(
+                    "{} {} {} {} {}\n",
+                    query_number, return_type, entry.fmri, matched_value, action_line
+                ));
+            }
+        }
+    }
+
+    body
+}
+
+fn split_v1_token(token: &str) -> Option<(&str, &str)> {
+    // Find the 4th underscore to split prefix from query
+    let mut underscore_count = 0;
+    for (i, c) in token.char_indices() {
+        if c == '_' {
+            underscore_count += 1;
+            if underscore_count == 4 {
+                return Some((&token[..i], &token[i + 1..]));
             }
         }
     }

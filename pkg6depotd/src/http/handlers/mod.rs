@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod file;
+pub mod index;
 pub mod info;
 pub mod manifest;
 pub mod publisher;

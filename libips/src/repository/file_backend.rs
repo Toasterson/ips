@@ -1624,19 +1624,13 @@ impl WritableRepository for FileBackend {
                     RepositoryError::Other(format!("Failed to build catalog shards: {}", e.message))
                 })?;
             }
-
-            if !no_index {
-                // FTS index is now built as part of catalog shards (fts.db)
-                // No separate index building needed
-                info!("Search index built as part of catalog shards (fts.db)");
-            }
         }
 
         Ok(())
     }
 
     /// Refresh repository metadata
-    fn refresh(&self, publisher: Option<&str>, no_catalog: bool, no_index: bool) -> Result<()> {
+    fn refresh(&self, publisher: Option<&str>, no_catalog: bool, _no_index: bool) -> Result<()> {
         // Filter publishers if specified
         let publishers = if let Some(pub_name) = publisher {
             if !self.config.publishers.contains(&pub_name.to_string()) {
@@ -1667,12 +1661,6 @@ impl WritableRepository for FileBackend {
                 .map_err(|e| {
                     RepositoryError::Other(format!("Failed to build catalog shards: {}", e.message))
                 })?;
-            }
-
-            if !no_index {
-                // FTS index is now built as part of catalog shards (fts.db)
-                // No separate index building needed
-                info!("Search index built as part of catalog shards (fts.db)");
             }
         }
 

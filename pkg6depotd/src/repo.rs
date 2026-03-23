@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::errors::{DepotError, Result};
 use libips::fmri::Fmri;
-use libips::repository::{FileBackend, IndexEntry, PackageInfo, ReadableRepository};
+use libips::repository::{FileBackend, IndexEntry, PackageInfo, ReadableRepository, WritableRepository};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -98,6 +98,16 @@ impl DepotRepo {
             return Some(alt2);
         }
         None
+    }
+
+    pub fn rebuild_index(&self, publisher: Option<&str>) -> Result<()> {
+        let backend = self
+            .backend
+            .lock()
+            .map_err(|e| DepotError::Server(format!("Lock poisoned: {}", e)))?;
+        backend
+            .rebuild(publisher, true, false)
+            .map_err(DepotError::Repo)
     }
 
     pub fn cache_max_age(&self) -> u64 {
