@@ -2,7 +2,7 @@ use clap::Parser;
 use libips::fmri::Fmri;
 use libips::recv::PackageReceiver;
 use libips::repository::{
-    FileBackend, ProgressInfo, ProgressReporter, ReadableRepository, RestBackend,
+    ArchiveBackend, FileBackend, ProgressInfo, ProgressReporter, ReadableRepository, RestBackend,
 };
 use miette::{IntoDiagnostic, Result};
 use std::path::PathBuf;
@@ -57,13 +57,24 @@ fn main() -> Result<()> {
 
     let progress = ConsoleProgressReporter;
 
-    // Determine if source is a URL or a path and receive packages
+    // Determine if source is a URL, archive, or path and receive packages
     if cli.source.starts_with("http://") || cli.source.starts_with("https://") {
         let source_repo = RestBackend::open(&cli.source).into_diagnostic()?;
         let dest_repo = FileBackend::open(&cli.dest).into_diagnostic()?;
-        
+
         let fmris = resolve_packages(&source_repo, cli.publisher.as_deref(), &cli.packages)?;
-        
+
+        let mut receiver = PackageReceiver::new(&source_repo, dest_repo);
+        receiver = receiver.with_progress(&progress);
+        receiver
+            .receive(cli.publisher.as_deref(), &fmris, cli.recursive)
+            .into_diagnostic()?;
+    } else if cli.source.ends_with(".p6p") {
+        let source_repo = ArchiveBackend::open(&cli.source).into_diagnostic()?;
+        let dest_repo = FileBackend::open(&cli.dest).into_diagnostic()?;
+
+        let fmris = resolve_packages(&source_repo, cli.publisher.as_deref(), &cli.packages)?;
+
         let mut receiver = PackageReceiver::new(&source_repo, dest_repo);
         receiver = receiver.with_progress(&progress);
         receiver
@@ -72,9 +83,9 @@ fn main() -> Result<()> {
     } else {
         let source_repo = FileBackend::open(&cli.source).into_diagnostic()?;
         let dest_repo = FileBackend::open(&cli.dest).into_diagnostic()?;
-        
+
         let fmris = resolve_packages(&source_repo, cli.publisher.as_deref(), &cli.packages)?;
-        
+
         let mut receiver = PackageReceiver::new(&source_repo, dest_repo);
         receiver = receiver.with_progress(&progress);
         receiver

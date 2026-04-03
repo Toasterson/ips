@@ -4,7 +4,10 @@ use error::{Pkg6RepoError, Result};
 use pkg5_import::Pkg5Importer;
 
 use clap::{Parser, Subcommand};
-use libips::repository::{FileBackend, ReadableRepository, RepositoryVersion, WritableRepository};
+use libips::repository::{
+    FileBackend, ProgressInfo, ProgressReporter, ReadableRepository, RepositoryVersion,
+    WritableRepository,
+};
 use serde::Serialize;
 use std::convert::TryFrom;
 use std::path::PathBuf;
@@ -320,6 +323,40 @@ enum Commands {
         query: String,
     },
 
+    /// Create a .p6p archive from a repository
+    Archive {
+        /// Path to the source repository
+        #[clap(short = 's', long)]
+        source: PathBuf,
+
+        /// Output archive path (.p6p)
+        #[clap(short = 'o', long)]
+        output: PathBuf,
+
+        /// Publisher to archive (defaults to all publishers)
+        #[clap(short = 'p', long)]
+        publisher: Option<String>,
+
+        /// Specific packages to include (FMRIs, defaults to all)
+        #[clap(long)]
+        packages: Option<Vec<String>>,
+    },
+
+    /// Import packages from a .p6p archive into a repository
+    ImportArchive {
+        /// Path to the .p6p archive
+        #[clap(short = 's', long)]
+        source: PathBuf,
+
+        /// Path to the destination repository
+        #[clap(short = 'd', long)]
+        destination: PathBuf,
+
+        /// Publisher to import (defaults to all publishers in the archive)
+        #[clap(short = 'p', long)]
+        publisher: Option<String>,
+    },
+
     /// Import a pkg5 repository
     ImportPkg5 {
         /// Path to the pkg5 repository (directory or p5p archive)
@@ -502,6 +539,20 @@ enum Commands {
         #[clap(short = 'n', long = "dry-run")]
         dry_run: bool,
     },
+}
+
+struct ImportProgressReporter;
+
+impl ProgressReporter for ImportProgressReporter {
+    fn start(&self, info: &ProgressInfo) {
+        info!("{}", info);
+    }
+    fn update(&self, info: &ProgressInfo) {
+        info!("{}", info);
+    }
+    fn finish(&self, info: &ProgressInfo) {
+        info!("DONE: {}", info.operation);
+    }
 }
 
 fn main() -> Result<()> {
@@ -1254,6 +1305,89 @@ fn main() -> Result<()> {
 
             Ok(())
         }
+        Commands::Archive {
+            source,
+            output,
+            publisher,
+            packages,
+        } => {
+            info!(
+                "Creating archive from {} to {}",
+                source.display(),
+                output.display()
+            );
+
+            let source_repo = FileBackend::open(&source)?;
+            let mut writer = libips::repository::ArchiveWriter::create(&output)?;
+
+            let fmri_filter: Option<Vec<libips::fmri::Fmri>> = if let Some(pkg_strs) = packages {
+                let mut fmris = Vec::new();
+                for s in pkg_strs {
+                    let fmri = libips::fmri::Fmri::parse(s)
+                        .map_err(|e| Pkg6RepoError::Other(format!("invalid FMRI '{}': {}", s, e)))?;
+                    fmris.push(fmri);
+                }
+                Some(fmris)
+            } else {
+                None
+            };
+
+            let info = source_repo.get_info()?;
+            let publishers_to_archive: Vec<String> = if let Some(pub_name) = publisher {
+                vec![pub_name.clone()]
+            } else {
+                info.publishers.iter().map(|p| p.name.clone()).collect()
+            };
+
+            for pub_name in &publishers_to_archive {
+                writer.add_from_repository(
+                    &source_repo,
+                    pub_name,
+                    fmri_filter.as_deref(),
+                )?;
+            }
+
+            writer.finish()?;
+
+            info!("Archive created successfully at {}", output.display());
+            Ok(())
+        }
+
+        Commands::ImportArchive {
+            source,
+            destination,
+            publisher,
+        } => {
+            info!(
+                "Importing archive from {} to {}",
+                source.display(),
+                destination.display()
+            );
+
+            let source_repo = libips::repository::ArchiveBackend::open(&source)?;
+            let dest_repo = FileBackend::open(&destination)?;
+
+            let progress = ImportProgressReporter;
+            let mut receiver = libips::recv::PackageReceiver::new(&source_repo, dest_repo);
+            receiver = receiver.with_progress(&progress);
+
+            let source_info = source_repo.get_info()?;
+            let publishers_to_import: Vec<String> = if let Some(pub_name) = publisher {
+                vec![pub_name.clone()]
+            } else {
+                source_info.publishers.iter().map(|p| p.name.clone()).collect()
+            };
+
+            for pub_name in &publishers_to_import {
+                let packages = source_repo.list_packages(Some(pub_name), None)?;
+                let fmris: Vec<libips::fmri::Fmri> = packages.into_iter().map(|p| p.fmri).collect();
+                receiver.receive(Some(pub_name), &fmris, false)?;
+            }
+
+            info!("Archive imported successfully");
+            Ok(())
+        }
+
         Commands::ImportPkg5 {
             source,
             destination,

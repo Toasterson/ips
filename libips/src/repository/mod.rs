@@ -215,6 +215,13 @@ pub enum RepositoryError {
         help("Check that the path is valid and within the expected directory")
     )]
     PathPrefixError(String),
+
+    #[error("archive error: {0}")]
+    #[diagnostic(
+        code(ips::repository_error::archive_error),
+        help("Check that the archive is valid and accessible")
+    )]
+    ArchiveError(String),
 }
 
 // Implement From for common error types
@@ -243,6 +250,14 @@ impl From<rusqlite::Error> for RepositoryError {
     }
 }
 
+impl From<zip::result::ZipError> for RepositoryError {
+    fn from(err: zip::result::ZipError) -> Self {
+        RepositoryError::ArchiveError(err.to_string())
+    }
+}
+
+pub mod archive_backend;
+pub mod archive_writer;
 pub mod catalog;
 mod catalog_writer;
 pub(crate) mod file_backend;
@@ -252,6 +267,8 @@ mod rest_backend;
 pub mod shard_sync;
 pub mod sqlite_catalog;
 #[cfg(test)]
+mod archive_tests;
+#[cfg(test)]
 mod tests;
 
 use crate::actions::ActionError;
@@ -259,6 +276,8 @@ use crate::digest::DigestError;
 pub use catalog::{
     CatalogAttrs, CatalogError, CatalogManager, CatalogOperationType, CatalogPart, UpdateLog,
 };
+pub use archive_backend::ArchiveBackend;
+pub use archive_writer::ArchiveWriter;
 pub use file_backend::{FileBackend, IndexEntry};
 pub use obsoleted::{ObsoletedPackageManager, ObsoletedPackageMetadata};
 pub use progress::{NoopProgressReporter, ProgressInfo, ProgressReporter};

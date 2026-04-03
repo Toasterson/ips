@@ -2625,7 +2625,7 @@ impl FileBackend {
     }
 
     /// URL encode a string for use in a filename
-    fn url_encode(s: &str) -> String {
+    pub(crate) fn url_encode(s: &str) -> String {
         let mut result = String::new();
         for c in s.chars() {
             match c {
