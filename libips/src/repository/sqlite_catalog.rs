@@ -193,6 +193,10 @@ pub fn build_shards(
         .map_err(|e| ShardBuildError::new(format!("Failed to create catalog manager: {}", e)))?;
     let mut package_count = 0usize;
     let mut package_version_count = 0usize;
+    // Track which packages have been inserted into FTS to avoid duplicates.
+    // The catalog has multiple parts (base, dependency, summary) that each
+    // list the same packages — we only want one FTS entry per stem.
+    let mut fts_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Begin transactions for batch inserts
     let active_tx = active_conn.transaction()?;
@@ -332,28 +336,32 @@ pub fn build_shards(
                             }
                         }
 
-                        // Extract summary and description for FTS
-                        let summary = manifest
-                            .attributes
-                            .iter()
-                            .find(|a| a.key == "pkg.summary")
-                            .and_then(|a| a.values.first())
-                            .map(|s| s.as_str())
-                            .unwrap_or("");
-                        let description = manifest
-                            .attributes
-                            .iter()
-                            .find(|a| a.key == "pkg.description")
-                            .and_then(|a| a.values.first())
-                            .map(|s| s.as_str())
-                            .unwrap_or("");
+                        // Extract summary and description for FTS (deduplicate
+                        // across catalog parts — base, dependency, and summary
+                        // parts all list the same packages)
+                        if fts_seen.insert(pkg_name.clone()) {
+                            let summary = manifest
+                                .attributes
+                                .iter()
+                                .find(|a| a.key == "pkg.summary")
+                                .and_then(|a| a.values.first())
+                                .map(|s| s.as_str())
+                                .unwrap_or("");
+                            let description = manifest
+                                .attributes
+                                .iter()
+                                .find(|a| a.key == "pkg.description")
+                                .and_then(|a| a.values.first())
+                                .map(|s| s.as_str())
+                                .unwrap_or("");
 
-                        insert_fts.execute(rusqlite::params![
-                            pkg_name,
-                            publisher,
-                            summary,
-                            description
-                        ])?;
+                            insert_fts.execute(rusqlite::params![
+                                pkg_name,
+                                publisher,
+                                summary,
+                                description
+                            ])?;
+                        }
                     }
                 }
             }
