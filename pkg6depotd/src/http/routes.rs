@@ -66,6 +66,9 @@ pub fn app_router(state: Arc<DepotRepo>) -> Router {
         .route("/{publisher}/search/0/{token}", get(search::get_search_v0))
         .route("/{publisher}/search/1/{token}", get(search::get_search_v1))
         .route("/{publisher}/search/1/", post(search::post_search_v1))
+        .route("/search/0/{token}", get(search::get_default_search_v0))
+        .route("/search/1/{token}", get(search::get_default_search_v1))
+        .route("/search/1/", post(search::post_default_search_v1))
         .route(
             "/{publisher}/index/0/{command}",
             get(index::get_index_v0),

@@ -1334,10 +1334,28 @@ impl ReadableRepository for FileBackend {
             ));
         }
 
+        // Helper: try JSON manifest first (has correct SHA-256 hashes from add_file),
+        // then fall back to legacy text manifest.
+        let try_parse = |path: &Path| -> Option<Result<crate::actions::Manifest>> {
+            let json_path = PathBuf::from(format!("{}.json", path.display()));
+            if json_path.exists() {
+                return Some(
+                    crate::actions::Manifest::parse_file(&json_path)
+                        .map_err(RepositoryError::from),
+                );
+            }
+            if path.exists() {
+                return Some(
+                    crate::actions::Manifest::parse_file(path).map_err(RepositoryError::from),
+                );
+            }
+            None
+        };
+
         // Preferred path: publisher-scoped manifest path
         let path = Self::construct_manifest_path(&self.path, publisher, fmri.stem(), &version);
-        if path.exists() {
-            return crate::actions::Manifest::parse_file(&path).map_err(RepositoryError::from);
+        if let Some(result) = try_parse(&path) {
+            return result;
         }
 
         // Fallbacks: global pkg layout without publisher
@@ -1348,8 +1366,8 @@ impl ReadableRepository for FileBackend {
             .join("pkg")
             .join(&encoded_stem)
             .join(&encoded_version);
-        if alt1.exists() {
-            return crate::actions::Manifest::parse_file(&alt1).map_err(RepositoryError::from);
+        if let Some(result) = try_parse(&alt1) {
+            return result;
         }
 
         let alt2 = self
@@ -1359,8 +1377,8 @@ impl ReadableRepository for FileBackend {
             .join("pkg")
             .join(&encoded_stem)
             .join(&encoded_version);
-        if alt2.exists() {
-            return crate::actions::Manifest::parse_file(&alt2).map_err(RepositoryError::from);
+        if let Some(result) = try_parse(&alt2) {
+            return result;
         }
 
         Err(RepositoryError::NotFound(format!(

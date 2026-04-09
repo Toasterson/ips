@@ -560,15 +560,17 @@ async fn test_search_endpoint() {
     );
     assert!(body.contains("example"), "search v1 should find 'example' package");
 
-    // 4. Test search v0 - no results
+    // 4. Test search v0 - no results returns 204
     let resp = client
         .get(format!("{}/test/search/0/nonexistentpackage", base_url))
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success());
-    let body = resp.text().await.unwrap();
-    assert!(body.is_empty(), "search for nonexistent should return empty body");
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "search v0 with no results should return 204"
+    );
 
     // 5. Test search v1 - no results returns 204
     let resp = client
@@ -597,4 +599,86 @@ async fn test_search_endpoint() {
         body.contains("example"),
         "search by summary keyword should find the package"
     );
+
+    // 7. Test publisher-less search v0 (falls back to default publisher)
+    let resp = client
+        .get(format!("{}/search/0/example", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "publisher-less search v0 should succeed"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("example"),
+        "publisher-less search v0 should find 'example' package"
+    );
+
+    // 8. Test publisher-less search v1
+    let resp = client
+        .get(format!(
+            "{}/search/1/False_2_None_None_example",
+            base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "publisher-less search v1 should succeed"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("example"),
+        "publisher-less search v1 should find 'example' package"
+    );
+
+    // 9. Test POST search v1
+    let resp = client
+        .post(format!("{}/test/search/1/", base_url))
+        .body("False_2_None_None_example")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "POST search v1 should succeed"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("example"),
+        "POST search v1 should find 'example' package"
+    );
+
+    // 10. Test search v0 response format matches pkg5 spec
+    let resp = client
+        .get(format!("{}/test/search/0/example", base_url))
+        .send()
+        .await
+        .unwrap();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        content_type.contains("text/plain"),
+        "search v0 content-type should be text/plain, got: {}",
+        content_type
+    );
+    let body = resp.text().await.unwrap();
+    // Each line should have format: {index_type} {fmri} {action_type} {value}
+    for line in body.lines() {
+        let parts: Vec<&str> = line.splitn(4, ' ').collect();
+        assert_eq!(
+            parts.len(),
+            4,
+            "search v0 line should have 4 space-separated fields, got: '{}'",
+            line
+        );
+    }
 }

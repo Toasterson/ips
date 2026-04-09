@@ -194,8 +194,9 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
         let progress = self.progress.unwrap_or(&NoopProgressReporter);
 
         let manifest_text = self.source.fetch_manifest_text(publisher, fmri)?;
-        let manifest =
-            Manifest::parse_string(manifest_text.clone()).map_err(RepositoryError::from)?;
+        // Use fetch_manifest which prefers JSON (has correct SHA-256 hashes
+        // from add_file) over legacy text (which may have SHA1 hashes)
+        let manifest = self.source.fetch_manifest(publisher, fmri)?;
 
         // Ensure publisher exists in destination
         let dest_info = self.dest.get_info()?;

@@ -117,10 +117,13 @@ impl ArchiveWriter {
     ) -> Result<()> {
         info!("Adding package {} from publisher {}", fmri, publisher);
 
-        // Fetch the manifest text (legacy IPS format)
+        // Fetch the manifest text (legacy IPS format) for archival
         let manifest_text = source.fetch_manifest_text(publisher, fmri)?;
-        let manifest = crate::actions::Manifest::parse_string(manifest_text.clone())
-            .map_err(RepositoryError::from)?;
+
+        // Fetch the parsed manifest (prefers JSON which has correct SHA-256 hashes
+        // from add_file, falling back to text parsing). pkg5-imported repos store
+        // files under SHA-256 hashes but legacy manifests reference SHA1 hashes.
+        let manifest = source.fetch_manifest(publisher, fmri)?;
 
         let version_str = fmri.version();
         let encoded_stem = FileBackend::url_encode(&fmri.name);

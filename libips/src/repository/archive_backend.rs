@@ -252,6 +252,28 @@ impl ReadableRepository for ArchiveBackend {
     }
 
     fn fetch_manifest(&self, publisher: &str, fmri: &Fmri) -> Result<Manifest> {
+        let version_str = fmri.version();
+        let base_path = Self::manifest_path(publisher, &fmri.name, &version_str);
+        let json_path = format!("{}.json", base_path);
+
+        // Prefer the JSON manifest (has correct SHA-256 hashes from add_file)
+        {
+            let mut archive = self
+                .archive
+                .lock()
+                .map_err(|e| RepositoryError::Other(format!("archive lock poisoned: {}", e)))?;
+
+            if let Ok(mut entry) = archive.by_name(&json_path) {
+                let mut buf = String::new();
+                entry
+                    .read_to_string(&mut buf)
+                    .map_err(|e| RepositoryError::ArchiveError(format!("failed to read json manifest: {}", e)))?;
+                return serde_json::from_str(&buf)
+                    .map_err(|e| RepositoryError::ArchiveError(format!("invalid json manifest: {}", e)));
+            }
+        }
+
+        // Fall back to legacy text manifest
         let text = self.fetch_manifest_text(publisher, fmri)?;
         Manifest::parse_string(text).map_err(RepositoryError::from)
     }

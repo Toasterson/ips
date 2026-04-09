@@ -9,7 +9,27 @@ pub async fn get_search_v0(
     State(repo): State<Arc<DepotRepo>>,
     Path((publisher, token)): Path<(String, String)>,
 ) -> Result<Response, DepotError> {
-    let results = repo.search(Some(&publisher), &token, false)?;
+    search_v0_impl(&repo, Some(&publisher), &token)
+}
+
+pub async fn get_default_search_v0(
+    State(repo): State<Arc<DepotRepo>>,
+    Path(token): Path<String>,
+) -> Result<Response, DepotError> {
+    search_v0_impl(&repo, None, &token)
+}
+
+fn search_v0_impl(
+    repo: &DepotRepo,
+    publisher: Option<&str>,
+    token: &str,
+) -> Result<Response, DepotError> {
+    let results = repo.search(publisher, token, false)?;
+
+    // No results -> 204 No Content per pkg5 spec
+    if results.is_empty() {
+        return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
+    }
 
     // Format: {index_type} {fmri} {action_type} {value}
     let mut body = String::new();
@@ -27,7 +47,14 @@ pub async fn get_search_v1(
     State(repo): State<Arc<DepotRepo>>,
     Path((publisher, token)): Path<(String, String)>,
 ) -> Result<Response, DepotError> {
-    search_v1_impl(&repo, &publisher, &token)
+    search_v1_impl(&repo, Some(&publisher), &token)
+}
+
+pub async fn get_default_search_v1(
+    State(repo): State<Arc<DepotRepo>>,
+    Path(token): Path<String>,
+) -> Result<Response, DepotError> {
+    search_v1_impl(&repo, None, &token)
 }
 
 pub async fn post_search_v1(
@@ -37,12 +64,20 @@ pub async fn post_search_v1(
 ) -> Result<Response, DepotError> {
     // The POST body contains the token directly
     let token = body.trim();
-    search_v1_impl(&repo, &publisher, token)
+    search_v1_impl(&repo, Some(&publisher), token)
+}
+
+pub async fn post_default_search_v1(
+    State(repo): State<Arc<DepotRepo>>,
+    body: String,
+) -> Result<Response, DepotError> {
+    let token = body.trim();
+    search_v1_impl(&repo, None, token)
 }
 
 fn search_v1_impl(
     repo: &DepotRepo,
-    publisher: &str,
+    publisher: Option<&str>,
     token: &str,
 ) -> Result<Response, DepotError> {
     // Search v1 token format: "<case>_<rtype>_<trans>_<installroot>_<query>"
@@ -59,7 +94,7 @@ fn search_v1_impl(
     let return_type = parts.get(1).copied().unwrap_or("2");
 
     // Run search
-    let results = repo.search(Some(publisher), query, case_sensitive)?;
+    let results = repo.search(publisher, query, case_sensitive)?;
 
     // No results -> 204 No Content per v1 spec
     if results.is_empty() {
