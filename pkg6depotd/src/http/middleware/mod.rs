@@ -1,1 +1,3 @@
-// Placeholder for middleware
+pub mod auth;
+
+pub use auth::{require_auth, AuthState, AuthenticatedUser, AuthError};

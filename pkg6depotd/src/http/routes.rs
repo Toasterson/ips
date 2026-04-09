@@ -2,9 +2,10 @@ use crate::http::admin;
 use crate::http::handlers::{
     catalog, file, index, info, manifest, publisher, search, shard, ui, versions,
 };
+use crate::http::middleware::AuthState;
 use crate::repo::DepotRepo;
 use axum::{
-    Router,
+    Extension, Router,
     response::Redirect,
     routing::{get, post},
 };
@@ -12,6 +13,21 @@ use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
 pub fn app_router(state: Arc<DepotRepo>) -> Router {
+    app_router_with_auth(state, None)
+}
+
+pub fn app_router_with_auth(state: Arc<DepotRepo>, auth: Option<Arc<AuthState>>) -> Router {
+    let router = base_router(state);
+
+    // If auth is configured, add it as an extension so handlers can access it
+    if let Some(auth_state) = auth {
+        router.layer(Extension(auth_state))
+    } else {
+        router
+    }
+}
+
+fn base_router(state: Arc<DepotRepo>) -> Router {
     Router::new()
         .route("/", get(|| async { Redirect::permanent("/ui/") }))
         .route("/versions/0", get(versions::get_versions))

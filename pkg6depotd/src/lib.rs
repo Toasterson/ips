@@ -56,7 +56,12 @@ pub async fn run() -> Result<()> {
                 daemon::daemonize().map_err(|e| miette::miette!(e))?;
             }
 
-            let router = http::routes::app_router(state);
+            // Initialize OIDC auth if configured
+            let auth_state = http::middleware::AuthState::from_config(&config.oauth2)
+                .await
+                .map(Arc::new);
+
+            let router = http::routes::app_router_with_auth(state, auth_state);
             let bind_str = config
                 .server
                 .bind

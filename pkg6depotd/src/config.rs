@@ -76,6 +76,8 @@ pub struct Oauth2Config {
     pub issuer: Option<String>,
     #[knuffel(child, unwrap(argument))]
     pub jwks_uri: Option<String>,
+    #[knuffel(child, unwrap(argument))]
+    pub audience: Option<String>,
     #[knuffel(child, unwrap(arguments))]
     pub required_scopes: Option<Vec<String>>,
 }
