@@ -68,10 +68,12 @@ WHITESPACE = _{ "\\" ~ NEWLINE | " " | "\t" }
 transform_action = @{ transform_character*}
 transform = {"<transform " ~ action_name ~ property+ ~ "->" ~ transform_action ~ ">" }
 
-// `:` is allowed so pkg5 locale-tagged keys like `info.file.font.name:en` parse.
-// `@` covers locale variants such as `facet.locale.sr@latin`.
-// `+` covers C library locales such as `facet.locale.en_US.UTF-8+collation`.
-property_name = @{ ( ASCII_ALPHANUMERIC | "." | "_" | "-" | "/" | ":" | "@" | "+" )+ }
+// pkg5 places no real constraints on the property-name charset beyond the
+// `key=value` syntax and the action's own line-and-whitespace framing, so
+// rather than chasing exotic facets/locales (`:en`, `@latin`, `+collation`,
+// etc.) one char-class extension at a time, accept anything that isn't `=`,
+// whitespace, or a line break.
+property_name = @{ ( !("=" | " " | "\t" | NEWLINE) ~ ANY )+ }
 property_value = @{ quoted_string | unicode_character+ }
 payload = @{ property_value }
 property = { property_name ~ "=" ~  property_value }
