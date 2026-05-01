@@ -35,6 +35,17 @@ pub enum Pkg6RepoError {
     )]
     IoError(#[from] std::io::Error),
 
+    #[error("I/O error at {path}: {source}")]
+    #[diagnostic(
+        code(pkg6repo::io_error_at),
+        help("Check that the path is accessible, has the right permissions, and the underlying filesystem has enough space")
+    )]
+    IoErrorAt {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("JSON error: {0}")]
     #[diagnostic(
         code(pkg6repo::json_error),
@@ -79,5 +90,21 @@ impl From<&str> for Pkg6RepoError {
 impl From<FmriError> for Pkg6RepoError {
     fn from(err: FmriError) -> Self {
         Pkg6RepoError::Other(format!("FMRI error: {}", err))
+    }
+}
+
+/// Add path context to a `std::io::Result`, producing a `Pkg6RepoError::IoErrorAt`
+/// that names the offending path. Use on every fs/io call where the path is known
+/// so import failures point straight at the bad file rather than just "ENOSPC".
+pub trait IoResultExt<T> {
+    fn with_path<P: Into<std::path::PathBuf>>(self, path: P) -> Result<T>;
+}
+
+impl<T> IoResultExt<T> for std::io::Result<T> {
+    fn with_path<P: Into<std::path::PathBuf>>(self, path: P) -> Result<T> {
+        self.map_err(|source| Pkg6RepoError::IoErrorAt {
+            path: path.into(),
+            source,
+        })
     }
 }

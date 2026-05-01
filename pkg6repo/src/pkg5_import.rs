@@ -1,4 +1,4 @@
-use crate::error::{Pkg6RepoError, Result};
+use crate::error::{IoResultExt, Pkg6RepoError, Result};
 use libips::actions::Manifest;
 use libips::fmri::Fmri;
 use libips::repository::{FileBackend, ReadableRepository, WritableRepository};
@@ -262,8 +262,8 @@ impl Pkg5Importer {
 
         let mut publishers = Vec::new();
 
-        for entry in fs::read_dir(&publisher_dir).map_err(|e| Pkg6RepoError::IoError(e))? {
-            let entry = entry.map_err(|e| Pkg6RepoError::IoError(e))?;
+        for entry in fs::read_dir(&publisher_dir).with_path(&publisher_dir)? {
+            let entry = entry.with_path(&publisher_dir)?;
 
             let path = entry.path();
 
@@ -315,8 +315,8 @@ impl Pkg5Importer {
         let mut regular_package_count = 0;
         let mut obsoleted_package_count = 0;
 
-        for pkg_entry in fs::read_dir(&pkg_dir).map_err(|e| Pkg6RepoError::IoError(e))? {
-            let pkg_entry = pkg_entry.map_err(|e| Pkg6RepoError::IoError(e))?;
+        for pkg_entry in fs::read_dir(&pkg_dir).with_path(&pkg_dir)? {
+            let pkg_entry = pkg_entry.with_path(&pkg_dir)?;
 
             let pkg_path = pkg_entry.path();
 
@@ -328,8 +328,8 @@ impl Pkg5Importer {
                 debug!("Processing package: {}", decoded_pkg_name);
 
                 // Find package versions
-                for ver_entry in fs::read_dir(&pkg_path).map_err(|e| Pkg6RepoError::IoError(e))? {
-                    let ver_entry = ver_entry.map_err(|e| Pkg6RepoError::IoError(e))?;
+                for ver_entry in fs::read_dir(&pkg_path).with_path(&pkg_path)? {
+                    let ver_entry = ver_entry.with_path(&pkg_path)?;
 
                     let ver_path = ver_entry.path();
 
@@ -393,10 +393,7 @@ impl Pkg5Importer {
             "Reading manifest file content from {}",
             manifest_path.display()
         );
-        let manifest_content = fs::read_to_string(manifest_path).map_err(|e| {
-            debug!("Error reading manifest file: {}", e);
-            Pkg6RepoError::IoError(e)
-        })?;
+        let manifest_content = fs::read_to_string(manifest_path).with_path(manifest_path)?;
 
         // Parse the manifest using parse_string
         debug!("Parsing manifest content");
@@ -465,7 +462,15 @@ impl Pkg5Importer {
         }
 
         // For non-obsoleted packages, proceed with normal import
-        debug!("Processing regular (non-obsoleted) package");
+        if !fmri_str.is_empty() {
+            info!("Importing package: {}", fmri_str);
+        } else {
+            info!(
+                "Importing package: {} (manifest at {}, no pkg.fmri)",
+                pkg_name,
+                manifest_path.display()
+            );
+        }
 
         // Begin a transaction
         debug!("Beginning transaction");
@@ -530,36 +535,33 @@ impl Pkg5Importer {
 
                 // Create parent directories if they don't exist
                 if let Some(parent) = proto_file_path.parent() {
-                    fs::create_dir_all(parent).map_err(|e| Pkg6RepoError::IoError(e))?;
+                    fs::create_dir_all(parent).with_path(parent)?;
                 }
 
                 // Extract the gzipped file
-                let mut source_file =
-                    File::open(&file_path).map_err(|e| Pkg6RepoError::IoError(e))?;
+                let mut source_file = File::open(&file_path).with_path(&file_path)?;
 
                 let mut dest_file =
-                    File::create(&proto_file_path).map_err(|e| Pkg6RepoError::IoError(e))?;
+                    File::create(&proto_file_path).with_path(&proto_file_path)?;
 
                 // Check if the file is gzipped
                 let mut header = [0; 2];
-                source_file
-                    .read_exact(&mut header)
-                    .map_err(|e| Pkg6RepoError::IoError(e))?;
+                source_file.read_exact(&mut header).with_path(&file_path)?;
 
                 // Reset file position
                 source_file
                     .seek(std::io::SeekFrom::Start(0))
-                    .map_err(|e| Pkg6RepoError::IoError(e))?;
+                    .with_path(&file_path)?;
 
                 if header[0] == 0x1f && header[1] == 0x8b {
                     // File is gzipped, decompress it
                     let mut decoder = flate2::read::GzDecoder::new(source_file);
                     std::io::copy(&mut decoder, &mut dest_file)
-                        .map_err(|e| Pkg6RepoError::IoError(e))?;
+                        .with_path(&proto_file_path)?;
                 } else {
                     // File is not gzipped, copy it as is
                     std::io::copy(&mut source_file, &mut dest_file)
-                        .map_err(|e| Pkg6RepoError::IoError(e))?;
+                        .with_path(&proto_file_path)?;
                 }
 
                 // Add the file to the transaction
@@ -595,10 +597,10 @@ impl Pkg5Importer {
             // Use a unique name for the signature file in the proto dir
             let proto_sig_path = proto_dir.join(format!("signature-{}", hash));
             if let Some(parent) = proto_sig_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| Pkg6RepoError::IoError(e))?;
+                fs::create_dir_all(parent).with_path(parent)?;
             }
 
-            fs::copy(&file_path, &proto_sig_path).map_err(|e| Pkg6RepoError::IoError(e))?;
+            fs::copy(&file_path, &proto_sig_path).with_path(&proto_sig_path)?;
 
             // We need a FileAction to add it to the transaction
             // Even though it's a signature, FileBackend uses add_file to store payloads
