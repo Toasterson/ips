@@ -5,7 +5,7 @@ use libips::repository::{FileBackend, ReadableRepository, WritableRepository};
 use std::fs::{self, File};
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
-use tempfile::tempdir;
+use tempfile::{tempdir, tempdir_in};
 use tracing::{debug, info, warn};
 
 /// Represents a pkg5 repository importer
@@ -58,8 +58,17 @@ impl Pkg5Importer {
     /// Prepares the source repository for import
     fn prepare_source(&mut self) -> Result<PathBuf> {
         if self.is_p5p {
-            // Create a temporary directory for extraction
-            let temp_dir = tempdir().map_err(|e| {
+            // Create a temporary directory for extraction. Place it on the
+            // destination repo's dataset rather than the system tmp dir
+            // (illumos /tmp is swap-backed; archive contents can be huge).
+            // Falls back to the system temp dir if the destination doesn't
+            // exist yet — caller will create it shortly.
+            let temp_dir = if self.dest_path.exists() {
+                tempdir_in(&self.dest_path)
+            } else {
+                tempdir()
+            }
+            .map_err(|e| {
                 Pkg6RepoError::from(format!("Failed to create temporary directory: {}", e))
             })?;
 
@@ -285,10 +294,14 @@ impl Pkg5Importer {
             )));
         }
 
-        // Create a temporary directory for extracted files
-        let temp_proto_dir = tempdir().map_err(|e| {
+        // Create a temporary directory for extracted files. Place it on the
+        // destination repo's dataset rather than the system tmp dir — on
+        // illumos the latter is swap-backed tmpfs, so a multi-gigabyte import
+        // would otherwise exhaust swap (ENOSPC) long before disk fills up.
+        let temp_proto_dir = tempdir_in(&dest_repo.path).map_err(|e| {
             Pkg6RepoError::from(format!(
-                "Failed to create temporary prototype directory: {}",
+                "Failed to create temporary prototype directory in {}: {}",
+                dest_repo.path.display(),
                 e
             ))
         })?;
