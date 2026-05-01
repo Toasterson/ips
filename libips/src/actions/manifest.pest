@@ -16,15 +16,31 @@ action_group = @{"group"}
 action_user = @{"user"}
 action_legacy = @{"legacy"}
 action_name = @{ ASCII_ALPHA+ }
-quoted_string = @{
+quoted_string = @{ double_quoted_string | single_quoted_string }
+
+double_quoted_string = @{
     "\""
-    ~ quoted_character*
+    ~ dq_character*
     ~ "\""
 }
 
-quoted_character = {
-    !"\""        // if the following text is not three apostrophes
-    ~ ANY         // then consume one character
+single_quoted_string = @{
+    "'"
+    ~ sq_character*
+    ~ "'"
+}
+
+// Inside "..." — allow \" and \\ escapes; otherwise any char that isn't an unescaped ".
+dq_character = {
+    "\\" ~ ANY
+    | (!"\"" ~ ANY)
+}
+
+// Inside '...' — allow \' and \\ escapes; otherwise any char that isn't an unescaped '.
+// pkg5 also emits \" inside single-quoted values; \\ ~ ANY covers that harmlessly.
+sq_character = {
+    "\\" ~ ANY
+    | (!"'" ~ ANY)
 }
 
 COMMENT = _{

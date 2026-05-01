@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info};
-use crate::actions::{File as FileAction, Manifest};
+use crate::actions::{File as FileAction, Manifest, quote_action_value};
 use crate::digest::{Digest, DigestAlgorithm, DigestSource};
 use crate::fmri::Fmri;
 use crate::payload::{Payload, PayloadCompressionAlgorithm};
@@ -2173,18 +2173,6 @@ impl FileBackend {
         opts: crate::repository::BatchOptions,
     ) -> Result<()> {
         info!("Rebuilding catalog (batched) for publisher: {}", publisher);
-
-        let quote_action_value = |s: &str| -> String {
-            if s.is_empty()
-                || s.contains(char::is_whitespace)
-                || s.contains('"')
-                || s.contains('\'')
-            {
-                format!("\"{}\"", s.replace("\"", "\\\""))
-            } else {
-                s.to_string()
-            }
-        };
 
         // Create the catalog directory for the publisher if it doesn't exist
         let catalog_dir = Self::construct_catalog_path(&self.path, publisher);

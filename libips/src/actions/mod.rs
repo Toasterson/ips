@@ -26,6 +26,57 @@ pub mod executors;
 
 type Result<T> = StdResult<T, ActionError>;
 
+/// Strip the surrounding `"…"` or `'…'` from a property value and decode
+/// the pkg5 escape syntax: backslash is the universal escape (`\\` → `\`,
+/// `\X` → `X` for any X). Values that are not quoted are returned unchanged.
+///
+/// Inverse of [`quote_action_value`]. The pair is round-trip safe for any
+/// byte sequence, including values containing literal `\` and either quote.
+pub fn unquote_action_value(s: &str) -> String {
+    let bytes = s.as_bytes();
+    if bytes.len() < 2 {
+        return s.to_string();
+    }
+    let first = bytes[0];
+    let last = bytes[bytes.len() - 1];
+    if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+        let inner = &s[1..s.len() - 1];
+        let mut out = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                } else {
+                    out.push('\\');
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    } else {
+        s.to_string()
+    }
+}
+
+/// Quote a property value for emission in mtree-format manifests.
+/// Escapes `\` as `\\` and `"` as `\"`, wrapping in `"…"` whenever the value
+/// is empty, contains whitespace, or contains either quote character.
+/// Inverse of [`unquote_action_value`].
+pub fn quote_action_value(s: &str) -> String {
+    let needs_quote = s.is_empty()
+        || s.chars().any(|c| c.is_whitespace())
+        || s.contains('"')
+        || s.contains('\'');
+    if needs_quote {
+        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{}\"", escaped)
+    } else {
+        s.to_string()
+    }
+}
+
 #[derive(Debug, Error, Diagnostic)]
 pub enum ActionError {
     #[error(transparent)]
@@ -209,7 +260,7 @@ impl From<Action> for File {
                 } else {
                     file.properties.push(Property {
                         key: "original-path".to_string(),
-                        value: act.payload_string.replace(['\"', '\\'], ""),
+                        value: unquote_action_value(&act.payload_string),
                     });
                 }
             } else {
@@ -984,10 +1035,8 @@ impl Manifest {
                                                         property.key = prop.as_str().to_owned();
                                                     }
                                                     Rule::property_value => {
-                                                        let str_val: String =
-                                                            prop.as_str().to_owned();
                                                         property.value =
-                                                            str_val.replace(['\"', '\\'], "");
+                                                            unquote_action_value(prop.as_str());
                                                     }
                                                     _ => panic!(
                                                         "unexpected rule {:?} inside action expected property_name or property_value",
@@ -1114,7 +1163,7 @@ fn split_property(property_string: String) -> (String, String) {
             let v: Vec<_> = property_string.split('=').collect();
             (
                 String::from(v[0]),
-                String::from(v[1]).replace(['\"', '\\'], ""),
+                unquote_action_value(v[1]),
             )
         }
         None => (property_string.clone(), String::new()),
