@@ -68,7 +68,8 @@ WHITESPACE = _{ "\\" ~ NEWLINE | " " | "\t" }
 transform_action = @{ transform_character*}
 transform = {"<transform " ~ action_name ~ property+ ~ "->" ~ transform_action ~ ">" }
 
-property_name = @{ ( ASCII_ALPHANUMERIC | "." | "_" | "-"  | "/" )+ }
+// `:` is allowed so pkg5 locale-tagged keys like `info.file.font.name:en` parse.
+property_name = @{ ( ASCII_ALPHANUMERIC | "." | "_" | "-" | "/" | ":" )+ }
 property_value = @{ quoted_string | unicode_character+ }
 payload = @{ property_value }
 property = { property_name ~ "=" ~  property_value }
