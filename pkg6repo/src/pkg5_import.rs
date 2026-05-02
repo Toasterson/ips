@@ -357,6 +357,16 @@ impl Pkg5Importer {
                         } else {
                             regular_package_count += 1;
                         }
+
+                        // Periodic INFO progress so a long import doesn't go
+                        // silent between rare regular-package log lines.
+                        let total = regular_package_count + obsoleted_package_count;
+                        if total % 1000 == 0 {
+                            info!(
+                                "Import progress: {} packages ({} regular, {} obsoleted)",
+                                total, regular_package_count, obsoleted_package_count
+                            );
+                        }
                     }
                 }
             }
@@ -457,15 +467,15 @@ impl Pkg5Importer {
                 false, // Don't store the original manifest, use null hash instead
             )?;
 
-            info!("Stored obsoleted package: {}", fmri);
+            debug!("Stored obsoleted package: {}", fmri);
             return Ok(true); // Return true to indicate this was an obsoleted package
         }
 
         // For non-obsoleted packages, proceed with normal import
         if !fmri_str.is_empty() {
-            info!("Importing package: {}", fmri_str);
+            debug!("Importing package: {}", fmri_str);
         } else {
-            info!(
+            debug!(
                 "Importing package: {} (manifest at {}, no pkg.fmri)",
                 pkg_name,
                 manifest_path.display()

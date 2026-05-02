@@ -2216,6 +2216,13 @@ impl FileBackend {
             let manifest_path =
                 Self::construct_manifest_path(&self.path, publisher, stem, &version);
 
+            tracing::trace!(
+                publisher,
+                fmri = %fmri,
+                manifest = %manifest_path.display(),
+                "catalog rebuild: processing package"
+            );
+
             // Check if the package directory exists
             if let Some(pkg_dir) = manifest_path.parent() {
                 if !pkg_dir.exists() {
@@ -2228,10 +2235,15 @@ impl FileBackend {
             }
 
             if !manifest_path.exists() {
+                tracing::trace!(
+                    fmri = %fmri,
+                    "catalog rebuild: manifest missing on disk, skipping"
+                );
                 continue;
             }
 
             // Read the manifest content for hash calculation
+            tracing::trace!(fmri = %fmri, "catalog rebuild: reading manifest");
             let manifest_content =
                 fs::read_to_string(&manifest_path).map_err(|e| RepositoryError::FileReadError {
                     path: manifest_path.clone(),
@@ -2239,6 +2251,7 @@ impl FileBackend {
                 })?;
 
             // Parse the manifest using parse_file which handles JSON correctly
+            tracing::trace!(fmri = %fmri, "catalog rebuild: parsing manifest");
             let manifest = Manifest::parse_file(&manifest_path)?;
 
             // Calculate SHA-1 hash of the manifest for legacy catalog signature compatibility
@@ -2249,6 +2262,13 @@ impl FileBackend {
 
             // Add to base entries
             base_entries.push((fmri.clone(), None, signature.clone()));
+
+            tracing::trace!(
+                fmri = %fmri,
+                deps = manifest.dependencies.len(),
+                attrs = manifest.attributes.len(),
+                "catalog rebuild: extracting catalog actions"
+            );
 
             // Extract dependency actions
             let mut dependency_actions = Vec::new();
@@ -2370,10 +2390,11 @@ impl FileBackend {
             processed_in_batch += 1;
             if processed_in_batch >= opts.batch_size {
                 batch_no += 1;
-                tracing::debug!(
+                info!(
                     publisher,
                     batch_no,
                     processed_in_batch,
+                    package_count,
                     "catalog rebuild batch processed"
                 );
                 processed_in_batch = 0;
