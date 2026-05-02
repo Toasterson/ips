@@ -1638,7 +1638,10 @@ impl WritableRepository for FileBackend {
 
             if !no_catalog {
                 info!("Rebuilding catalog...");
-                self.rebuild_catalog(&pub_name, true)?;
+                // A full catalog rebuild rewrites every entry from scratch, so
+                // an update log would just duplicate the catalog itself —
+                // update logs are reserved for the incremental-publish path.
+                self.rebuild_catalog(&pub_name, false)?;
 
                 // Build SQLite catalog shards (active.db, obsolete.db, fts.db)
                 info!("Building catalog shards...");
@@ -1676,7 +1679,10 @@ impl WritableRepository for FileBackend {
 
             if !no_catalog {
                 info!("Refreshing catalog...");
-                self.rebuild_catalog(&pub_name, true)?;
+                // Same as rebuild: refresh re-derives the entire catalog from
+                // on-disk manifests, so it's a full rewrite and shouldn't
+                // produce an update log.
+                self.rebuild_catalog(&pub_name, false)?;
 
                 // Build SQLite catalog shards (active.db, obsolete.db, fts.db)
                 info!("Building catalog shards...");

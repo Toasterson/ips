@@ -146,7 +146,7 @@ pub struct CatalogAttrs {
     pub parts: BTreeMap<String, CatalogPartInfo>,
 
     /// Available update logs
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub updates: BTreeMap<String, UpdateLogInfo>,
 
     /// Catalog version
