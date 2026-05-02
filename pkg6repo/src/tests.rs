@@ -4,95 +4,56 @@ mod tests {
         FileBackend, REPOSITORY_CONFIG_FILENAME, ReadableRepository, RepositoryVersion,
         WritableRepository,
     };
-    use std::fs;
-    use std::path::PathBuf;
+    use tempfile::TempDir;
 
-    // These tests interact with real repositories in a known location
-    // instead of using temporary directories. This allows for better
-    // debugging and inspection of the repositories during testing.
-
-    // The base directory for all test repositories
-    const TEST_REPO_BASE_DIR: &str = "/tmp/pkg6repo_test";
-
-    // Helper function to create a unique test directory
-    fn create_test_dir(test_name: &str) -> PathBuf {
-        let test_dir = PathBuf::from(format!("{}/{}", TEST_REPO_BASE_DIR, test_name));
-
-        // Clean up any existing directory
-        if test_dir.exists() {
-            fs::remove_dir_all(&test_dir).unwrap();
-        }
-
-        // Create the directory
-        fs::create_dir_all(&test_dir).unwrap();
-
-        test_dir
-    }
-
-    // Helper function to clean up test directory
-    fn cleanup_test_dir(test_dir: &PathBuf) {
-        if test_dir.exists() {
-            fs::remove_dir_all(test_dir).unwrap();
-        }
+    // Each test gets its own `TempDir` so tests can run in parallel under
+    // `cargo nextest run` without trampling each other's scratch state.
+    fn make_tempdir() -> TempDir {
+        tempfile::Builder::new()
+            .prefix("pkg6repo-test-")
+            .tempdir()
+            .expect("failed to create temp dir for test")
     }
 
     #[test]
     fn test_create_repository() {
-        // Create a real test directory
-        let test_dir = create_test_dir("create_repository");
-        let repo_path = test_dir.join("repo");
+        let test_dir = make_tempdir();
+        let repo_path = test_dir.path().join("repo");
 
-        // Create a repository
         let _ = FileBackend::create(&repo_path, RepositoryVersion::V4).unwrap();
 
-        // Check that the repository was created
         assert!(repo_path.exists());
         assert!(repo_path.join("publisher").exists());
         assert!(repo_path.join("index").exists());
         assert!(repo_path.join("trans").exists());
         assert!(repo_path.join(REPOSITORY_CONFIG_FILENAME).exists());
-
-        // Clean up
-        cleanup_test_dir(&test_dir);
     }
 
     #[test]
     fn test_add_publisher() {
-        // Create a real test directory
-        let test_dir = create_test_dir("add_publisher");
-        let repo_path = test_dir.join("repo");
+        let test_dir = make_tempdir();
+        let repo_path = test_dir.path().join("repo");
 
-        // Create a repository
         let mut repo = FileBackend::create(&repo_path, RepositoryVersion::V4).unwrap();
 
-        // Add a publisher
         repo.add_publisher("example.com").unwrap();
 
-        // Check that the publisher was added
         assert!(repo.config.publishers.contains(&"example.com".to_string()));
         assert!(FileBackend::construct_catalog_path(&repo_path, "example.com").exists());
         assert!(FileBackend::construct_package_dir(&repo_path, "example.com", "").exists());
-
-        // Clean up
-        cleanup_test_dir(&test_dir);
     }
 
     #[test]
     fn test_remove_publisher() {
-        // Create a real test directory
-        let test_dir = create_test_dir("remove_publisher");
-        let repo_path = test_dir.join("repo");
+        let test_dir = make_tempdir();
+        let repo_path = test_dir.path().join("repo");
 
-        // Create a repository
         let mut repo = FileBackend::create(&repo_path, RepositoryVersion::V4).unwrap();
 
-        // Add a publisher
         repo.add_publisher("example.com").unwrap();
 
-        // Check that the publisher was added
         assert!(repo.config.publishers.contains(&"example.com".to_string()));
 
-        // Check that the publisher directories were created
         let catalog_dir = FileBackend::construct_catalog_path(&repo_path, "example.com");
         let pkg_dir = FileBackend::construct_package_dir(&repo_path, "example.com", "");
         assert!(
@@ -104,13 +65,10 @@ mod tests {
             "Package directory should exist after adding publisher"
         );
 
-        // Remove the publisher
         repo.remove_publisher("example.com", false).unwrap();
 
-        // Check that the publisher was removed from the configuration
         assert!(!repo.config.publishers.contains(&"example.com".to_string()));
 
-        // Check that the publisher directories were removed
         assert!(
             !catalog_dir.exists(),
             "Catalog directory should not exist after removing publisher"
@@ -119,57 +77,39 @@ mod tests {
             !pkg_dir.exists(),
             "Package directory should not exist after removing publisher"
         );
-
-        // Clean up
-        cleanup_test_dir(&test_dir);
     }
 
     #[test]
     fn test_set_property() {
-        // Create a real test directory
-        let test_dir = create_test_dir("set_property");
-        let repo_path = test_dir.join("repo");
+        let test_dir = make_tempdir();
+        let repo_path = test_dir.path().join("repo");
 
-        // Create a repository
         let mut repo = FileBackend::create(&repo_path, RepositoryVersion::V4).unwrap();
 
-        // Set a property
         repo.set_property("publisher/prefix", "example.com")
             .unwrap();
 
-        // Check that the property was set
         assert_eq!(
             repo.config.properties.get("publisher/prefix").unwrap(),
             "example.com"
         );
-
-        // Clean up
-        cleanup_test_dir(&test_dir);
     }
 
     #[test]
     fn test_get_info() {
-        // Create a real test directory
-        let test_dir = create_test_dir("get_info");
-        let repo_path = test_dir.join("repo");
+        let test_dir = make_tempdir();
+        let repo_path = test_dir.path().join("repo");
 
-        // Create a repository
         let mut repo = FileBackend::create(&repo_path, RepositoryVersion::V4).unwrap();
 
-        // Add a publisher
         repo.add_publisher("example.com").unwrap();
 
-        // Get repository information
         let repo_info = repo.get_info().unwrap();
 
-        // Check that the information is correct
         assert_eq!(repo_info.publishers.len(), 1);
         let publisher_info = &repo_info.publishers[0];
         assert_eq!(publisher_info.name, "example.com");
-        assert_eq!(publisher_info.package_count, 0); // No packages yet
+        assert_eq!(publisher_info.package_count, 0);
         assert_eq!(publisher_info.status, "online");
-
-        // Clean up
-        cleanup_test_dir(&test_dir);
     }
 }
