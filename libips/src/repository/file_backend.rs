@@ -727,12 +727,23 @@ impl ReadableRepository for FileBackend {
                 }
 
                 // Recursively walk through the directory and collect package manifests
+                info!(
+                    "Listing packages for publisher {} (walking {})",
+                    pub_name,
+                    publisher_pkg_dir.display()
+                );
+                let before = packages.len();
                 self.find_manifests_recursive(
                     &publisher_pkg_dir,
                     &pub_name,
                     pattern.map(glob_to_regex).as_deref(),
                     &mut packages,
                 )?;
+                info!(
+                    "Listed {} packages for publisher {}",
+                    packages.len() - before,
+                    pub_name
+                );
             }
         }
 
@@ -1999,6 +2010,7 @@ impl FileBackend {
         pattern: Option<&str>,
         packages: &mut Vec<PackageInfo>,
     ) -> Result<()> {
+        tracing::trace!(dir = %dir.display(), "find_manifests_recursive: enter");
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -2007,6 +2019,7 @@ impl FileBackend {
                     // Recursively search subdirectories
                     self.find_manifests_recursive(&path, publisher, pattern, packages)?;
                 } else if path.is_file() {
+                    tracing::trace!(file = %path.display(), "find_manifests_recursive: examining file");
                     // Check if this is a .json file and if a corresponding file without .json exists
                     if let Some(extension) = path.extension() {
                         if extension == "json" {
@@ -2112,6 +2125,12 @@ impl FileBackend {
                                             if !is_obsoleted {
                                                 // Create a PackageInfo struct and add it to the list
                                                 packages.push(PackageInfo { fmri: final_fmri });
+                                                if packages.len() % 1000 == 0 {
+                                                    info!(
+                                                        "Listing progress: {} manifests parsed",
+                                                        packages.len()
+                                                    );
+                                                }
                                             }
 
                                             // Found the package info, no need to check other attributes
