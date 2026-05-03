@@ -216,151 +216,127 @@ pub fn build_shards(
             "INSERT INTO package_search (stem, publisher, summary, description) VALUES (?1, ?2, ?3, ?4)",
         )?;
 
-        // Iterate catalog parts
+        // Iterate catalog parts. Each part can contain millions of dependency
+        // action strings; loading the whole part into memory OOMs at ~4GB on
+        // large publishers. Instead, stream the JSON and emit SQL inserts per
+        // version entry, holding only one stem's versions at a time.
         let part_names: Vec<String> = catalog_manager.attrs().parts.keys().cloned().collect();
         for part_name in part_names {
             let part_path = catalog_parts_dir.join(&part_name);
 
-            // Load the CatalogPart
-            let part = crate::repository::catalog::CatalogPart::load(&part_path)
-                .map_err(|e| ShardBuildError::new(format!("Failed to load catalog part: {}", e)))?;
+            let mut on_entry =
+                |pkg_name: &str,
+                 version_entry: &crate::repository::catalog::PackageVersionEntry|
+                 -> std::result::Result<(), rusqlite::Error> {
+                    let pkg_version = &version_entry.version;
 
-            // Iterate through publishers in the catalog part
-            for (part_publisher, stems) in &part.packages {
-                // Only process packages for the requested publisher
-                if part_publisher != publisher {
-                    continue;
-                }
-
-                // Iterate through package stems
-                for (pkg_name, versions) in stems {
-                    // Iterate through versions
-                    for version_entry in versions {
-                        let pkg_version = &version_entry.version;
-
-                        // Build a minimal manifest from the actions
-                        let mut manifest = Manifest::new();
-
-                        // Parse actions if available
-                        if let Some(actions) = &version_entry.actions {
-                            for action_str in actions {
-                                if action_str.starts_with("set ") {
-                                    // Parse "set name=key value=val" format
-                                    let parts: Vec<&str> = action_str.split_whitespace().collect();
-                                    if parts.len() >= 3 {
-                                        if let Some(name_part) = parts.get(1) {
-                                            if let Some(key) = name_part.strip_prefix("name=") {
-                                                if let Some(value_part) = parts.get(2) {
-                                                    if let Some(mut value) =
-                                                        value_part.strip_prefix("value=")
-                                                    {
-                                                        // Remove quotes
-                                                        value = value.trim_matches('"');
-
-                                                        let mut attr =
-                                                            crate::actions::Attr::default();
-                                                        attr.key = key.to_string();
-                                                        attr.values = vec![value.to_string()];
-                                                        manifest.attributes.push(attr);
-                                                    }
+                    // Build a minimal manifest from the actions
+                    let mut manifest = Manifest::new();
+                    if let Some(actions) = &version_entry.actions {
+                        for action_str in actions {
+                            if action_str.starts_with("set ") {
+                                let parts: Vec<&str> = action_str.split_whitespace().collect();
+                                if parts.len() >= 3 {
+                                    if let Some(name_part) = parts.get(1) {
+                                        if let Some(key) = name_part.strip_prefix("name=") {
+                                            if let Some(value_part) = parts.get(2) {
+                                                if let Some(mut value) =
+                                                    value_part.strip_prefix("value=")
+                                                {
+                                                    value = value.trim_matches('"');
+                                                    let mut attr =
+                                                        crate::actions::Attr::default();
+                                                    attr.key = key.to_string();
+                                                    attr.values = vec![value.to_string()];
+                                                    manifest.attributes.push(attr);
                                                 }
                                             }
                                         }
                                     }
-                                } else if action_str.starts_with("depend ") {
-                                    // Parse "depend fmri=... type=..." format
-                                    let mut dep = crate::actions::Dependency::default();
-                                    for part in action_str.split_whitespace().skip(1) {
-                                        if let Some((k, v)) = part.split_once('=') {
-                                            match k {
-                                                "fmri" => {
-                                                    if let Ok(f) = crate::fmri::Fmri::parse(v) {
-                                                        dep.fmri = Some(f);
-                                                    }
+                                }
+                            } else if action_str.starts_with("depend ") {
+                                let mut dep = crate::actions::Dependency::default();
+                                for part in action_str.split_whitespace().skip(1) {
+                                    if let Some((k, v)) = part.split_once('=') {
+                                        match k {
+                                            "fmri" => {
+                                                if let Ok(f) = crate::fmri::Fmri::parse(v) {
+                                                    dep.fmri = Some(f);
                                                 }
-                                                "type" => {
-                                                    dep.dependency_type = v.to_string();
-                                                }
-                                                _ => {}
                                             }
+                                            "type" => {
+                                                dep.dependency_type = v.to_string();
+                                            }
+                                            _ => {}
                                         }
                                     }
-                                    if dep.fmri.is_some() && !dep.dependency_type.is_empty() {
-                                        manifest.dependencies.push(dep);
-                                    }
+                                }
+                                if dep.fmri.is_some() && !dep.dependency_type.is_empty() {
+                                    manifest.dependencies.push(dep);
                                 }
                             }
-                        }
-
-                        // Determine if obsolete
-                        let is_obsolete = crate::image::catalog::is_package_obsolete(&manifest);
-
-                        // Count all package versions
-                        package_version_count += 1;
-
-                        // Obsolete packages go only to obsolete.db, non-obsolete go to active.db
-                        if is_obsolete {
-                            insert_obs.execute(rusqlite::params![
-                                publisher,
-                                pkg_name,
-                                pkg_version
-                            ])?;
-                        } else {
-                            // Insert into packages table (active.db) and capture id
-                            let pkg_id: i64 = insert_pkg.query_row(
-                                rusqlite::params![pkg_name, pkg_version, publisher],
-                                |row| row.get(0),
-                            )?;
-
-                            // Extract and insert dependencies
-                            for dep in &manifest.dependencies {
-                                if dep.dependency_type == "require"
-                                    || dep.dependency_type == "incorporate"
-                                {
-                                    if let Some(dep_fmri) = &dep.fmri {
-                                        let dep_stem = dep_fmri.stem();
-                                        let dep_version =
-                                            dep_fmri.version.as_ref().map(|v| v.to_string());
-                                        insert_dep.execute(rusqlite::params![
-                                            pkg_id,
-                                            &dep.dependency_type,
-                                            dep_stem,
-                                            dep_version
-                                        ])?;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Extract summary and description for FTS (deduplicate
-                        // across catalog parts — base, dependency, and summary
-                        // parts all list the same packages)
-                        if fts_seen.insert(pkg_name.clone()) {
-                            let summary = manifest
-                                .attributes
-                                .iter()
-                                .find(|a| a.key == "pkg.summary")
-                                .and_then(|a| a.values.first())
-                                .map(|s| s.as_str())
-                                .unwrap_or("");
-                            let description = manifest
-                                .attributes
-                                .iter()
-                                .find(|a| a.key == "pkg.description")
-                                .and_then(|a| a.values.first())
-                                .map(|s| s.as_str())
-                                .unwrap_or("");
-
-                            insert_fts.execute(rusqlite::params![
-                                pkg_name,
-                                publisher,
-                                summary,
-                                description
-                            ])?;
                         }
                     }
-                }
-            }
+
+                    let is_obsolete = crate::image::catalog::is_package_obsolete(&manifest);
+                    package_version_count += 1;
+
+                    if is_obsolete {
+                        insert_obs.execute(rusqlite::params![
+                            publisher,
+                            pkg_name,
+                            pkg_version
+                        ])?;
+                    } else {
+                        let pkg_id: i64 = insert_pkg.query_row(
+                            rusqlite::params![pkg_name, pkg_version, publisher],
+                            |row| row.get(0),
+                        )?;
+                        for dep in &manifest.dependencies {
+                            if dep.dependency_type == "require"
+                                || dep.dependency_type == "incorporate"
+                            {
+                                if let Some(dep_fmri) = &dep.fmri {
+                                    let dep_stem = dep_fmri.stem();
+                                    let dep_version =
+                                        dep_fmri.version.as_ref().map(|v| v.to_string());
+                                    insert_dep.execute(rusqlite::params![
+                                        pkg_id,
+                                        &dep.dependency_type,
+                                        dep_stem,
+                                        dep_version
+                                    ])?;
+                                }
+                            }
+                        }
+                    }
+
+                    if fts_seen.insert(pkg_name.to_string()) {
+                        let summary = manifest
+                            .attributes
+                            .iter()
+                            .find(|a| a.key == "pkg.summary")
+                            .and_then(|a| a.values.first())
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let description = manifest
+                            .attributes
+                            .iter()
+                            .find(|a| a.key == "pkg.description")
+                            .and_then(|a| a.values.first())
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        insert_fts.execute(rusqlite::params![
+                            pkg_name,
+                            publisher,
+                            summary,
+                            description
+                        ])?;
+                    }
+                    Ok(())
+                };
+
+            stream_catalog_part_for_publisher(&part_path, publisher, &mut on_entry)?;
         }
     }
 
@@ -430,6 +406,137 @@ pub fn build_shards(
     // Clean up temp directory
     fs::remove_dir_all(&temp_dir).ok();
 
+    Ok(())
+}
+
+/// Stream a catalog part JSON file for a single target publisher, calling
+/// `on_entry(stem, version_entry)` for each version. Other publishers and
+/// metadata keys are walked past with `IgnoredAny` so peak memory stays
+/// bounded by one stem's `Vec<PackageVersionEntry>` regardless of repo size.
+fn stream_catalog_part_for_publisher<F>(
+    path: &Path,
+    target_publisher: &str,
+    on_entry: &mut F,
+) -> std::result::Result<(), ShardBuildError>
+where
+    F: FnMut(
+        &str,
+        &crate::repository::catalog::PackageVersionEntry,
+    ) -> std::result::Result<(), rusqlite::Error>,
+{
+    use crate::repository::catalog::PackageVersionEntry;
+    use serde::de::{DeserializeSeed, Deserializer as _, IgnoredAny, MapAccess, Visitor};
+    use std::fmt;
+
+    let file = std::fs::File::open(path).map_err(|e| {
+        ShardBuildError::new(format!("Failed to open {}: {}", path.display(), e))
+    })?;
+    let reader = std::io::BufReader::new(file);
+    let mut de = serde_json::Deserializer::from_reader(reader);
+
+    struct State<'a, F> {
+        target_publisher: &'a str,
+        on_entry: &'a mut F,
+        sql_err: Option<rusqlite::Error>,
+    }
+
+    struct TopVisitor<'s, 'a, F> {
+        state: &'s mut State<'a, F>,
+    }
+    struct StemsSeed<'s, 'a, F> {
+        state: &'s mut State<'a, F>,
+    }
+    struct StemsVisitor<'s, 'a, F> {
+        state: &'s mut State<'a, F>,
+    }
+
+    impl<'de, 's, 'a, F> Visitor<'de> for TopVisitor<'s, 'a, F>
+    where
+        F: FnMut(&str, &PackageVersionEntry) -> std::result::Result<(), rusqlite::Error>,
+    {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("catalog part top-level object")
+        }
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<(), A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            while let Some(key) = map.next_key::<String>()? {
+                if self.state.sql_err.is_some() {
+                    let _: IgnoredAny = map.next_value()?;
+                    continue;
+                }
+                if key == self.state.target_publisher {
+                    map.next_value_seed(StemsSeed { state: self.state })?;
+                } else {
+                    let _: IgnoredAny = map.next_value()?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl<'de, 's, 'a, F> DeserializeSeed<'de> for StemsSeed<'s, 'a, F>
+    where
+        F: FnMut(&str, &PackageVersionEntry) -> std::result::Result<(), rusqlite::Error>,
+    {
+        type Value = ();
+        fn deserialize<D>(self, d: D) -> std::result::Result<(), D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            d.deserialize_map(StemsVisitor { state: self.state })
+        }
+    }
+
+    impl<'de, 's, 'a, F> Visitor<'de> for StemsVisitor<'s, 'a, F>
+    where
+        F: FnMut(&str, &PackageVersionEntry) -> std::result::Result<(), rusqlite::Error>,
+    {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("publisher's stems map")
+        }
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<(), A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            while let Some(stem) = map.next_key::<String>()? {
+                if self.state.sql_err.is_some() {
+                    let _: IgnoredAny = map.next_value()?;
+                    continue;
+                }
+                let versions: Vec<PackageVersionEntry> = map.next_value()?;
+                for v in &versions {
+                    if let Err(e) = (self.state.on_entry)(&stem, v) {
+                        self.state.sql_err = Some(e);
+                        break;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let mut state = State {
+        target_publisher,
+        on_entry,
+        sql_err: None,
+    };
+
+    (&mut de)
+        .deserialize_map(TopVisitor { state: &mut state })
+        .map_err(|e| {
+            ShardBuildError::new(format!("Failed to parse {}: {}", path.display(), e))
+        })?;
+
+    if let Some(e) = state.sql_err {
+        return Err(ShardBuildError::new(format!(
+            "Failed to insert catalog row: {}",
+            e
+        )));
+    }
     Ok(())
 }
 
