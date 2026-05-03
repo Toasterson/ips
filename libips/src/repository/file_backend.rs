@@ -633,32 +633,55 @@ impl ReadableRepository for FileBackend {
 
     /// Get repository information
     fn get_info(&self) -> Result<RepositoryInfo> {
+        use rusqlite::{Connection, OpenFlags};
         let mut publishers = Vec::new();
 
         for publisher_name in &self.config.publishers {
-            // Count packages by scanning the publisher's package directory
             let publisher_pkg_dir = Self::construct_package_dir(&self.path, publisher_name, "");
-            let mut package_count = 0;
+            let mut package_count: usize = 0;
             let mut latest_timestamp = SystemTime::UNIX_EPOCH;
 
-            // Check if the publisher directory exists
-            if publisher_pkg_dir.exists() {
-                // The on-disk layout is <pkg>/<encoded_stem>/<encoded_version>:
-                // every entry directly under pkg/ is a stem directory, not a
-                // manifest file. Count stem directories (one per unique
-                // package name), which matches the pkg5 `pkgrepo info`
-                // convention and the SQL `COUNT(DISTINCT stem)` used during
-                // shard build.
+            // Prefer the catalog shard if it has been built — one SELECT vs.
+            // a directory walk over thousands of stem dirs.
+            let active_path = self.shard_dir(publisher_name).join("active.db");
+            let from_catalog = active_path.exists()
+                && match Connection::open_with_flags(
+                    &active_path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY,
+                ) {
+                    Ok(conn) => match conn.query_row(
+                        "SELECT COUNT(DISTINCT stem) FROM packages",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    ) {
+                        Ok(n) => {
+                            package_count = n as usize;
+                            if let Ok(meta) = fs::metadata(&active_path) {
+                                if let Ok(m) = meta.modified() {
+                                    latest_timestamp = m;
+                                }
+                            }
+                            true
+                        }
+                        Err(e) => {
+                            debug!("active.db count query failed for {}: {}", publisher_name, e);
+                            false
+                        }
+                    },
+                    Err(e) => {
+                        debug!("Could not open active.db for {}: {}", publisher_name, e);
+                        false
+                    }
+                };
+
+            // Fall back to a directory count when the catalog isn't built yet
+            // (fresh repo) or the query failed for any reason.
+            if !from_catalog && publisher_pkg_dir.exists() {
                 if let Ok(entries) = fs::read_dir(&publisher_pkg_dir) {
                     for entry in entries.flatten() {
                         let path = entry.path();
                         if path.is_dir() {
                             package_count += 1;
-
-                            // Stem dir mtime tracks the most recent version
-                            // file added/modified inside it on most
-                            // filesystems, so it's a cheap proxy for "last
-                            // updated" without recursing into every version.
                             if let Ok(metadata) = fs::metadata(&path) {
                                 if let Ok(modified) = metadata.modified() {
                                     if modified > latest_timestamp {
@@ -717,40 +740,58 @@ impl ReadableRepository for FileBackend {
             self.config.publishers.clone()
         };
 
-        // For each publisher, list packages
+        let regex = pattern.map(glob_to_regex);
+
         for pub_name in publishers {
-            // Get the publisher's package directory
-            let publisher_pkg_dir = Self::construct_package_dir(&self.path, &pub_name, "");
-
-            // Check if the publisher directory exists
-            if publisher_pkg_dir.exists() {
-                // Verify that the publisher is in the config
-                if !self.config.publishers.contains(&pub_name) {
-                    return Err(RepositoryError::Other(format!(
-                        "Publisher directory exists but is not in the repository configuration: {}",
-                        pub_name
-                    )));
-                }
-
-                // Recursively walk through the directory and collect package manifests
-                info!(
-                    "Listing packages for publisher {} (walking {})",
-                    pub_name,
-                    publisher_pkg_dir.display()
-                );
+            let active_path = self.shard_dir(&pub_name).join("active.db");
+            if active_path.exists() {
+                // Catalog shard is the cheap source of truth — one query
+                // returns every (stem, version, publisher) that the rebuild
+                // already filtered for obsolescence.
                 let before = packages.len();
-                self.find_manifests_recursive(
-                    &publisher_pkg_dir,
+                self.list_packages_from_catalog(
+                    &active_path,
                     &pub_name,
-                    pattern.map(glob_to_regex).as_deref(),
+                    regex.as_deref(),
                     &mut packages,
                 )?;
-                info!(
-                    "Listed {} packages for publisher {}",
+                debug!(
+                    "Listed {} packages for publisher {} from catalog",
                     packages.len() - before,
                     pub_name
                 );
+                continue;
             }
+
+            // No shard for this publisher (e.g. fresh repo before first
+            // catalog rebuild) — fall back to the on-disk walker.
+            let publisher_pkg_dir = Self::construct_package_dir(&self.path, &pub_name, "");
+            if !publisher_pkg_dir.exists() {
+                continue;
+            }
+            if !self.config.publishers.contains(&pub_name) {
+                return Err(RepositoryError::Other(format!(
+                    "Publisher directory exists but is not in the repository configuration: {}",
+                    pub_name
+                )));
+            }
+            info!(
+                "Listing packages for publisher {} (walking {} — no catalog yet)",
+                pub_name,
+                publisher_pkg_dir.display()
+            );
+            let before = packages.len();
+            self.find_manifests_recursive(
+                &publisher_pkg_dir,
+                &pub_name,
+                regex.as_deref(),
+                &mut packages,
+            )?;
+            info!(
+                "Listed {} packages for publisher {}",
+                packages.len() - before,
+                pub_name
+            );
         }
 
         Ok(packages)
@@ -1726,6 +1767,101 @@ impl WritableRepository for FileBackend {
 }
 
 impl FileBackend {
+    /// Read packages for a publisher from active.db. Used by the public
+    /// list_packages path when a catalog shard exists. Stays internal so
+    /// rebuild_catalog_batched (which *produces* the shard) keeps walking
+    /// the filesystem via list_packages_from_disk.
+    fn list_packages_from_catalog(
+        &self,
+        active_path: &Path,
+        publisher: &str,
+        regex: Option<&str>,
+        packages: &mut Vec<PackageInfo>,
+    ) -> Result<()> {
+        use rusqlite::{Connection, OpenFlags};
+        let conn = Connection::open_with_flags(active_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| {
+                RepositoryError::Other(format!(
+                    "Failed to open active.db for publisher {}: {}",
+                    publisher, e
+                ))
+            })?;
+        let compiled = match regex {
+            Some(p) => match Regex::new(p) {
+                Ok(rx) => Some(rx),
+                Err(e) => {
+                    error!("Invalid pattern regex {:?}: {}", p, e);
+                    None
+                }
+            },
+            None => None,
+        };
+        let mut stmt = conn
+            .prepare("SELECT stem, version FROM packages")
+            .map_err(|e| RepositoryError::Other(format!("Prepare failed: {}", e)))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| RepositoryError::Other(format!("Query failed: {}", e)))?;
+        for row in rows {
+            let (stem, version) = row
+                .map_err(|e| RepositoryError::Other(format!("Row read failed: {}", e)))?;
+            if let Some(rx) = &compiled {
+                if !rx.is_match(&stem) {
+                    continue;
+                }
+            }
+            let parsed_version = crate::fmri::Version::parse(&version).ok();
+            let fmri = Fmri::with_publisher(publisher, &stem, parsed_version);
+            packages.push(PackageInfo { fmri });
+        }
+        Ok(())
+    }
+
+    /// On-disk walker — used by rebuild_catalog_batched (which produces the
+    /// catalog) and as a fallback when no catalog shard exists yet.
+    pub(crate) fn list_packages_from_disk(
+        &self,
+        publisher: Option<&str>,
+        pattern: Option<&str>,
+    ) -> Result<Vec<PackageInfo>> {
+        let mut packages = Vec::new();
+        let publishers = if let Some(pub_name) = publisher {
+            if !self.config.publishers.contains(&pub_name.to_string()) {
+                return Err(RepositoryError::PublisherNotFound(pub_name.to_string()));
+            }
+            vec![pub_name.to_string()]
+        } else {
+            self.config.publishers.clone()
+        };
+        let regex = pattern.map(glob_to_regex);
+        for pub_name in publishers {
+            let publisher_pkg_dir = Self::construct_package_dir(&self.path, &pub_name, "");
+            if !publisher_pkg_dir.exists() {
+                continue;
+            }
+            info!(
+                "Listing packages for publisher {} (walking {})",
+                pub_name,
+                publisher_pkg_dir.display()
+            );
+            let before = packages.len();
+            self.find_manifests_recursive(
+                &publisher_pkg_dir,
+                &pub_name,
+                regex.as_deref(),
+                &mut packages,
+            )?;
+            info!(
+                "Listed {} packages for publisher {}",
+                packages.len() - before,
+                pub_name
+            );
+        }
+        Ok(packages)
+    }
+
     /// Save catalog.attrs for a publisher using atomic write and SHA-1 signature
     pub fn save_catalog_attrs(
         &self,
@@ -2152,8 +2288,10 @@ impl FileBackend {
         fs::create_dir_all(&catalog_dir)?;
         debug!("Created publisher catalog directory");
 
-        // Collect package data
-        let packages = self.list_packages(Some(publisher), None)?;
+        // Collect package data via the on-disk walker — this is the rebuild
+        // path that *produces* the catalog, so the catalog-first list_packages
+        // would either miss new manifests or chicken-and-egg an empty result.
+        let packages = self.list_packages_from_disk(Some(publisher), None)?;
 
         // Prepare data structures for catalog parts
         let mut base_entries = Vec::new();
