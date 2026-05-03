@@ -222,25 +222,46 @@ impl<'de> Deserialize<'de> for CatalogPart {
     where
         D: serde::Deserializer<'de>,
     {
-        let all_entries = BTreeMap::<String, Value>::deserialize(deserializer)?;
-        let mut packages = BTreeMap::new();
-        let mut metadata = BTreeMap::new();
+        // Stream the top-level object key-by-key. For metadata keys (those
+        // starting with '_') deserialize the value as a free-form Value;
+        // for everything else deserialize directly into the typed package
+        // map. The previous implementation collected the whole document into
+        // a BTreeMap<String, Value>, then clone()d each value and re-parsed
+        // it through serde_json::from_value — that doubled peak memory and
+        // OOMed on large publishers.
+        struct Vis;
 
-        for (k, v) in all_entries {
-            if k.starts_with('_') {
-                metadata.insert(k, v);
-            } else {
-                // Try to parse as package map
-                if let Ok(pkg_map) = serde_json::from_value(v.clone()) {
-                    packages.insert(k, pkg_map);
-                } else {
-                    // If it fails, treat as metadata
-                    metadata.insert(k, v);
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = CatalogPart;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a catalog part object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<CatalogPart, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut packages: BTreeMap<String, BTreeMap<String, Vec<PackageVersionEntry>>> =
+                    BTreeMap::new();
+                let mut metadata: BTreeMap<String, Value> = BTreeMap::new();
+
+                while let Some(key) = map.next_key::<String>()? {
+                    if key.starts_with('_') {
+                        let v: Value = map.next_value()?;
+                        metadata.insert(key, v);
+                    } else {
+                        let pkg_map: BTreeMap<String, Vec<PackageVersionEntry>> =
+                            map.next_value()?;
+                        packages.insert(key, pkg_map);
+                    }
                 }
+
+                Ok(CatalogPart { packages, metadata })
             }
         }
 
-        Ok(CatalogPart { packages, metadata })
+        deserializer.deserialize_map(Vis)
     }
 }
 
