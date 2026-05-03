@@ -643,16 +643,22 @@ impl ReadableRepository for FileBackend {
 
             // Check if the publisher directory exists
             if publisher_pkg_dir.exists() {
-                // Walk through the directory and count package manifests
+                // The on-disk layout is <pkg>/<encoded_stem>/<encoded_version>:
+                // every entry directly under pkg/ is a stem directory, not a
+                // manifest file. Count stem directories (one per unique
+                // package name), which matches the pkg5 `pkgrepo info`
+                // convention and the SQL `COUNT(DISTINCT stem)` used during
+                // shard build.
                 if let Ok(entries) = fs::read_dir(&publisher_pkg_dir) {
                     for entry in entries.flatten() {
                         let path = entry.path();
-
-                        // Skip directories, only count files (package manifests)
-                        if path.is_file() {
+                        if path.is_dir() {
                             package_count += 1;
 
-                            // Update the latest timestamp if this file is newer
+                            // Stem dir mtime tracks the most recent version
+                            // file added/modified inside it on most
+                            // filesystems, so it's a cheap proxy for "last
+                            // updated" without recursing into every version.
                             if let Ok(metadata) = fs::metadata(&path) {
                                 if let Ok(modified) = metadata.modified() {
                                     if modified > latest_timestamp {
