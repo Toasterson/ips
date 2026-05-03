@@ -458,8 +458,9 @@ impl<'a> DependencyProvider for IpsProvider<'a> {
 
         // Query dependencies table directly instead of decoding manifest
         let mut stmt = match self.catalog_conn.prepare(
-            "SELECT dep_stem, dep_version FROM dependencies
-             WHERE pkg_stem = ?1 AND pkg_version = ?2 AND pkg_publisher = ?3 AND dep_type = 'require'"
+            "SELECT d.dep_stem, d.dep_version FROM dependencies d
+             JOIN packages p ON p.id = d.pkg_id
+             WHERE p.stem = ?1 AND p.version = ?2 AND p.publisher = ?3 AND d.dep_type = 'require'"
         ) {
             Ok(s) => s,
             Err(_) => return RDependencies::Known(KnownDependencies::default()),

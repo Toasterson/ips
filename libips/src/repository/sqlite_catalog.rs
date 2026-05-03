@@ -25,27 +25,24 @@ use thiserror::Error;
 /// No manifest blobs stored; manifests are fetched from repository on demand.
 pub const ACTIVE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS packages (
+    id        INTEGER PRIMARY KEY,
     stem      TEXT NOT NULL,
     version   TEXT NOT NULL,
     publisher TEXT NOT NULL,
     fmri      TEXT GENERATED ALWAYS AS (
         'pkg://' || publisher || '/' || stem || '@' || version
-    ) STORED,
-    PRIMARY KEY (stem, version, publisher)
+    ) VIRTUAL,
+    UNIQUE (stem, version, publisher)
 );
-CREATE INDEX IF NOT EXISTS idx_packages_fmri ON packages(fmri);
 CREATE INDEX IF NOT EXISTS idx_packages_stem ON packages(stem);
 
 CREATE TABLE IF NOT EXISTS dependencies (
-    pkg_stem      TEXT NOT NULL,
-    pkg_version   TEXT NOT NULL,
-    pkg_publisher TEXT NOT NULL,
-    dep_type      TEXT NOT NULL,
-    dep_stem      TEXT NOT NULL,
-    dep_version   TEXT,
-    PRIMARY KEY (pkg_stem, pkg_version, pkg_publisher, dep_type, dep_stem)
-);
-CREATE INDEX IF NOT EXISTS idx_deps_pkg ON dependencies(pkg_stem, pkg_version, pkg_publisher);
+    pkg_id      INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+    dep_type    TEXT NOT NULL,
+    dep_stem    TEXT NOT NULL,
+    dep_version TEXT,
+    PRIMARY KEY (pkg_id, dep_type, dep_stem)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS incorporate_locks (
     stem    TEXT NOT NULL PRIMARY KEY,
@@ -205,10 +202,12 @@ pub fn build_shards(
 
     {
         let mut insert_pkg = active_tx.prepare(
-            "INSERT OR REPLACE INTO packages (stem, version, publisher) VALUES (?1, ?2, ?3)",
+            "INSERT INTO packages (stem, version, publisher) VALUES (?1, ?2, ?3)
+             ON CONFLICT(stem, version, publisher) DO UPDATE SET stem = excluded.stem
+             RETURNING id",
         )?;
         let mut insert_dep = active_tx.prepare(
-            "INSERT OR REPLACE INTO dependencies (pkg_stem, pkg_version, pkg_publisher, dep_type, dep_stem, dep_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO dependencies (pkg_id, dep_type, dep_stem, dep_version) VALUES (?1, ?2, ?3, ?4)",
         )?;
         let mut insert_obs = obsolete_tx.prepare(
             "INSERT OR REPLACE INTO obsolete_packages (publisher, stem, version) VALUES (?1, ?2, ?3)",
@@ -307,12 +306,11 @@ pub fn build_shards(
                                 pkg_version
                             ])?;
                         } else {
-                            // Insert into packages table (active.db)
-                            insert_pkg.execute(rusqlite::params![
-                                pkg_name,
-                                pkg_version,
-                                publisher
-                            ])?;
+                            // Insert into packages table (active.db) and capture id
+                            let pkg_id: i64 = insert_pkg.query_row(
+                                rusqlite::params![pkg_name, pkg_version, publisher],
+                                |row| row.get(0),
+                            )?;
 
                             // Extract and insert dependencies
                             for dep in &manifest.dependencies {
@@ -324,9 +322,7 @@ pub fn build_shards(
                                         let dep_version =
                                             dep_fmri.version.as_ref().map(|v| v.to_string());
                                         insert_dep.execute(rusqlite::params![
-                                            pkg_name,
-                                            pkg_version,
-                                            publisher,
+                                            pkg_id,
                                             &dep.dependency_type,
                                             dep_stem,
                                             dep_version
@@ -449,13 +445,16 @@ pub fn populate_active_db(
 
     let tx = conn.transaction()?;
     {
-        tx.execute(
-            "INSERT OR REPLACE INTO packages (stem, version, publisher) VALUES (?1, ?2, ?3)",
+        let pkg_id: i64 = tx.query_row(
+            "INSERT INTO packages (stem, version, publisher) VALUES (?1, ?2, ?3)
+             ON CONFLICT(stem, version, publisher) DO UPDATE SET stem = excluded.stem
+             RETURNING id",
             rusqlite::params![
                 fmri.stem(),
                 fmri.version(),
                 fmri.publisher.as_deref().unwrap_or("")
             ],
+            |row| row.get(0),
         )?;
 
         for dep in &manifest.dependencies {
@@ -464,11 +463,9 @@ pub fn populate_active_db(
                     let dep_stem = dep_fmri.stem();
                     let dep_version = dep_fmri.version.as_ref().map(|v| v.to_string());
                     tx.execute(
-                        "INSERT OR REPLACE INTO dependencies (pkg_stem, pkg_version, pkg_publisher, dep_type, dep_stem, dep_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        "INSERT OR REPLACE INTO dependencies (pkg_id, dep_type, dep_stem, dep_version) VALUES (?1, ?2, ?3, ?4)",
                         rusqlite::params![
-                            fmri.stem(),
-                            fmri.version(),
-                            fmri.publisher.as_deref().unwrap_or(""),
+                            pkg_id,
                             &dep.dependency_type,
                             dep_stem,
                             dep_version
