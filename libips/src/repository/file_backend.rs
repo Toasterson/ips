@@ -2016,156 +2016,97 @@ impl FileBackend {
         pattern: Option<&str>,
         packages: &mut Vec<PackageInfo>,
     ) -> Result<()> {
-        tracing::trace!(dir = %dir.display(), "find_manifests_recursive: enter");
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
+        // The repo layout is exactly two levels deep:
+        //   <dir>/<encoded_stem>/<encoded_version>
+        // Reconstruct (stem, version) from path components instead of parsing
+        // each manifest — at hundreds of thousands of files, manifest parsing
+        // dominates the wall-clock cost and produces no extra information.
+        let regex = pattern.and_then(|p| Regex::new(p).ok());
+        let mut examined = 0usize;
+        let stem_entries = match fs::read_dir(dir) {
+            Ok(it) => it,
+            Err(e) => {
+                error!(
+                    "FileBackend::find_manifests_recursive: read_dir({}) failed: {}",
+                    dir.display(),
+                    e
+                );
+                return Ok(());
+            }
+        };
+        for stem_entry in stem_entries.flatten() {
+            let stem_path = stem_entry.path();
+            if !stem_path.is_dir() {
+                continue;
+            }
+            let encoded_stem = match stem_path.file_name().and_then(|n| n.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let stem = Self::url_decode(&encoded_stem);
+            if let Some(rx) = &regex {
+                if !rx.is_match(&stem) {
+                    continue;
+                }
+            }
+            let version_entries = match fs::read_dir(&stem_path) {
+                Ok(it) => it,
+                Err(e) => {
+                    error!(
+                        "FileBackend::find_manifests_recursive: read_dir({}) failed: {}",
+                        stem_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            for version_entry in version_entries.flatten() {
+                let version_path = version_entry.path();
+                if !version_path.is_file() {
+                    continue;
+                }
+                let encoded_version = match version_path.file_name().and_then(|n| n.to_str()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                // Skip the JSON sidecar; the manifest itself is the canonical entry.
+                if encoded_version.ends_with(".json") {
+                    continue;
+                }
+                examined += 1;
+                if examined % 5000 == 0 {
+                    info!(
+                        "Listing progress: {} manifest entries examined ({} kept) for publisher {}",
+                        examined,
+                        packages.len(),
+                        publisher
+                    );
+                }
+                let version = Self::url_decode(encoded_version);
+                let parsed_version = crate::fmri::Version::parse(&version).ok();
+                let final_fmri = Fmri::with_publisher(publisher, &stem, parsed_version);
 
-                if path.is_dir() {
-                    // Recursively search subdirectories
-                    self.find_manifests_recursive(&path, publisher, pattern, packages)?;
-                } else if path.is_file() {
-                    tracing::trace!(file = %path.display(), "find_manifests_recursive: examining file");
-                    // Check if this is a .json file and if a corresponding file without .json exists
-                    if let Some(extension) = path.extension() {
-                        if extension == "json" {
-                            let path_without_ext = path.with_extension("");
-                            if path_without_ext.exists() {
-                                // Skip this .json file as we'll process the other one
-                                continue;
-                            }
-                        }
-                    }
-
-                    // Try to read the first few bytes of the file to check if it's a manifest file
-                    let mut file = match fs::File::open(&path) {
-                        Ok(file) => file,
-                        Err(err) => {
-                            error!(
-                                "FileBackend::find_manifests_recursive: Error opening file {}: {}",
-                                path.display(),
-                                err
-                            );
-                            continue;
-                        }
-                    };
-
-                    let mut buffer = [0; 1024];
-                    let bytes_read = match file.read(&mut buffer) {
-                        Ok(bytes) => bytes,
-                        Err(err) => {
-                            error!(
-                                "FileBackend::find_manifests_recursive: Error reading file {}: {}",
-                                path.display(),
-                                err
-                            );
-                            continue;
-                        }
-                    };
-
-                    // Check if the file starts with a valid manifest marker
-                    // For example, if it's a JSON file, it should start with '{'
-                    if bytes_read == 0
-                        || (buffer[0] != b'{' && buffer[0] != b'<' && buffer[0] != b's')
-                    {
-                        continue;
-                    }
-
-                    // Process manifest files
-                    match Manifest::parse_file(&path) {
-                        Ok(manifest) => {
-                            // Look for the pkg.fmri attribute
-                            for attr in &manifest.attributes {
-                                if attr.key == "pkg.fmri" && !attr.values.is_empty() {
-                                    let fmri = &attr.values[0];
-
-                                    // Parse the FMRI using our Fmri type
-                                    match Fmri::parse(fmri) {
-                                        Ok(parsed_fmri) => {
-                                            // Filter by pattern if specified
-                                            if let Some(pat) = pattern {
-                                                // Try to compile the pattern as a regex
-                                                match Regex::new(pat) {
-                                                    Ok(regex) => {
-                                                        // Use regex matching
-                                                        if !regex.is_match(parsed_fmri.stem()) {
-                                                            continue;
-                                                        }
-                                                    }
-                                                    Err(err) => {
-                                                        // Log the error but fall back to the simple string contains
-                                                        error!(
-                                                            "FileBackend::find_manifests_recursive: Error compiling regex pattern '{}': {}",
-                                                            pat, err
-                                                        );
-                                                        if !parsed_fmri.stem().contains(pat) {
-                                                            continue;
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            // If the publisher is not set in the FMRI, use the current publisher
-                                            let final_fmri = if parsed_fmri.publisher.is_none() {
-                                                let mut fmri_with_publisher = parsed_fmri.clone();
-                                                fmri_with_publisher.publisher =
-                                                    Some(publisher.to_string());
-                                                fmri_with_publisher
-                                            } else {
-                                                parsed_fmri.clone()
-                                            };
-
-                                            // Check if the package is obsoleted
-                                            let is_obsoleted = if let Some(obsoleted_manager) =
-                                                &self.obsoleted_manager
-                                            {
-                                                obsoleted_manager
-                                                    .lock()
-                                                    .map(|mgr| mgr.is_obsoleted(publisher, &final_fmri))
-                                                    .unwrap_or(false)
-                                            } else {
-                                                false
-                                            };
-
-                                            // Only add the package if it's not obsoleted
-                                            if !is_obsoleted {
-                                                // Create a PackageInfo struct and add it to the list
-                                                packages.push(PackageInfo { fmri: final_fmri });
-                                                if packages.len() % 1000 == 0 {
-                                                    info!(
-                                                        "Listing progress: {} manifests parsed",
-                                                        packages.len()
-                                                    );
-                                                }
-                                            }
-
-                                            // Found the package info, no need to check other attributes
-                                            break;
-                                        }
-                                        Err(err) => {
-                                            // Log the error but continue processing
-                                            error!(
-                                                "FileBackend::find_manifests_recursive: Error parsing FMRI '{}': {}",
-                                                fmri, err
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            // Log the error but continue processing other files
-                            error!(
-                                "FileBackend::find_manifests_recursive: Error parsing manifest file {}: {}",
-                                path.display(),
-                                err
-                            );
-                        }
-                    }
+                let is_obsoleted = if let Some(obsoleted_manager) = &self.obsoleted_manager {
+                    obsoleted_manager
+                        .lock()
+                        .map(|mgr| mgr.is_obsoleted(publisher, &final_fmri))
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                if is_obsoleted {
+                    continue;
+                }
+                packages.push(PackageInfo { fmri: final_fmri });
+                if packages.len() % 1000 == 0 {
+                    info!("Listing progress: {} packages kept", packages.len());
                 }
             }
         }
-
+        info!(
+            "Listed {} manifest entries examined for publisher {}",
+            examined, publisher
+        );
         Ok(())
     }
     /// Create the repository directories
@@ -2690,6 +2631,41 @@ impl FileBackend {
             }
         }
         result
+    }
+
+    /// Inverse of url_encode: decodes %XX byte escapes and turns '+' back into space.
+    /// Returns the original string on invalid escapes (best-effort, matches encode's domain).
+    pub(crate) fn url_decode(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'+' => {
+                    out.push(b' ');
+                    i += 1;
+                }
+                b'%' if i + 2 < bytes.len() => {
+                    let hi = (bytes[i + 1] as char).to_digit(16);
+                    let lo = (bytes[i + 2] as char).to_digit(16);
+                    match (hi, lo) {
+                        (Some(h), Some(l)) => {
+                            out.push((h * 16 + l) as u8);
+                            i += 3;
+                        }
+                        _ => {
+                            out.push(bytes[i]);
+                            i += 1;
+                        }
+                    }
+                }
+                b => {
+                    out.push(b);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8(out).unwrap_or_else(|_| s.to_string())
     }
 
     /// Search for packages with detailed results using SQLite FTS5.
