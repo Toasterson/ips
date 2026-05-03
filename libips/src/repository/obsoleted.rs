@@ -1415,7 +1415,14 @@ impl ObsoletedPackageManager {
 
     /// Check if a package is obsoleted
     pub fn is_obsoleted(&self, publisher: &str, fmri: &Fmri) -> bool {
-        // First, check the filesystem directly for faster results in tests
+        // The on-disk layout written by store_obsoleted_package_with_options is
+        // canonical: <base>/<publisher>/<stem>/<url_encoded_version>.json.
+        // Both the writer and this check use the identical encoding, so the
+        // filesystem is the source of truth. Avoid touching the SQLite index
+        // here — when called from a hot loop (e.g. list_packages walking
+        // hundreds of thousands of entries) the index's stale/rebuild path
+        // would trigger a full re-scan of every obsoleted file, with one
+        // fdsync per insert.
         let stem = fmri.stem();
         let version = fmri.version();
         let encoded_version = url_encode(&version);
@@ -1424,38 +1431,7 @@ impl ObsoletedPackageManager {
             .join(publisher)
             .join(stem)
             .join(format!("{}.json", encoded_version));
-
-        if metadata_path.exists() {
-            return true;
-        }
-
-        // Ensure the index is fresh
-        if let Err(e) = self.ensure_index_is_fresh() {
-            warn!("Failed to ensure index is fresh: {}", e);
-            // Already checked the filesystem above, so return false
-            return false;
-        }
-
-        // Check the index
-        let key = ObsoletedPackageKey::new(publisher, fmri);
-        match self.index.read() {
-            Ok(index) => {
-                // Properly handle the Result returned by get_entry
-                match index.get_entry(&key) {
-                    Ok(Some(_)) => true,
-                    Ok(None) => false,
-                    Err(e) => {
-                        warn!("Error checking if package is obsoleted in index: {}", e);
-                        false
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Failed to acquire read lock on index: {}", e);
-                // Already checked the filesystem above, so return false
-                false
-            }
-        }
+        metadata_path.exists()
     }
 
     /// Get metadata for an obsoleted package
