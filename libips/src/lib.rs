@@ -1210,4 +1210,35 @@ link path=usr/lib/cups/пертинах/http target=blub",
             assert_eq!(link.target, link_results[pos].target);
         }
     }
+
+    #[test]
+    fn extract_metadata_matches_full_parser() {
+        // Mix of set + depend actions plus a noisy file action that the
+        // streaming extractor must skip without confusion.
+        let manifest_string = "set name=pkg.fmri value=pkg://openindiana.org/web/server/nginx@1.18.0,5.11-2020.0.1.0:20200421T195136Z
+set name=pkg.summary value=\"Nginx Webserver\"
+set name=variant.arch value=i386
+depend fmri=pkg:/runtime/python-39 type=require
+depend fmri=pkg:/system/library type=require predicate=pkg:/foo/bar
+file 0123abcd group=bin mode=0644 owner=root path=usr/bin/nginx
+set name=info.classification value=\"org.opensolaris.category.2008:Web Services\"
+";
+        let tmp = std::env::temp_dir().join("ips_extract_metadata_test.p5m");
+        std::fs::write(&tmp, manifest_string).unwrap();
+
+        let (attrs, deps) = Manifest::extract_metadata(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+
+        // 4 set actions, file is skipped.
+        assert_eq!(attrs.len(), 4, "attrs: {:?}", attrs);
+        assert_eq!(attrs[0].key, "pkg.fmri");
+        assert_eq!(attrs[1].key, "pkg.summary");
+        assert_eq!(attrs[1].values, vec!["Nginx Webserver".to_string()]);
+        assert_eq!(attrs[2].key, "variant.arch");
+
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].dependency_type, "require");
+        assert!(deps[0].fmri.is_some());
+        assert!(deps[1].predicate.is_some());
+    }
 }

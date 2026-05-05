@@ -2352,23 +2352,43 @@ impl FileBackend {
                 continue;
             }
 
-            // Read the manifest content for hash calculation
-            tracing::trace!(fmri = %fmri, "catalog rebuild: reading manifest");
-            let manifest_content =
-                fs::read_to_string(&manifest_path).map_err(|e| RepositoryError::FileReadError {
-                    path: manifest_path.clone(),
-                    source: e,
+            // Stream-hash the manifest for legacy SHA-1 signature, then
+            // extract only catalog-relevant metadata (set + depend actions)
+            // without building a full pest AST. Full parsing OOMs on
+            // manifests with many thousands of file actions.
+            tracing::trace!(fmri = %fmri, "catalog rebuild: hashing manifest");
+            let signature = {
+                use std::io::Read;
+                let mut f = fs::File::open(&manifest_path).map_err(|e| {
+                    RepositoryError::FileReadError {
+                        path: manifest_path.clone(),
+                        source: e,
+                    }
                 })?;
+                let mut hasher = sha1::Sha1::new();
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    let n = f.read(&mut buf).map_err(|e| RepositoryError::FileReadError {
+                        path: manifest_path.clone(),
+                        source: e,
+                    })?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+                format!("{:x}", hasher.finalize())
+            };
 
-            // Parse the manifest using parse_file which handles JSON correctly
-            tracing::trace!(fmri = %fmri, "catalog rebuild: parsing manifest");
-            let manifest = Manifest::parse_file(&manifest_path)?;
-
-            // Calculate SHA-1 hash of the manifest for legacy catalog signature compatibility
-            let mut hasher = sha1::Sha1::new();
-            hasher.update(manifest_content.as_bytes());
-            let signature = hasher.finalize();
-            let signature = format!("{:x}", signature);
+            tracing::trace!(fmri = %fmri, "catalog rebuild: extracting metadata");
+            let (attributes, dependencies) =
+                Manifest::extract_metadata(&manifest_path)?;
+            let manifest = {
+                let mut m = Manifest::new();
+                m.attributes = attributes;
+                m.dependencies = dependencies;
+                m
+            };
 
             // Add to base entries
             base_entries.push((fmri.clone(), None, signature.clone()));

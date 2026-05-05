@@ -1074,6 +1074,210 @@ impl Manifest {
 
         Ok(m)
     }
+
+    /// Extract only catalog-relevant metadata (`set` and `depend` actions)
+    /// from a manifest file, streaming line-by-line. Skips file/dir/link/
+    /// hardlink/license/etc. entirely so memory use stays bounded by a
+    /// single line, regardless of how many file actions a manifest has.
+    ///
+    /// Used by catalog rebuild, where pest's full-AST parser OOMs on
+    /// manifests with thousands of file actions. JSON manifests fall back
+    /// to the structured deserializer (small in practice) and we keep only
+    /// attributes + dependencies.
+    pub fn extract_metadata<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<(Vec<Attr>, Vec<Dependency>)> {
+        use std::io::{BufRead, BufReader, Read};
+
+        // JSON-detection: peek at the first non-whitespace byte. If it's
+        // `{`, deserialize the whole thing structurally — JSON manifests
+        // produced by pkg6 don't carry the unbounded action lists that
+        // make text manifests dangerous.
+        let mut first = std::fs::File::open(path.as_ref())?;
+        let mut probe = [0u8; 1];
+        let mut peeked: Option<u8> = None;
+        loop {
+            match first.read(&mut probe)? {
+                0 => break,
+                _ => {
+                    let b = probe[0];
+                    if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+                        continue;
+                    }
+                    peeked = Some(b);
+                    break;
+                }
+            }
+        }
+        drop(first);
+        if peeked == Some(b'{') {
+            let content = read_to_string(path.as_ref())?;
+            if let Ok(manifest) = serde_json::from_str::<Manifest>(&content) {
+                return Ok((manifest.attributes, manifest.dependencies));
+            }
+            // Fall through to text scan if JSON parse fails.
+        }
+
+        let file = std::fs::File::open(path.as_ref())?;
+        let reader = BufReader::new(file);
+
+        let mut attributes: Vec<Attr> = Vec::new();
+        let mut dependencies: Vec<Dependency> = Vec::new();
+
+        let mut logical = String::new();
+        for line_res in reader.lines() {
+            let line = line_res?;
+            // pkg5 line-continuation: trailing `\` joins with next line.
+            if let Some(stripped) = line.strip_suffix('\\') {
+                logical.push_str(stripped);
+                logical.push(' ');
+                continue;
+            }
+            logical.push_str(&line);
+
+            let trimmed = logical.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                logical.clear();
+                continue;
+            }
+
+            // Only `set` and `depend` matter for the catalog.
+            let (head, rest) = match trimmed.split_once(|c: char| c.is_whitespace()) {
+                Some(x) => x,
+                None => {
+                    logical.clear();
+                    continue;
+                }
+            };
+            match head {
+                "set" => {
+                    let props = parse_action_properties(rest);
+                    let mut attr = Attr::default();
+                    for (k, v) in props {
+                        match k.as_str() {
+                            "name" => attr.key = v,
+                            "value" => attr.values.push(v),
+                            _ => {
+                                attr.properties
+                                    .insert(k.clone(), Property { key: k, value: v });
+                            }
+                        }
+                    }
+                    if !attr.key.is_empty() {
+                        attributes.push(attr);
+                    }
+                }
+                "depend" => {
+                    let props = parse_action_properties(rest);
+                    let mut dep = Dependency::default();
+                    for (k, v) in props {
+                        match k.as_str() {
+                            "fmri" => {
+                                if let Ok(f) = Fmri::parse(&v) {
+                                    dep.fmri = Some(f);
+                                }
+                            }
+                            "type" => dep.dependency_type = v,
+                            "predicate" => {
+                                if let Ok(f) = Fmri::parse(&v) {
+                                    dep.predicate = Some(f);
+                                }
+                            }
+                            "root-image" => dep.root_image = v,
+                            other => {
+                                if is_facet(other.to_string()) {
+                                    dep.add_facet(Facet::from_key_value(k, v));
+                                } else {
+                                    dep.optional.push(Property { key: k, value: v });
+                                }
+                            }
+                        }
+                    }
+                    dependencies.push(dep);
+                }
+                _ => {}
+            }
+            logical.clear();
+        }
+
+        Ok((attributes, dependencies))
+    }
+}
+
+/// Parse `key=value` properties out of an action's argument string,
+/// honoring pkg5's quoting rules (double or single quotes with `\`-escaped
+/// inner characters). Bare values run until whitespace.
+fn parse_action_properties(input: &str) -> Vec<(String, String)> {
+    let bytes = input.as_bytes();
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip whitespace
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // Read key up to '='
+        let key_start = i;
+        while i < bytes.len() && bytes[i] != b'=' && bytes[i] != b' ' && bytes[i] != b'\t' {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            // Bare token without `=` — payload-style; skip.
+            continue;
+        }
+        let key = std::str::from_utf8(&bytes[key_start..i])
+            .unwrap_or("")
+            .to_string();
+        i += 1; // consume '='
+        // Read value
+        let value = if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+            let quote = bytes[i];
+            i += 1;
+            let v_start = i;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == quote {
+                    break;
+                }
+                i += 1;
+            }
+            let raw = std::str::from_utf8(&bytes[v_start..i.min(bytes.len())])
+                .unwrap_or("")
+                .to_string();
+            if i < bytes.len() {
+                i += 1; // consume closing quote
+            }
+            // Decode pkg5 backslash escapes inside quoted values.
+            let mut decoded = String::with_capacity(raw.len());
+            let mut chars = raw.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    if let Some(n) = chars.next() {
+                        decoded.push(n);
+                    }
+                } else {
+                    decoded.push(c);
+                }
+            }
+            decoded
+        } else {
+            let v_start = i;
+            while i < bytes.len() && bytes[i] != b' ' && bytes[i] != b'\t' {
+                i += 1;
+            }
+            std::str::from_utf8(&bytes[v_start..i])
+                .unwrap_or("")
+                .to_string()
+        };
+        out.push((key, value));
+    }
+    out
 }
 
 #[derive(Debug)]
