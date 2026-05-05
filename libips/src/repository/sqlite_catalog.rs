@@ -366,11 +366,10 @@ pub fn build_shards(
         ("obsolete.db", &obsolete_path),
         ("fts.db", &fts_path),
     ] {
-        let bytes = fs::read(path)?;
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let hash = format!("{:x}", hasher.finalize());
-        let size = bytes.len() as u64;
+        // Stream-hash the file rather than slurping it into memory.
+        // Shard DBs can reach multiple GB on large publishers, and a full
+        // read here is what previously OOMed catalog rebuilds.
+        let (hash, size) = hash_file_streaming(path)?;
 
         shards.insert(
             name.to_string(),
@@ -381,14 +380,19 @@ pub fn build_shards(
             },
         );
 
-        // Copy shard to output directory with both original name and hash-based name
-        // Keep original name for client-side use (e.g., active.db, obsolete.db)
         let named_path = output_dir.join(name);
-        fs::copy(path, &named_path)?;
-
-        // Also copy to hash-based name for content-addressed server distribution
         let hash_path = output_dir.join(&hash);
-        fs::copy(path, &hash_path)?;
+
+        // Move the temp shard to its named location; then hardlink (cheap)
+        // to the content-addressed name. Fall back to copy if hardlink fails
+        // (e.g. cross-device — shouldn't happen since both live under
+        // output_dir, but be defensive).
+        let _ = fs::remove_file(&named_path);
+        fs::rename(path, &named_path)?;
+        let _ = fs::remove_file(&hash_path);
+        if fs::hard_link(&named_path, &hash_path).is_err() {
+            fs::copy(&named_path, &hash_path)?;
+        }
     }
 
     // Write catalog.attrs
@@ -407,6 +411,26 @@ pub fn build_shards(
     fs::remove_dir_all(&temp_dir).ok();
 
     Ok(())
+}
+
+/// Compute the SHA-256 of a file by streaming it in fixed-size chunks.
+/// Returns `(hex_digest, byte_size)`. Used to hash multi-GB shard DBs
+/// without holding them in memory.
+fn hash_file_streaming(path: &Path) -> Result<(String, u64), ShardBuildError> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20]; // 1 MiB
+    let mut total: u64 = 0;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    Ok((format!("{:x}", hasher.finalize()), total))
 }
 
 /// Stream a catalog part JSON file for a single target publisher, calling
