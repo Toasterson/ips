@@ -35,6 +35,25 @@ mod tests {
 
     use maplit::hashmap;
 
+    /// Write `manifest_string` to a temp file (unique per `tag`) and run
+    /// the streaming metadata extractor on it. Used by tests that need to
+    /// cross-check the extractor against pest's parser.
+    fn extract_metadata_for(tag: &str, manifest_string: &str) -> (Vec<Attr>, Vec<Dependency>) {
+        let path = std::env::temp_dir().join(format!(
+            "ips_extract_metadata_{}_{}_{}.p5m",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, manifest_string).unwrap();
+        let out = Manifest::extract_metadata(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        out
+    }
+
     #[test]
     fn parse_attributes() {
         let manifest_string = String::from("set name=pkg.fmri value=pkg://openindiana.org/web/server/nginx@1.18.0,5.11-2020.0.1.0:20200421T195136Z
@@ -169,7 +188,7 @@ set name=pkg.summary value=\"'XZ Utils - loss-less file compression application 
             },
         ];
 
-        let res = Manifest::parse_string(manifest_string);
+        let res = Manifest::parse_string(manifest_string.clone());
         assert!(res.is_ok(), "error during Manifest parsing: {:?}", res);
         let manifest = res.unwrap();
 
@@ -181,6 +200,22 @@ set name=pkg.summary value=\"'XZ Utils - loss-less file compression application 
             for (vpos, val) in attr.values.iter().enumerate() {
                 assert_eq!(val, &test_results[pos].values[vpos]);
             }
+        }
+
+        // Cross-check: the streaming extractor must produce the same
+        // attributes (key + values) as pest. Properties on `set` actions
+        // (e.g. `optional=...`) aren't captured by extract_metadata's
+        // simple model — those are intentionally compared key+values only.
+        let (stream_attrs, stream_deps) = extract_metadata_for("attrs", &manifest_string);
+        assert!(
+            stream_deps.is_empty(),
+            "no depend actions in this fixture: {:?}",
+            stream_deps
+        );
+        assert_eq!(stream_attrs.len(), 17);
+        for (pos, attr) in stream_attrs.iter().enumerate() {
+            assert_eq!(attr.key, test_results[pos].key);
+            assert_eq!(attr.values, test_results[pos].values);
         }
     }
 
@@ -1053,35 +1088,49 @@ depend facet.version-lock.system/mozilla-nss=true fmri=system/mozilla-nss@3.51.1
             },
         ];
 
-        let res = Manifest::parse_string(manifest_string);
+        let res = Manifest::parse_string(manifest_string.clone());
         assert!(res.is_ok(), "error during Manifest parsing: {:?}", res);
         let manifest = res.unwrap();
 
-        assert_eq!(manifest.dependencies.len(), test_results.len());
-        for (pos, dependency) in manifest.dependencies.iter().enumerate() {
-            // Compare the string representation of the FMRIs
-            if let (Some(dep_fmri), Some(test_fmri)) = (&dependency.fmri, &test_results[pos].fmri) {
-                assert_eq!(dep_fmri.to_string(), test_fmri.to_string());
-            } else {
-                assert_eq!(dependency.fmri.is_none(), test_results[pos].fmri.is_none());
-            }
-
+        let assert_deps = |deps: &[Dependency], label: &str| {
             assert_eq!(
-                dependency.dependency_type,
-                test_results[pos].dependency_type
+                deps.len(),
+                test_results.len(),
+                "{label}: dependency count mismatch"
             );
-            for (_, (key, facet)) in dependency.facets.iter().enumerate() {
-                let fres = test_results[pos].facets.get(key);
-                assert!(
-                    fres.is_some(),
-                    "error no facet with name: {:?} found",
-                    facet.name
+            for (pos, dependency) in deps.iter().enumerate() {
+                if let (Some(dep_fmri), Some(test_fmri)) =
+                    (&dependency.fmri, &test_results[pos].fmri)
+                {
+                    assert_eq!(dep_fmri.to_string(), test_fmri.to_string(), "{label}");
+                } else {
+                    assert_eq!(
+                        dependency.fmri.is_none(),
+                        test_results[pos].fmri.is_none(),
+                        "{label}"
+                    );
+                }
+                assert_eq!(
+                    dependency.dependency_type, test_results[pos].dependency_type,
+                    "{label}"
                 );
-                let f = fres.unwrap();
-                assert_eq!(facet.name, f.name);
-                assert_eq!(facet.value, f.value);
+                for (key, facet) in &dependency.facets {
+                    let f = test_results[pos]
+                        .facets
+                        .get(key)
+                        .unwrap_or_else(|| panic!("{label}: no facet {:?}", facet.name));
+                    assert_eq!(facet.name, f.name, "{label}");
+                    assert_eq!(facet.value, f.value, "{label}");
+                }
             }
-        }
+        };
+
+        assert_deps(&manifest.dependencies, "pest");
+
+        // Cross-check the streaming extractor against the same fixture.
+        let (stream_attrs, stream_deps) = extract_metadata_for("deps", &manifest_string);
+        assert!(stream_attrs.is_empty(), "no set actions in this fixture");
+        assert_deps(&stream_deps, "stream");
     }
 
     #[test]
