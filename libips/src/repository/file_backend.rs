@@ -2293,22 +2293,87 @@ impl FileBackend {
         // would either miss new manifests or chicken-and-egg an empty result.
         let packages = self.list_packages_from_disk(Some(publisher), None)?;
 
-        // Prepare data structures for catalog parts
-        let mut base_entries = Vec::new();
-        let mut dependency_entries = Vec::new();
-        let mut summary_entries = Vec::new();
-        let mut update_entries = Vec::new();
+        // Stream catalog parts straight to disk to avoid accumulating
+        // every package's entries in memory. On a 200k-package publisher
+        // the old implementation built three Vec<(Fmri, ...)> plus three
+        // CatalogPart trees that together exceeded available RAM and
+        // OOMed partway through the rebuild.
+        let now = SystemTime::now();
+        let timestamp = crate::repository::catalog::format_iso8601_basic(&now);
 
-        // Track package counts
-        let mut package_count = 0;
-        let mut package_version_count = 0;
+        let base_part_name = "catalog.base.C";
+        let dependency_part_name = "catalog.dependency.C";
+        let summary_part_name = "catalog.summary.C";
 
-        // Process each package in deterministic order (by FMRI string)
+        let base_part_path = catalog_dir.join(base_part_name);
+        let dependency_part_path = catalog_dir.join(dependency_part_name);
+        let summary_part_path = catalog_dir.join(summary_part_name);
+
+        let mut base_writer = catalog_writer::StreamingCatalogPartWriter::begin(
+            catalog_dir.join(format!("{}.tmp", base_part_name)),
+            publisher,
+        )?;
+        let mut dep_writer = catalog_writer::StreamingCatalogPartWriter::begin(
+            catalog_dir.join(format!("{}.tmp", dependency_part_name)),
+            publisher,
+        )?;
+        let mut summary_writer = catalog_writer::StreamingCatalogPartWriter::begin(
+            catalog_dir.join(format!("{}.tmp", summary_part_name)),
+            publisher,
+        )?;
+
+        // Per-stem buffers — flushed when the stem changes. Bounded by the
+        // number of versions a single stem can have (small).
+        let mut current_stem: Option<String> = None;
+        let mut base_buf: Vec<crate::repository::catalog::PackageVersionEntry> = Vec::new();
+        let mut dep_buf: Vec<crate::repository::catalog::PackageVersionEntry> = Vec::new();
+        let mut summary_buf: Vec<crate::repository::catalog::PackageVersionEntry> = Vec::new();
+
+        // Update log accumulator — only populated when create_update_log
+        // is set. The current callers in this codebase pass false; if
+        // that ever changes for a large publisher, this will need its own
+        // streaming writer.
+        let mut update_entries: Vec<(
+            Fmri,
+            BTreeMap<String, BTreeMap<String, Vec<String>>>,
+            String,
+        )> = Vec::new();
+
+        // Track counts and unique-stem count.
+        let mut package_count: usize = 0;
+        let mut package_version_count: usize = 0;
+
+        // Process each package in deterministic order (by FMRI string).
+        // FMRI-string sort clusters all versions of a stem consecutively,
+        // which is what the per-stem flush below relies on.
         let mut packages = packages;
         packages.sort_by(|a, b| a.fmri.to_string().cmp(&b.fmri.to_string()));
 
         let mut processed_in_batch = 0usize;
         let mut batch_no = 0usize;
+
+        let flush_stem = |stem: &str,
+                          base_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
+                          dep_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
+                          summary_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
+                          base_writer: &mut catalog_writer::StreamingCatalogPartWriter,
+                          dep_writer: &mut catalog_writer::StreamingCatalogPartWriter,
+                          summary_writer: &mut catalog_writer::StreamingCatalogPartWriter|
+         -> Result<()> {
+            if !base_buf.is_empty() {
+                base_writer.write_stem(stem, base_buf)?;
+                base_buf.clear();
+            }
+            if !dep_buf.is_empty() {
+                dep_writer.write_stem(stem, dep_buf)?;
+                dep_buf.clear();
+            }
+            if !summary_buf.is_empty() {
+                summary_writer.write_stem(stem, summary_buf)?;
+                summary_buf.clear();
+            }
+            Ok(())
+        };
 
         for package in packages {
             let fmri = &package.fmri;
@@ -2390,8 +2455,32 @@ impl FileBackend {
                 m
             };
 
-            // Add to base entries
-            base_entries.push((fmri.clone(), None, signature.clone()));
+            // Flush previous stem's accumulated version entries when we
+            // hit a new stem. base/dep/summary are written in lockstep so
+            // their stem keys stay in the same order on disk.
+            let stem_owned = stem.to_string();
+            if current_stem.as_deref() != Some(stem) {
+                if let Some(prev) = current_stem.take() {
+                    flush_stem(
+                        &prev,
+                        &mut base_buf,
+                        &mut dep_buf,
+                        &mut summary_buf,
+                        &mut base_writer,
+                        &mut dep_writer,
+                        &mut summary_writer,
+                    )?;
+                }
+                current_stem = Some(stem_owned.clone());
+                package_count += 1;
+            }
+
+            // Base entry: just version + signature.
+            base_buf.push(crate::repository::catalog::PackageVersionEntry {
+                version: fmri.version().to_string(),
+                actions: None,
+                signature_sha1: Some(signature.clone()),
+            });
 
             tracing::trace!(
                 fmri = %fmri,
@@ -2458,11 +2547,11 @@ impl FileBackend {
 
             // Add to dependency entries if there are dependency actions
             if !dependency_actions.is_empty() {
-                dependency_entries.push((
-                    fmri.clone(),
-                    Some(dependency_actions.clone()),
-                    signature.clone(),
-                ));
+                dep_buf.push(crate::repository::catalog::PackageVersionEntry {
+                    version: fmri.version().to_string(),
+                    actions: Some(dependency_actions.clone()),
+                    signature_sha1: None,
+                });
             }
 
             // Extract summary actions (set actions excluding variants and facets)
@@ -2484,11 +2573,11 @@ impl FileBackend {
 
             // Add to summary entries if there are summary actions
             if !summary_actions.is_empty() {
-                summary_entries.push((
-                    fmri.clone(),
-                    Some(summary_actions.clone()),
-                    signature.clone(),
-                ));
+                summary_buf.push(crate::repository::catalog::PackageVersionEntry {
+                    version: fmri.version().to_string(),
+                    actions: Some(summary_actions.clone()),
+                    signature_sha1: None,
+                });
             }
 
             // Prepare update entry if needed
@@ -2513,8 +2602,8 @@ impl FileBackend {
                 update_entries.push((fmri.clone(), catalog_parts, signature));
             }
 
-            // Update counts
-            package_count += 1;
+            // Update counts. package_count is incremented above when the
+            // stem changes; here we count each version.
             package_version_count += 1;
 
             processed_in_batch += 1;
@@ -2531,99 +2620,68 @@ impl FileBackend {
             }
         }
 
-        // Create and save catalog parts
+        // Flush the last stem's buffers, if any, then close out the part
+        // streams.
+        if let Some(prev) = current_stem.take() {
+            flush_stem(
+                &prev,
+                &mut base_buf,
+                &mut dep_buf,
+                &mut summary_buf,
+                &mut base_writer,
+                &mut dep_writer,
+                &mut summary_writer,
+            )?;
+        }
 
-        // Create a catalog.attrs file
-        let now = SystemTime::now();
-        let timestamp = crate::repository::catalog::format_iso8601_basic(&now);
+        debug!("Writing base part to: {}", base_part_path.display());
+        let base_sig = base_writer.finalize(&base_part_path)?;
+        debug!("Wrote base part file");
 
-        // Get the CatalogAttrs struct definition to see what fields it has
+        debug!(
+            "Writing dependency part to: {}",
+            dependency_part_path.display()
+        );
+        let dependency_sig = dep_writer.finalize(&dependency_part_path)?;
+        debug!("Wrote dependency part file");
+
+        debug!("Writing summary part to: {}", summary_part_path.display());
+        let summary_sig = summary_writer.finalize(&summary_part_path)?;
+        debug!("Wrote summary part file");
+
+        // Build catalog.attrs now that we have package counts and part
+        // signatures.
         let mut attrs = crate::repository::catalog::CatalogAttrs {
             created: timestamp.clone(),
             last_modified: timestamp.clone(),
             package_count,
             package_version_count,
             parts: BTreeMap::new(),
-            version: 1, // CatalogVersion::V1 is 1
+            version: 1,
             signature: None,
             updates: BTreeMap::new(),
         };
-
-        // Add part information
-        let base_part_name = "catalog.base.C";
         attrs.parts.insert(
             base_part_name.to_string(),
             crate::repository::catalog::CatalogPartInfo {
                 last_modified: timestamp.clone(),
-                signature_sha1: None,
+                signature_sha1: Some(base_sig),
             },
         );
-
-        let dependency_part_name = "catalog.dependency.C";
         attrs.parts.insert(
             dependency_part_name.to_string(),
             crate::repository::catalog::CatalogPartInfo {
                 last_modified: timestamp.clone(),
-                signature_sha1: None,
+                signature_sha1: Some(dependency_sig),
             },
         );
-
-        let summary_part_name = "catalog.summary.C";
         attrs.parts.insert(
             summary_part_name.to_string(),
             crate::repository::catalog::CatalogPartInfo {
                 last_modified: timestamp.clone(),
-                signature_sha1: None,
+                signature_sha1: Some(summary_sig),
             },
         );
-
-        // Create and save catalog parts
-
-        // Base part
-        let base_part_path = catalog_dir.join(base_part_name);
-        debug!("Writing base part to: {}", base_part_path.display());
-        let mut base_part = crate::repository::catalog::CatalogPart::new();
-        for (fmri, actions, signature) in base_entries {
-            base_part.add_package(publisher, &fmri, actions, Some(signature));
-        }
-        let base_sig = catalog_writer::write_catalog_part(&base_part_path, &mut base_part)?;
-        debug!("Wrote base part file");
-
-        // Dependency part
-        let dependency_part_path = catalog_dir.join(dependency_part_name);
-        debug!(
-            "Writing dependency part to: {}",
-            dependency_part_path.display()
-        );
-        let mut dependency_part = crate::repository::catalog::CatalogPart::new();
-        for (fmri, actions, _signature) in dependency_entries {
-            dependency_part.add_package(publisher, &fmri, actions, None);
-        }
-        let dependency_sig =
-            catalog_writer::write_catalog_part(&dependency_part_path, &mut dependency_part)?;
-        debug!("Wrote dependency part file");
-
-        // Summary part
-        let summary_part_path = catalog_dir.join(summary_part_name);
-        debug!("Writing summary part to: {}", summary_part_path.display());
-        let mut summary_part = crate::repository::catalog::CatalogPart::new();
-        for (fmri, actions, _signature) in summary_entries {
-            summary_part.add_package(publisher, &fmri, actions, None);
-        }
-        let summary_sig =
-            catalog_writer::write_catalog_part(&summary_part_path, &mut summary_part)?;
-        debug!("Wrote summary part file");
-
-        // Update part signatures in attrs (written after parts)
-        if let Some(info) = attrs.parts.get_mut(base_part_name) {
-            info.signature_sha1 = Some(base_sig);
-        }
-        if let Some(info) = attrs.parts.get_mut(dependency_part_name) {
-            info.signature_sha1 = Some(dependency_sig);
-        }
-        if let Some(info) = attrs.parts.get_mut(summary_part_name) {
-            info.signature_sha1 = Some(summary_sig);
-        }
 
         // Save the catalog.attrs file (after parts so signatures are present)
         let attrs_path = catalog_dir.join("catalog.attrs");
