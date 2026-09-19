@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-09  
 **Status:** Active  
-**Issue:** [#3 Server Publish](https://codeberg.org/Toasterson/ips/issues/3)
+**Issue:** [#3 Server Publish](https://code.aopc.cloud/OpenIndiana/ips/issues/3)
 
 ## Goal
 

@@ -112,3 +112,27 @@ The legacy `pkg(1)` Python client expects these from a depot server:
 - Create a new timestamped plan in `docs/ai/plans/` before starting a new phase or significant feature.
 - Create a new timestamped ADR in `docs/ai/decisions/` when making meaningful technology or design choices. Number sequentially from the last ADR.
 - Never delete old plans or decisions. Mark superseded plans with status `Superseded` and link to the replacement.
+
+## Agent skills
+
+Matt Pocock's engineering skills are vendored under `.agents/skills/` (symlinked
+into `.claude/skills/`; tracked in `skills-lock.json`, update with
+`npx skills update`). Run `/ask-matt` to pick a flow; `/grill-with-docs` before
+non-trivial changes, `/to-tickets` or `/to-spec` to publish work, `/triage` for
+the issue queue, `/tdd` and `/implement` to build.
+
+### Issue tracker
+
+Issues live on Forgejo at <https://code.aopc.cloud/OpenIndiana/ips>, driven via
+the REST API with a `FORGEJO_TOKEN`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage labels (`needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, `wontfix`) exist verbatim in the repo.
+See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` at the root, ADRs in `docs/ai/decisions/`.
+See `docs/agents/domain.md`.
