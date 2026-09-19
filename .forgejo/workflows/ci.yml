@@ -26,6 +26,12 @@ env:
   CARGO_TERM_COLOR: always
   # sccache's S3 round trip on a cold VM can exceed the 10 s default.
   SCCACHE_STARTUP_TIMEOUT: "60"
+  # Fresh VM every run: incremental artifacts are dead weight, and full
+  # debuginfo for --all-targets of this workspace runs into many GB (the
+  # illumos VM has 8 GB RAM / a ~40 GB disk). Line tables keep backtraces.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   linux:
@@ -72,12 +78,16 @@ jobs:
     name: illumos (OpenIndiana) build + nextest
     runs-on: illumos
     steps:
-      - name: Toolchain
+      - name: Toolchain and host resources
         run: |
           uname -a
           rustc -Vv
           cargo -V
           command -v sccache && sccache --version || echo "sccache not on PATH"
+          prtconf 2>/dev/null | grep -i memory || true
+          swap -l || true
+          df -h /export/home /tmp || true
+          zfs list -o name,used,avail,refer,mountpoint 2>/dev/null | head -20 || true
 
       - name: Install cargo-nextest
         run: |
@@ -85,12 +95,21 @@ jobs:
           curl -LsSf https://get.nexte.st/latest/illumos | gtar zxf - -C "$HOME/.cargo/bin"
           PATH="$HOME/.cargo/bin:$PATH" cargo nextest --version
 
-      - name: Build
+      - name: Build (bins and libs)
         # aws-lc-sys (via rustls / jsonwebtoken) has no illumos-specific
         # pregenerated bindings but ships universal ones since aws-lc-rs 1.15,
         # so no bindgen/libclang is needed; it builds through cmake + gcc from
         # build-essential. See docs/research/illumos-crypto-stack.md (#35).
-        run: cargo build --workspace --all-targets --locked
+        # On failure, dump disk and memory state: a silent `ld returned 1`
+        # with no diagnostic is usually ENOSPC or memory pressure on the VM.
+        run: |
+          cargo build --workspace --locked || {
+            echo "=== build failed; host state ==="; df -h /export/home /tmp; swap -l; zfs list 2>/dev/null | head; du -sh target 2>/dev/null; exit 1; }
+
+      - name: Build (test targets)
+        run: |
+          cargo build --workspace --all-targets --locked || {
+            echo "=== build failed; host state ==="; df -h /export/home /tmp; swap -l; zfs list 2>/dev/null | head; du -sh target 2>/dev/null; exit 1; }
 
       - name: Test (nextest)
         run: |
