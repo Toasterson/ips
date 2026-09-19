@@ -1,0 +1,109 @@
+name: CI
+
+# Runs on Solstice CI (https://code.aopc.cloud/CloudNebulaProject/solstice-ci),
+# a native Forgejo Actions runner that boots a fresh VM per job. Differences
+# from GitHub Actions that shape this file:
+#   * No `uses:` steps. The repo is cloned automatically; steps start in the
+#     repo root. No actions/cache, no artifacts, no $GITHUB_PATH/$GITHUB_ENV.
+#   * `needs:` is not honoured: every job is independent and starts at once.
+#   * Compile caching comes from the images themselves: both the `rust` and
+#     `illumos` images ship sccache, and the runner injects RUSTC_WRAPPER plus
+#     the shared S3 backend into every step whenever `sccache` is on PATH.
+#     The `rust` image also ships a pre-warmed cargo registry.
+#
+# Images (see the Solstice image catalog):
+#   rust     Ubuntu 22.04 + stable rustup toolchain + sccache + build-essential,
+#            libssl-dev, libprotobuf-dev, docker.  4 vCPU / 8 GB.
+#   illumos  OpenIndiana Hipster + developer/lang/rustc + sccache +
+#            build-essential (gcc, cmake, gnu-make, pkg-config).  4 vCPU / 8 GB.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # sccache's S3 round trip on a cold VM can exceed the 10 s default.
+  SCCACHE_STARTUP_TIMEOUT: "60"
+
+jobs:
+  linux:
+    name: Linux (fmt / clippy / nextest / e2e / docs)
+    runs-on: rust
+    steps:
+      - name: Toolchain
+        run: |
+          rustc -Vv
+          cargo -V
+          command -v sccache && sccache --version || echo "sccache not on PATH"
+
+      - name: Install cargo-nextest
+        # Tests need process isolation (port conflicts); CLAUDE.md mandates nextest.
+        run: |
+          curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (report only)
+        # libips currently carries ~270 clippy findings (mostly
+        # result_large_err and collapsible_if), so warnings are not denied yet.
+        # Tracked in the "Make the workspace clippy-clean" ticket; flip to
+        # `-- -D warnings` once that lands.
+        run: cargo clippy --workspace --all-targets --all-features --locked
+
+      - name: Build
+        run: cargo build --workspace --all-targets --locked
+
+      - name: Test (nextest)
+        run: cargo nextest run --workspace --locked
+
+      - name: End-to-end tests
+        run: |
+          cargo run -p xtask --locked -- build-e2e
+          cargo run -p xtask --locked -- run-e2e
+
+      - name: Docs
+        run: cargo doc --workspace --no-deps --locked
+
+  illumos:
+    name: illumos (OpenIndiana) build + nextest
+    runs-on: illumos
+    steps:
+      - name: Toolchain
+        run: |
+          uname -a
+          rustc -Vv
+          cargo -V
+          command -v sccache && sccache --version || echo "sccache not on PATH"
+
+      - name: Install libclang (aws-lc-sys bindgen)
+        # aws-lc-sys (via rustls / jsonwebtoken in pkg6depotd) has no
+        # pregenerated bindings for x86_64-unknown-illumos, so it runs bindgen
+        # at build time and needs libclang. cmake comes from build-essential.
+        # `pkg install` exits 4 when everything is already current.
+        run: |
+          sudo pkg install -v developer/clang-20 || [ $? -eq 4 ]
+          ls /usr/clang/20/lib/libclang.so* 2>/dev/null || true
+
+      - name: Install cargo-nextest
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl -LsSf https://get.nexte.st/latest/illumos | gtar zxf - -C "$HOME/.cargo/bin"
+          PATH="$HOME/.cargo/bin:$PATH" cargo nextest --version
+
+      - name: Build
+        env:
+          LIBCLANG_PATH: /usr/clang/20/lib
+        run: |
+          export PATH="/usr/clang/20/bin:$PATH"
+          cargo build --workspace --all-targets --locked
+
+      - name: Test (nextest)
+        env:
+          LIBCLANG_PATH: /usr/clang/20/lib
+        run: |
+          export PATH="$HOME/.cargo/bin:/usr/clang/20/bin:$PATH"
+          cargo nextest run --workspace --locked

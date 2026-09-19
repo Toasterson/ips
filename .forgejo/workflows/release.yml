@@ -1,0 +1,77 @@
+name: release
+
+# Build and publish release tarballs when a v* tag is pushed. Solstice CI jobs
+# run in independent VMs with no artifact passing, so each platform job
+# builds its own tarball and uploads it straight to the Forgejo release for
+# the tag (creating the release if it does not exist yet).
+#
+# Requires a repository secret RELEASE_TOKEN (PAT with write:repository), or
+# repo settings that grant the per-run FORGEJO_TOKEN release write access.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_STARTUP_TIMEOUT: "60"
+  FORGE_BASE: https://code.aopc.cloud
+  REPO_OWNER: OpenIndiana
+  REPO_NAME: ips
+  BINARIES: pkg6 pkg6repo pkg6recv pkg6depotd pkgtree
+
+jobs:
+  linux:
+    name: Release build (Linux x86_64)
+    runs-on: rust
+    steps:
+      - name: Build release binaries
+        run: cargo build --workspace --release --locked
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          staging=$(mktemp -d)
+          for b in $BINARIES; do install -m0755 "target/release/$b" "$staging/$b"; done
+          tar -C "$staging" -czf ips-linux-x86_64.tar.gz .
+          sha256sum ips-linux-x86_64.tar.gz > ips-linux-x86_64.tar.gz.sha256
+
+      - name: Upload to Forgejo release
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          set -euo pipefail
+          .forgejo/scripts/upload-release-assets.sh ips-linux-x86_64.tar.gz ips-linux-x86_64.tar.gz.sha256
+
+  illumos:
+    name: Release build (illumos x86_64)
+    runs-on: illumos
+    steps:
+      - name: Install libclang (aws-lc-sys bindgen) and jq
+        run: sudo pkg install -v developer/clang-20 text/jq || [ $? -eq 4 ]
+
+      - name: Build release binaries
+        env:
+          LIBCLANG_PATH: /usr/clang/20/lib
+        run: |
+          export PATH="/usr/clang/20/bin:$PATH"
+          cargo build --workspace --release --locked
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          staging=$(mktemp -d)
+          for b in $BINARIES; do cp "target/release/$b" "$staging/$b" && chmod 0755 "$staging/$b"; done
+          gtar -C "$staging" -czf ips-illumos-x86_64.tar.gz .
+          sha256sum ips-illumos-x86_64.tar.gz > ips-illumos-x86_64.tar.gz.sha256 \
+            || digest -a sha256 ips-illumos-x86_64.tar.gz > ips-illumos-x86_64.tar.gz.sha256
+
+      - name: Upload to Forgejo release
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          set -euo pipefail
+          .forgejo/scripts/upload-release-assets.sh ips-illumos-x86_64.tar.gz ips-illumos-x86_64.tar.gz.sha256
