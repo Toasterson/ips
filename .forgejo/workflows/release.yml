@@ -49,15 +49,11 @@ jobs:
     name: Release build (illumos x86_64)
     runs-on: illumos
     steps:
-      - name: Install libclang (aws-lc-sys bindgen) and jq
-        run: sudo pkg install -v developer/clang-20 text/jq || [ $? -eq 4 ]
+      - name: Install jq (release upload script)
+        run: sudo pkg install -v text/jq || [ $? -eq 4 ]
 
       - name: Build release binaries
-        env:
-          LIBCLANG_PATH: /usr/clang/20/lib
-        run: |
-          export PATH="/usr/clang/20/bin:$PATH"
-          cargo build --workspace --release --locked
+        run: cargo build --workspace --release --locked
 
       - name: Package
         run: |

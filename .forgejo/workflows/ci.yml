@@ -79,15 +79,6 @@ jobs:
           cargo -V
           command -v sccache && sccache --version || echo "sccache not on PATH"
 
-      - name: Install libclang (aws-lc-sys bindgen)
-        # aws-lc-sys (via rustls / jsonwebtoken in pkg6depotd) has no
-        # pregenerated bindings for x86_64-unknown-illumos, so it runs bindgen
-        # at build time and needs libclang. cmake comes from build-essential.
-        # `pkg install` exits 4 when everything is already current.
-        run: |
-          sudo pkg install -v developer/clang-20 || [ $? -eq 4 ]
-          ls /usr/clang/20/lib/libclang.so* 2>/dev/null || true
-
       - name: Install cargo-nextest
         run: |
           mkdir -p "$HOME/.cargo/bin"
@@ -95,15 +86,13 @@ jobs:
           PATH="$HOME/.cargo/bin:$PATH" cargo nextest --version
 
       - name: Build
-        env:
-          LIBCLANG_PATH: /usr/clang/20/lib
-        run: |
-          export PATH="/usr/clang/20/bin:$PATH"
-          cargo build --workspace --all-targets --locked
+        # aws-lc-sys (via rustls / jsonwebtoken) has no illumos-specific
+        # pregenerated bindings but ships universal ones since aws-lc-rs 1.15,
+        # so no bindgen/libclang is needed; it builds through cmake + gcc from
+        # build-essential. See docs/research/illumos-crypto-stack.md (#35).
+        run: cargo build --workspace --all-targets --locked
 
       - name: Test (nextest)
-        env:
-          LIBCLANG_PATH: /usr/clang/20/lib
         run: |
-          export PATH="$HOME/.cargo/bin:/usr/clang/20/bin:$PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
           cargo nextest run --workspace --locked
