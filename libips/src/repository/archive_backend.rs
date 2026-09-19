@@ -15,9 +15,9 @@ use std::sync::Mutex;
 use tracing::debug;
 use zip::ZipArchive;
 
+use super::PublisherInfo;
 use super::archive_writer::ArchiveMetadata;
 use super::file_backend::FileBackend;
-use super::PublisherInfo;
 
 /// A read-only repository backed by a `.p6p` ZIP archive.
 pub struct ArchiveBackend {
@@ -42,11 +42,7 @@ impl ArchiveBackend {
             format!("publisher/{}/file/{}", publisher, hash)
         } else {
             let first_two = &hash[0..2];
-            let next_two = if hash.len() >= 4 {
-                &hash[2..4]
-            } else {
-                ""
-            };
+            let next_two = if hash.len() >= 4 { &hash[2..4] } else { "" };
             format!(
                 "publisher/{}/file/{}/{}/{}",
                 publisher, first_two, next_two, hash
@@ -67,15 +63,16 @@ impl ReadableRepository for ArchiveBackend {
 
         // Read and parse the metadata index
         let metadata: ArchiveMetadata = {
-            let mut entry = archive
-                .by_name("pkg6.archive.json")
-                .map_err(|e| RepositoryError::ArchiveError(format!("missing pkg6.archive.json: {}", e)))?;
+            let mut entry = archive.by_name("pkg6.archive.json").map_err(|e| {
+                RepositoryError::ArchiveError(format!("missing pkg6.archive.json: {}", e))
+            })?;
             let mut buf = String::new();
-            entry
-                .read_to_string(&mut buf)
-                .map_err(|e| RepositoryError::ArchiveError(format!("failed to read pkg6.archive.json: {}", e)))?;
-            serde_json::from_str(&buf)
-                .map_err(|e| RepositoryError::ArchiveError(format!("invalid pkg6.archive.json: {}", e)))?
+            entry.read_to_string(&mut buf).map_err(|e| {
+                RepositoryError::ArchiveError(format!("failed to read pkg6.archive.json: {}", e))
+            })?;
+            serde_json::from_str(&buf).map_err(|e| {
+                RepositoryError::ArchiveError(format!("invalid pkg6.archive.json: {}", e))
+            })?
         };
 
         Ok(ArchiveBackend {
@@ -228,9 +225,9 @@ impl ReadableRepository for ArchiveBackend {
             .lock()
             .map_err(|e| RepositoryError::Other(format!("archive lock poisoned: {}", e)))?;
 
-        let mut entry = archive
-            .by_name(&archive_path)
-            .map_err(|e| RepositoryError::ArchiveError(format!("payload {} not found: {}", digest, e)))?;
+        let mut entry = archive.by_name(&archive_path).map_err(|e| {
+            RepositoryError::ArchiveError(format!("payload {} not found: {}", digest, e))
+        })?;
 
         // Write to a temp file then rename for atomicity
         if let Some(parent) = dest.parent() {
@@ -245,8 +242,9 @@ impl ReadableRepository for ArchiveBackend {
             source: e,
         })?;
 
-        std::io::copy(&mut entry, &mut out)
-            .map_err(|e| RepositoryError::ArchiveError(format!("failed to extract payload: {}", e)))?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| {
+            RepositoryError::ArchiveError(format!("failed to extract payload: {}", e))
+        })?;
 
         Ok(())
     }
@@ -265,11 +263,12 @@ impl ReadableRepository for ArchiveBackend {
 
             if let Ok(mut entry) = archive.by_name(&json_path) {
                 let mut buf = String::new();
-                entry
-                    .read_to_string(&mut buf)
-                    .map_err(|e| RepositoryError::ArchiveError(format!("failed to read json manifest: {}", e)))?;
-                return serde_json::from_str(&buf)
-                    .map_err(|e| RepositoryError::ArchiveError(format!("invalid json manifest: {}", e)));
+                entry.read_to_string(&mut buf).map_err(|e| {
+                    RepositoryError::ArchiveError(format!("failed to read json manifest: {}", e))
+                })?;
+                return serde_json::from_str(&buf).map_err(|e| {
+                    RepositoryError::ArchiveError(format!("invalid json manifest: {}", e))
+                });
             }
         }
 
@@ -288,14 +287,14 @@ impl ReadableRepository for ArchiveBackend {
             .lock()
             .map_err(|e| RepositoryError::Other(format!("archive lock poisoned: {}", e)))?;
 
-        let mut entry = archive
-            .by_name(&archive_path)
-            .map_err(|e| RepositoryError::ArchiveError(format!("manifest not found for {}: {}", fmri, e)))?;
+        let mut entry = archive.by_name(&archive_path).map_err(|e| {
+            RepositoryError::ArchiveError(format!("manifest not found for {}: {}", fmri, e))
+        })?;
 
         let mut buf = String::new();
-        entry
-            .read_to_string(&mut buf)
-            .map_err(|e| RepositoryError::ArchiveError(format!("failed to read manifest: {}", e)))?;
+        entry.read_to_string(&mut buf).map_err(|e| {
+            RepositoryError::ArchiveError(format!("failed to read manifest: {}", e))
+        })?;
 
         Ok(buf)
     }
@@ -362,8 +361,10 @@ fn glob_match(s: &str, pattern: &str) -> bool {
                     return true;
                 }
                 while si.peek().is_some() {
-                    if glob_match(&si.clone().collect::<String>(), &pi.clone().collect::<String>())
-                    {
+                    if glob_match(
+                        &si.clone().collect::<String>(),
+                        &pi.clone().collect::<String>(),
+                    ) {
                         return true;
                     }
                     si.next();

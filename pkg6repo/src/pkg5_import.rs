@@ -551,8 +551,7 @@ impl Pkg5Importer {
                 // Extract the gzipped file
                 let mut source_file = File::open(&file_path).with_path(&file_path)?;
 
-                let mut dest_file =
-                    File::create(&proto_file_path).with_path(&proto_file_path)?;
+                let mut dest_file = File::create(&proto_file_path).with_path(&proto_file_path)?;
 
                 // Check if the file is gzipped
                 let mut header = [0; 2];
@@ -566,12 +565,10 @@ impl Pkg5Importer {
                 if header[0] == 0x1f && header[1] == 0x8b {
                     // File is gzipped, decompress it
                     let mut decoder = flate2::read::GzDecoder::new(source_file);
-                    std::io::copy(&mut decoder, &mut dest_file)
-                        .with_path(&proto_file_path)?;
+                    std::io::copy(&mut decoder, &mut dest_file).with_path(&proto_file_path)?;
                 } else {
                     // File is not gzipped, copy it as is
-                    std::io::copy(&mut source_file, &mut dest_file)
-                        .with_path(&proto_file_path)?;
+                    std::io::copy(&mut source_file, &mut dest_file).with_path(&proto_file_path)?;
                 }
 
                 // Add the file to the transaction
@@ -597,10 +594,7 @@ impl Pkg5Importer {
             } else if file_path_old.exists() {
                 file_path_old
             } else {
-                warn!(
-                    "Signature file not found in source repository: {}",
-                    hash
-                );
+                warn!("Signature file not found in source repository: {}", hash);
                 continue;
             };
 

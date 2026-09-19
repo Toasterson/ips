@@ -1461,9 +1461,7 @@ impl ObsoletedPackageManager {
 
         match index_result {
             Ok(Some((metadata, _))) => Ok(Some(metadata)),
-            Ok(None) => {
-                self.get_obsoleted_package_metadata_from_filesystem(publisher, fmri)
-            }
+            Ok(None) => self.get_obsoleted_package_metadata_from_filesystem(publisher, fmri),
             Err(e) => {
                 warn!("Failed to get entry from index: {}", e);
                 self.get_obsoleted_package_metadata_from_filesystem(publisher, fmri)
@@ -1576,9 +1574,7 @@ impl ObsoletedPackageManager {
                 }
                 Ok(Some(manifest))
             }
-            Ok(None) => {
-                self.get_obsoleted_package_manifest_from_filesystem(publisher, fmri)
-            }
+            Ok(None) => self.get_obsoleted_package_manifest_from_filesystem(publisher, fmri),
             Err(e) => {
                 warn!("Failed to get entry from index: {}", e);
                 self.get_obsoleted_package_manifest_from_filesystem(publisher, fmri)
@@ -1827,21 +1823,19 @@ impl ObsoletedPackageManager {
         let mut needs_rebuild = false;
         {
             match self.index.write() {
-                Ok(index) => {
-                    match index.remove_entry(&key) {
-                        Ok(true) => {
-                            debug!("Removed package from index: {}", fmri);
-                        }
-                        Ok(false) => {
-                            debug!("Package not found in index: {}", fmri);
-                            needs_rebuild = true;
-                        }
-                        Err(e) => {
-                            warn!("Failed to remove package from index: {}: {}", fmri, e);
-                            needs_rebuild = true;
-                        }
+                Ok(index) => match index.remove_entry(&key) {
+                    Ok(true) => {
+                        debug!("Removed package from index: {}", fmri);
                     }
-                }
+                    Ok(false) => {
+                        debug!("Package not found in index: {}", fmri);
+                        needs_rebuild = true;
+                    }
+                    Err(e) => {
+                        warn!("Failed to remove package from index: {}: {}", fmri, e);
+                        needs_rebuild = true;
+                    }
+                },
                 Err(e) => {
                     warn!(
                         "Failed to acquire write lock on index, package not removed from index: {}: {}",

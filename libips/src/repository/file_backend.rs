@@ -4,6 +4,10 @@
 //  obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::{RepositoryError, Result};
+use crate::actions::{File as FileAction, Manifest, quote_action_value};
+use crate::digest::{Digest, DigestAlgorithm, DigestSource};
+use crate::fmri::Fmri;
+use crate::payload::{Payload, PayloadCompressionAlgorithm};
 use flate2::Compression as GzipCompression;
 use flate2::write::GzEncoder;
 use lz4::EncoderBuilder;
@@ -19,10 +23,6 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info};
-use crate::actions::{File as FileAction, Manifest, quote_action_value};
-use crate::digest::{Digest, DigestAlgorithm, DigestSource};
-use crate::fmri::Fmri;
-use crate::payload::{Payload, PayloadCompressionAlgorithm};
 
 use super::catalog_writer;
 use super::{
@@ -89,8 +89,7 @@ pub struct FileBackend {
     /// Uses Mutex for interior mutability to allow mutation through immutable references (thread-safe)
     catalog_manager: Option<Mutex<crate::repository::catalog::CatalogManager>>,
     /// Manager for obsoleted packages
-    obsoleted_manager:
-        Option<Mutex<crate::repository::obsoleted::ObsoletedPackageManager>>,
+    obsoleted_manager: Option<Mutex<crate::repository::obsoleted::ObsoletedPackageManager>>,
 }
 
 /// Transaction for publishing packages
@@ -278,8 +277,11 @@ impl Transaction {
 
         // Add a file to the list for later processing during commit
         // Track both compressed hash (storage key) and primary hash (for compatibility lookups)
-        self.files
-            .push((temp_file_path.clone(), compressed_hash.clone(), hash.clone()));
+        self.files.push((
+            temp_file_path.clone(),
+            compressed_hash.clone(),
+            hash.clone(),
+        ));
 
         // Set the primary identifier (uncompressed SHA256 hash)
         payload.primary_identifier = Digest {
@@ -399,8 +401,11 @@ impl Transaction {
         for (source_path, compressed_hash, primary_hash) in self.files {
             // Primary storage path: use the primary (uncompressed) hash as the key,
             // matching IPS protocol where clients look up files by manifest hash
-            let primary_path =
-                FileBackend::construct_file_path_with_publisher(&self.repo, &publisher, &primary_hash);
+            let primary_path = FileBackend::construct_file_path_with_publisher(
+                &self.repo,
+                &publisher,
+                &primary_hash,
+            );
 
             if let Some(parent) = primary_path.parent() {
                 fs::create_dir_all(parent).map_err(|e| RepositoryError::DirectoryCreateError {
@@ -410,22 +415,29 @@ impl Transaction {
             }
 
             if !primary_path.exists() {
-                fs::rename(&source_path, &primary_path).map_err(|e| RepositoryError::FileRenameError {
-                    from: source_path.clone(),
-                    to: primary_path.clone(),
-                    source: e,
+                fs::rename(&source_path, &primary_path).map_err(|e| {
+                    RepositoryError::FileRenameError {
+                        from: source_path.clone(),
+                        to: primary_path.clone(),
+                        source: e,
+                    }
                 })?;
             }
 
             // Also create a hardlink under the compressed hash for internal lookups
             if primary_hash != compressed_hash {
-                let compressed_path =
-                    FileBackend::construct_file_path_with_publisher(&self.repo, &publisher, &compressed_hash);
+                let compressed_path = FileBackend::construct_file_path_with_publisher(
+                    &self.repo,
+                    &publisher,
+                    &compressed_hash,
+                );
                 if !compressed_path.exists() {
                     if let Some(parent) = compressed_path.parent() {
-                        fs::create_dir_all(parent).map_err(|e| RepositoryError::DirectoryCreateError {
-                            path: parent.to_path_buf(),
-                            source: e,
+                        fs::create_dir_all(parent).map_err(|e| {
+                            RepositoryError::DirectoryCreateError {
+                                path: parent.to_path_buf(),
+                                source: e,
+                            }
                         })?;
                     }
                     if let Err(e) = fs::hard_link(&primary_path, &compressed_path) {
@@ -645,10 +657,8 @@ impl ReadableRepository for FileBackend {
             // a directory walk over thousands of stem dirs.
             let active_path = self.shard_dir(publisher_name).join("active.db");
             let from_catalog = active_path.exists()
-                && match Connection::open_with_flags(
-                    &active_path,
-                    OpenFlags::SQLITE_OPEN_READ_ONLY,
-                ) {
+                && match Connection::open_with_flags(&active_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                {
                     Ok(conn) => match conn.query_row(
                         "SELECT COUNT(DISTINCT stem) FROM packages",
                         [],
@@ -1365,10 +1375,11 @@ impl ReadableRepository for FileBackend {
                 path: tmp.clone(),
                 source: e,
             })?;
-            f.write_all(&bytes).map_err(|e| RepositoryError::FileWriteError {
-                path: tmp.clone(),
-                source: e,
-            })?;
+            f.write_all(&bytes)
+                .map_err(|e| RepositoryError::FileWriteError {
+                    path: tmp.clone(),
+                    source: e,
+                })?;
         }
         fs::rename(&tmp, dest).map_err(|e| RepositoryError::FileRenameError {
             from: tmp,
@@ -1398,8 +1409,7 @@ impl ReadableRepository for FileBackend {
             let json_path = PathBuf::from(format!("{}.json", path.display()));
             if json_path.exists() {
                 return Some(
-                    crate::actions::Manifest::parse_file(&json_path)
-                        .map_err(RepositoryError::from),
+                    crate::actions::Manifest::parse_file(&json_path).map_err(RepositoryError::from),
                 );
             }
             if path.exists() {
@@ -1805,8 +1815,8 @@ impl FileBackend {
             })
             .map_err(|e| RepositoryError::Other(format!("Query failed: {}", e)))?;
         for row in rows {
-            let (stem, version) = row
-                .map_err(|e| RepositoryError::Other(format!("Row read failed: {}", e)))?;
+            let (stem, version) =
+                row.map_err(|e| RepositoryError::Other(format!("Row read failed: {}", e)))?;
             if let Some(rx) = &compiled {
                 if !rx.is_match(&stem) {
                     continue;
@@ -2352,28 +2362,29 @@ impl FileBackend {
         let mut processed_in_batch = 0usize;
         let mut batch_no = 0usize;
 
-        let flush_stem = |stem: &str,
-                          base_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
-                          dep_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
-                          summary_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
-                          base_writer: &mut catalog_writer::StreamingCatalogPartWriter,
-                          dep_writer: &mut catalog_writer::StreamingCatalogPartWriter,
-                          summary_writer: &mut catalog_writer::StreamingCatalogPartWriter|
-         -> Result<()> {
-            if !base_buf.is_empty() {
-                base_writer.write_stem(stem, base_buf)?;
-                base_buf.clear();
-            }
-            if !dep_buf.is_empty() {
-                dep_writer.write_stem(stem, dep_buf)?;
-                dep_buf.clear();
-            }
-            if !summary_buf.is_empty() {
-                summary_writer.write_stem(stem, summary_buf)?;
-                summary_buf.clear();
-            }
-            Ok(())
-        };
+        let flush_stem =
+            |stem: &str,
+             base_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
+             dep_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
+             summary_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
+             base_writer: &mut catalog_writer::StreamingCatalogPartWriter,
+             dep_writer: &mut catalog_writer::StreamingCatalogPartWriter,
+             summary_writer: &mut catalog_writer::StreamingCatalogPartWriter|
+             -> Result<()> {
+                if !base_buf.is_empty() {
+                    base_writer.write_stem(stem, base_buf)?;
+                    base_buf.clear();
+                }
+                if !dep_buf.is_empty() {
+                    dep_writer.write_stem(stem, dep_buf)?;
+                    dep_buf.clear();
+                }
+                if !summary_buf.is_empty() {
+                    summary_writer.write_stem(stem, summary_buf)?;
+                    summary_buf.clear();
+                }
+                Ok(())
+            };
 
         for package in packages {
             let fmri = &package.fmri;
@@ -2424,19 +2435,20 @@ impl FileBackend {
             tracing::trace!(fmri = %fmri, "catalog rebuild: hashing manifest");
             let signature = {
                 use std::io::Read;
-                let mut f = fs::File::open(&manifest_path).map_err(|e| {
-                    RepositoryError::FileReadError {
-                        path: manifest_path.clone(),
-                        source: e,
-                    }
-                })?;
-                let mut hasher = sha1::Sha1::new();
-                let mut buf = [0u8; 64 * 1024];
-                loop {
-                    let n = f.read(&mut buf).map_err(|e| RepositoryError::FileReadError {
+                let mut f =
+                    fs::File::open(&manifest_path).map_err(|e| RepositoryError::FileReadError {
                         path: manifest_path.clone(),
                         source: e,
                     })?;
+                let mut hasher = sha1::Sha1::new();
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    let n = f
+                        .read(&mut buf)
+                        .map_err(|e| RepositoryError::FileReadError {
+                            path: manifest_path.clone(),
+                            source: e,
+                        })?;
                     if n == 0 {
                         break;
                     }
@@ -2446,8 +2458,7 @@ impl FileBackend {
             };
 
             tracing::trace!(fmri = %fmri, "catalog rebuild: extracting metadata");
-            let (attributes, dependencies) =
-                Manifest::extract_metadata(&manifest_path)?;
+            let (attributes, dependencies) = Manifest::extract_metadata(&manifest_path)?;
             let manifest = {
                 let mut m = Manifest::new();
                 m.attributes = attributes;
@@ -2493,10 +2504,8 @@ impl FileBackend {
             let mut dependency_actions = Vec::new();
             for dep in &manifest.dependencies {
                 if let Some(dep_fmri) = &dep.fmri {
-                    let mut action = format!(
-                        "depend fmri={} type={}",
-                        dep_fmri, dep.dependency_type
-                    );
+                    let mut action =
+                        format!("depend fmri={} type={}", dep_fmri, dep.dependency_type);
 
                     // Add predicate for conditional dependencies
                     if let Some(predicate_fmri) = &dep.predicate {
@@ -2510,22 +2519,38 @@ impl FileBackend {
 
                     // Add any optional properties
                     for prop in &dep.optional {
-                        action.push_str(&format!(" {}={}", prop.key, quote_action_value(&prop.value)));
+                        action.push_str(&format!(
+                            " {}={}",
+                            prop.key,
+                            quote_action_value(&prop.value)
+                        ));
                     }
 
                     // Add facets
                     for (facet_name, facet) in &dep.facets {
-                        action.push_str(&format!(" facet.{}={}", facet_name, quote_action_value(&facet.value)));
+                        action.push_str(&format!(
+                            " facet.{}={}",
+                            facet_name,
+                            quote_action_value(&facet.value)
+                        ));
                     }
 
                     // Add any optional properties
                     for prop in &dep.optional {
-                        action.push_str(&format!(" {}={}", prop.key, quote_action_value(&prop.value)));
+                        action.push_str(&format!(
+                            " {}={}",
+                            prop.key,
+                            quote_action_value(&prop.value)
+                        ));
                     }
 
                     // Add facets
                     for (facet_name, facet) in &dep.facets {
-                        action.push_str(&format!(" facet.{}={}", facet_name, quote_action_value(&facet.value)));
+                        action.push_str(&format!(
+                            " facet.{}={}",
+                            facet_name,
+                            quote_action_value(&facet.value)
+                        ));
                     }
 
                     dependency_actions.push(action);
@@ -2611,10 +2636,7 @@ impl FileBackend {
                 batch_no += 1;
                 info!(
                     publisher,
-                    batch_no,
-                    processed_in_batch,
-                    package_count,
-                    "catalog rebuild batch processed"
+                    batch_no, processed_in_batch, package_count, "catalog rebuild batch processed"
                 );
                 processed_in_batch = 0;
             }
@@ -2825,7 +2847,8 @@ impl FileBackend {
     /// It uses interior mutability with Mutex to allow mutation through an immutable reference.
     pub fn get_obsoleted_manager(
         &mut self,
-    ) -> Result<std::sync::MutexGuard<'_, crate::repository::obsoleted::ObsoletedPackageManager>> {
+    ) -> Result<std::sync::MutexGuard<'_, crate::repository::obsoleted::ObsoletedPackageManager>>
+    {
         if self.obsoleted_manager.is_none() {
             let manager = crate::repository::obsoleted::ObsoletedPackageManager::new(&self.path);
             let mutex = Mutex::new(manager);
@@ -2924,9 +2947,7 @@ impl FileBackend {
                     Some(pub_name),
                     limit,
                 )
-                .map_err(|e| {
-                    RepositoryError::Other(format!("FTS search error: {}", e.message))
-                })?;
+                .map_err(|e| RepositoryError::Other(format!("FTS search error: {}", e.message)))?;
 
                 if fts_results.is_empty() {
                     continue;
@@ -2947,12 +2968,9 @@ impl FileBackend {
 
                 for fts_result in fts_results {
                     let key = (fts_result.stem.clone(), fts_result.publisher.clone());
-                    let fmri = fmri_map
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            format!("pkg://{}/{}", fts_result.publisher, fts_result.stem)
-                        });
+                    let fmri = fmri_map.get(&key).cloned().unwrap_or_else(|| {
+                        format!("pkg://{}/{}", fts_result.publisher, fts_result.stem)
+                    });
 
                     results.push(IndexEntry {
                         fmri,

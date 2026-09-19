@@ -1323,8 +1323,9 @@ fn main() -> Result<()> {
             let fmri_filter: Option<Vec<libips::fmri::Fmri>> = if let Some(pkg_strs) = packages {
                 let mut fmris = Vec::new();
                 for s in pkg_strs {
-                    let fmri = libips::fmri::Fmri::parse(s)
-                        .map_err(|e| Pkg6RepoError::Other(format!("invalid FMRI '{}': {}", s, e)))?;
+                    let fmri = libips::fmri::Fmri::parse(s).map_err(|e| {
+                        Pkg6RepoError::Other(format!("invalid FMRI '{}': {}", s, e))
+                    })?;
                     fmris.push(fmri);
                 }
                 Some(fmris)
@@ -1340,11 +1341,7 @@ fn main() -> Result<()> {
             };
 
             for pub_name in &publishers_to_archive {
-                writer.add_from_repository(
-                    &source_repo,
-                    pub_name,
-                    fmri_filter.as_deref(),
-                )?;
+                writer.add_from_repository(&source_repo, pub_name, fmri_filter.as_deref())?;
             }
 
             writer.finish()?;
@@ -1375,7 +1372,11 @@ fn main() -> Result<()> {
             let publishers_to_import: Vec<String> = if let Some(pub_name) = publisher {
                 vec![pub_name.clone()]
             } else {
-                source_info.publishers.iter().map(|p| p.name.clone()).collect()
+                source_info
+                    .publishers
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect()
             };
 
             for pub_name in &publishers_to_import {

@@ -1,11 +1,6 @@
-use axum::{
-    Router,
-    middleware::from_fn_with_state,
-    response::IntoResponse,
-    routing::get,
-};
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use pkg6depotd::http::middleware::{require_auth, AuthState, AuthenticatedUser};
+use axum::{Router, middleware::from_fn_with_state, response::IntoResponse, routing::get};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use pkg6depotd::http::middleware::{AuthState, AuthenticatedUser, require_auth};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -24,11 +19,7 @@ struct TestClaims {
 }
 
 /// Create a test token with the given claims.
-fn create_test_token(
-    encoding_key: &EncodingKey,
-    kid: &str,
-    claims: &TestClaims,
-) -> String {
+fn create_test_token(encoding_key: &EncodingKey, kid: &str, claims: &TestClaims) -> String {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(kid.to_string());
     encode(&header, claims, encoding_key).unwrap()
@@ -216,8 +207,7 @@ async fn test_missing_scopes_rejected() {
     let jwks_json = pem_to_jwks_json(kid);
     let (jwks_url, _handle) = start_jwks_server(jwks_json).await;
 
-    let auth =
-        build_auth_state(&jwks_url, issuer, audience, vec!["pkg:publish".into()]).await;
+    let auth = build_auth_state(&jwks_url, issuer, audience, vec!["pkg:publish".into()]).await;
 
     let rsa_private_pem = include_str!("fixtures/test_rsa_private.pem");
     let encoding_key = EncodingKey::from_rsa_pem(rsa_private_pem.as_bytes()).unwrap();
@@ -254,16 +244,13 @@ async fn test_no_token_returns_401() {
     let jwks_json = pem_to_jwks_json(kid);
     let (jwks_url, _handle) = start_jwks_server(jwks_json).await;
 
-    let auth =
-        Arc::new(build_auth_state(&jwks_url, issuer, audience, vec![]).await);
+    let auth = Arc::new(build_auth_state(&jwks_url, issuer, audience, vec![]).await);
 
     // Build a router with the auth middleware protecting a test route
     let app = Router::new()
         .route(
             "/protected",
-            get(|user: AuthenticatedUser| async move {
-                format!("Hello, {}", user.subject)
-            }),
+            get(|user: AuthenticatedUser| async move { format!("Hello, {}", user.subject) }),
         )
         .layer(from_fn_with_state(auth.clone(), require_auth))
         .with_state(auth);

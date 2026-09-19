@@ -247,8 +247,9 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
                     .fetch_payload(&publisher_str, digest, &temp_file_path)?;
 
                 let current_count = {
-                    let mut count = files_done.lock()
-                        .map_err(|e| RepositoryError::Other(format!("Failed to lock progress counter: {}", e)))?;
+                    let mut count = files_done.lock().map_err(|e| {
+                        RepositoryError::Other(format!("Failed to lock progress counter: {}", e))
+                    })?;
                     *count += 1;
                     *count
                 };
@@ -311,10 +312,8 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
             }
 
             // Also check the global location as a fallback
-            let global_dest_path = crate::repository::FileBackend::construct_file_path(
-                &self.dest.path,
-                digest,
-            );
+            let global_dest_path =
+                crate::repository::FileBackend::construct_file_path(&self.dest.path, digest);
 
             if !dest_path.exists() && !global_dest_path.exists() {
                 debug!(
@@ -491,16 +490,14 @@ mod tests {
         receiver.receive(Some("test"), &[Fmri::new("pkgA")], false)?;
 
         // Verify dest repo has the signature payload in the correct location
-        let expected_sig_path = FileBackend::construct_file_path_with_publisher(
-            dest_dir.path(),
-            "test",
-            &payload_hash,
-        );
-        let global_sig_path = FileBackend::construct_file_path(
-            dest_dir.path(),
-            &payload_hash,
-        );
-        let final_path = if expected_sig_path.exists() { expected_sig_path } else { global_sig_path };
+        let expected_sig_path =
+            FileBackend::construct_file_path_with_publisher(dest_dir.path(), "test", &payload_hash);
+        let global_sig_path = FileBackend::construct_file_path(dest_dir.path(), &payload_hash);
+        let final_path = if expected_sig_path.exists() {
+            expected_sig_path
+        } else {
+            global_sig_path
+        };
         let content = std::fs::read(&final_path).unwrap();
         assert_eq!(content, payload_content);
 
@@ -572,10 +569,8 @@ mod tests {
         assert_eq!(pkgs.len(), 1, "Package should exist in destination");
 
         // Verify the manifest contains all files
-        let dest_manifest = dest_repo_check.fetch_manifest(
-            "test",
-            &Fmri::parse("pkg://test/multifile@1.0").unwrap(),
-        )?;
+        let dest_manifest = dest_repo_check
+            .fetch_manifest("test", &Fmri::parse("pkg://test/multifile@1.0").unwrap())?;
         assert_eq!(
             dest_manifest.files.len(),
             file_contents.len(),

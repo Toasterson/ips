@@ -49,9 +49,7 @@ struct Cli {
 
 fn main() -> Result<()> {
     // Initialize tracing
-    fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    fmt().with_env_filter(EnvFilter::from_default_env()).init();
 
     let cli = Cli::parse();
 
@@ -109,23 +107,26 @@ fn resolve_packages<R: ReadableRepository>(
         if pkg_str.contains('*') || pkg_str.contains('?') {
             // It's a pattern, resolve it
             info!("Resolving wildcard pattern: {}", pkg_str);
-            let matched = repo.list_packages(default_publisher, Some(pkg_str)).into_diagnostic()?;
-            
+            let matched = repo
+                .list_packages(default_publisher, Some(pkg_str))
+                .into_diagnostic()?;
+
             if matched.is_empty() {
                 warn!("No packages matched pattern: {}", pkg_str);
             }
-            
+
             // For each matched stem, we probably want the newest version if not specified.
-            // list_packages returns all versions. PackageReceiver::receive also handles 
+            // list_packages returns all versions. PackageReceiver::receive also handles
             // FMRIs without versions by picking the newest.
             // But list_packages returns full FMRIs. If the pattern matched multiple packages,
             // we get all versions of all of them.
-            
-            // To be consistent with IPS, if someone says "text/*", they usually want 
+
+            // To be consistent with IPS, if someone says "text/*", they usually want
             // the latest version of everything that matches.
-            
-            let mut latest_versions: std::collections::HashMap<String, Fmri> = std::collections::HashMap::new();
-            
+
+            let mut latest_versions: std::collections::HashMap<String, Fmri> =
+                std::collections::HashMap::new();
+
             for pi in matched {
                 let entry = latest_versions.entry(pi.fmri.name.clone());
                 match entry {
@@ -139,7 +140,7 @@ fn resolve_packages<R: ReadableRepository>(
                     }
                 }
             }
-            
+
             for (_, fmri) in latest_versions {
                 info!("Found package: {}", fmri);
                 resolved_fmris.push(fmri);

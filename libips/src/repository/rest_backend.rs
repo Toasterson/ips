@@ -594,10 +594,11 @@ impl ReadableRepository for RestBackend {
 
                     // Verify digest if algorithm is known
                     if let Some(alg) = algo.clone() {
-                        let f = File::open(&tmp_path).map_err(|e| RepositoryError::FileOpenError {
-                            path: tmp_path.clone(),
-                            source: e,
-                        })?;
+                        let f =
+                            File::open(&tmp_path).map_err(|e| RepositoryError::FileOpenError {
+                                path: tmp_path.clone(),
+                                source: e,
+                            })?;
                         let comp = crate::digest::Digest::from_reader(
                             f,
                             alg,
@@ -1222,18 +1223,19 @@ impl RestBackend {
             let mut catalog_manager = self.get_catalog_manager(&pub_name)?;
 
             let attrs_path = cache_path.join("catalog.attrs");
-            let attrs_content = fs::read_to_string(&attrs_path).map_err(|e| {
-                RepositoryError::FileReadError {
+            let attrs_content =
+                fs::read_to_string(&attrs_path).map_err(|e| RepositoryError::FileReadError {
                     path: attrs_path.clone(),
                     source: e,
-                }
-            })?;
+                })?;
             let attrs: Value = serde_json::from_str(&attrs_content).map_err(|e| {
                 RepositoryError::JsonParseError(format!("Failed to parse catalog.attrs: {}", e))
             })?;
 
             let parts = attrs["parts"].as_object().ok_or_else(|| {
-                RepositoryError::JsonParseError("Missing 'parts' field in catalog.attrs".to_string())
+                RepositoryError::JsonParseError(
+                    "Missing 'parts' field in catalog.attrs".to_string(),
+                )
             })?;
 
             let mut seen_fmris = HashSet::new();
@@ -1241,7 +1243,10 @@ impl RestBackend {
             for part_name in parts.keys() {
                 // Load part explicitly because CatalogManager doesn't load them automatically
                 catalog_manager.load_part(part_name).map_err(|e| {
-                    RepositoryError::Other(format!("Failed to load catalog part {}: {}", part_name, e))
+                    RepositoryError::Other(format!(
+                        "Failed to load catalog part {}: {}",
+                        part_name, e
+                    ))
                 })?;
 
                 if let Some(part) = catalog_manager.get_part(part_name) {
@@ -1265,10 +1270,8 @@ impl RestBackend {
 
                             if matches {
                                 for v_entry in versions {
-                                    let fmri_str = format!(
-                                        "pkg://{}/{}@{}",
-                                        pub_name, stem, v_entry.version
-                                    );
+                                    let fmri_str =
+                                        format!("pkg://{}/{}@{}", pub_name, stem, v_entry.version);
                                     if seen_fmris.insert(fmri_str.clone()) {
                                         if let Ok(fmri) = crate::fmri::Fmri::parse(&fmri_str) {
                                             packages.push(PackageInfo { fmri });

@@ -276,9 +276,9 @@ impl CatalogPart {
 
     /// Get signature information if present
     pub fn signature(&self) -> Option<BTreeMap<String, String>> {
-        self.metadata.get("_SIGNATURE").and_then(|v| {
-            serde_json::from_value::<BTreeMap<String, String>>(v.clone()).ok()
-        })
+        self.metadata
+            .get("_SIGNATURE")
+            .and_then(|v| serde_json::from_value::<BTreeMap<String, String>>(v.clone()).ok())
     }
 
     /// Set signature information
@@ -480,9 +480,9 @@ impl UpdateLog {
 
     /// Get signature information if present
     pub fn signature(&self) -> Option<BTreeMap<String, String>> {
-        self.metadata.get("_SIGNATURE").and_then(|v| {
-            serde_json::from_value::<BTreeMap<String, String>>(v.clone()).ok()
-        })
+        self.metadata
+            .get("_SIGNATURE")
+            .and_then(|v| serde_json::from_value::<BTreeMap<String, String>>(v.clone()).ok())
     }
 
     /// Set signature information

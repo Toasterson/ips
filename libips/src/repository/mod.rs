@@ -257,6 +257,8 @@ impl From<zip::result::ZipError> for RepositoryError {
 }
 
 pub mod archive_backend;
+#[cfg(test)]
+mod archive_tests;
 pub mod archive_writer;
 pub mod catalog;
 mod catalog_writer;
@@ -267,17 +269,15 @@ mod rest_backend;
 pub mod shard_sync;
 pub mod sqlite_catalog;
 #[cfg(test)]
-mod archive_tests;
-#[cfg(test)]
 mod tests;
 
 use crate::actions::ActionError;
 use crate::digest::DigestError;
+pub use archive_backend::ArchiveBackend;
+pub use archive_writer::ArchiveWriter;
 pub use catalog::{
     CatalogAttrs, CatalogError, CatalogManager, CatalogOperationType, CatalogPart, UpdateLog,
 };
-pub use archive_backend::ArchiveBackend;
-pub use archive_writer::ArchiveWriter;
 pub use file_backend::{FileBackend, IndexEntry};
 pub use obsoleted::{ObsoletedPackageManager, ObsoletedPackageMetadata};
 pub use progress::{NoopProgressReporter, ProgressInfo, ProgressReporter};

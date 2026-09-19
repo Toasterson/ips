@@ -85,10 +85,7 @@ fn base_router(state: Arc<DepotRepo>) -> Router {
         .route("/search/0/{token}", get(search::get_default_search_v0))
         .route("/search/1/{token}", get(search::get_default_search_v1))
         .route("/search/1/", post(search::post_default_search_v1))
-        .route(
-            "/{publisher}/index/0/{command}",
-            get(index::get_index_v0),
-        )
+        .route("/{publisher}/index/0/{command}", get(index::get_index_v0))
         // Admin API over HTTP
         .route("/admin/health", get(admin::health))
         .route("/admin/auth/check", post(admin::auth_check))
@@ -97,7 +94,10 @@ fn base_router(state: Arc<DepotRepo>) -> Router {
         .route("/ui/packages/{publisher}", get(ui::ui_packages))
         .route("/ui/search", get(ui::ui_search))
         .route("/ui/search/results", get(ui::ui_search_results))
-        .route("/ui/package/{publisher}/{*fmri}", get(ui::ui_package_detail))
+        .route(
+            "/ui/package/{publisher}/{*fmri}",
+            get(ui::ui_package_detail),
+        )
         .route("/ui/p5i", get(ui::ui_p5i_generate))
         // Embedded static assets
         .route("/ui/static/js/htmx.min.js", get(ui::static_htmx_js))

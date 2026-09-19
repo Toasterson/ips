@@ -38,7 +38,9 @@ pub enum Pkg6RepoError {
     #[error("I/O error at {path}: {source}")]
     #[diagnostic(
         code(pkg6repo::io_error_at),
-        help("Check that the path is accessible, has the right permissions, and the underlying filesystem has enough space")
+        help(
+            "Check that the path is accessible, has the right permissions, and the underlying filesystem has enough space"
+        )
     )]
     IoErrorAt {
         path: std::path::PathBuf,

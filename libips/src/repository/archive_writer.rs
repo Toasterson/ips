@@ -11,8 +11,8 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use tracing::{debug, info};
-use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
+use zip::write::SimpleFileOptions;
 
 use super::file_backend::FileBackend;
 
@@ -56,10 +56,11 @@ pub struct ArchiveWriter {
 impl ArchiveWriter {
     /// Create a new archive at the given path.
     pub fn create<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = fs::File::create(path.as_ref()).map_err(|e| RepositoryError::FileCreateError {
-            path: path.as_ref().to_path_buf(),
-            source: e,
-        })?;
+        let file =
+            fs::File::create(path.as_ref()).map_err(|e| RepositoryError::FileCreateError {
+                path: path.as_ref().to_path_buf(),
+                source: e,
+            })?;
 
         let zip = ZipWriter::new(file);
 
@@ -94,8 +95,7 @@ impl ArchiveWriter {
             // Apply filter if provided
             if let Some(filter) = fmri_filter {
                 let matches = filter.iter().any(|f| {
-                    f.name == fmri.name
-                        && (f.version.is_none() || f.version() == fmri.version())
+                    f.name == fmri.name && (f.version.is_none() || f.version() == fmri.version())
                 });
                 if !matches {
                     continue;
@@ -141,10 +141,12 @@ impl ArchiveWriter {
 
         self.zip
             .start_file(&manifest_archive_path, options)
-            .map_err(|e| RepositoryError::ArchiveError(format!("failed to start manifest entry: {}", e)))?;
-        self.zip
-            .write_all(manifest_text.as_bytes())
-            .map_err(|e| RepositoryError::ArchiveError(format!("failed to write manifest: {}", e)))?;
+            .map_err(|e| {
+                RepositoryError::ArchiveError(format!("failed to start manifest entry: {}", e))
+            })?;
+        self.zip.write_all(manifest_text.as_bytes()).map_err(|e| {
+            RepositoryError::ArchiveError(format!("failed to write manifest: {}", e))
+        })?;
 
         // Write the JSON manifest
         let json_manifest_path = format!("{}.json", manifest_archive_path);
@@ -153,10 +155,12 @@ impl ArchiveWriter {
 
         self.zip
             .start_file(&json_manifest_path, options)
-            .map_err(|e| RepositoryError::ArchiveError(format!("failed to start json manifest entry: {}", e)))?;
-        self.zip
-            .write_all(&json_bytes)
-            .map_err(|e| RepositoryError::ArchiveError(format!("failed to write json manifest: {}", e)))?;
+            .map_err(|e| {
+                RepositoryError::ArchiveError(format!("failed to start json manifest entry: {}", e))
+            })?;
+        self.zip.write_all(&json_bytes).map_err(|e| {
+            RepositoryError::ArchiveError(format!("failed to write json manifest: {}", e))
+        })?;
 
         // Collect file hashes and write payloads
         let mut file_hashes = Vec::new();
@@ -174,8 +178,9 @@ impl ArchiveWriter {
                 let file_archive_path = Self::file_archive_path(publisher, hash);
 
                 // Fetch payload to a temporary file, then read and compress into ZIP
-                let temp_dir = tempfile::tempdir()
-                    .map_err(|e| RepositoryError::ArchiveError(format!("failed to create temp dir: {}", e)))?;
+                let temp_dir = tempfile::tempdir().map_err(|e| {
+                    RepositoryError::ArchiveError(format!("failed to create temp dir: {}", e))
+                })?;
                 let temp_path = temp_dir.path().join(hash);
 
                 source.fetch_payload(publisher, hash, &temp_path)?;
@@ -187,10 +192,12 @@ impl ArchiveWriter {
 
                 self.zip
                     .start_file(&file_archive_path, options)
-                    .map_err(|e| RepositoryError::ArchiveError(format!("failed to start file entry: {}", e)))?;
-                self.zip
-                    .write_all(&payload_bytes)
-                    .map_err(|e| RepositoryError::ArchiveError(format!("failed to write file: {}", e)))?;
+                    .map_err(|e| {
+                        RepositoryError::ArchiveError(format!("failed to start file entry: {}", e))
+                    })?;
+                self.zip.write_all(&payload_bytes).map_err(|e| {
+                    RepositoryError::ArchiveError(format!("failed to write file: {}", e))
+                })?;
 
                 self.written_files.insert(hash.clone());
                 self.total_files += 1;
@@ -214,25 +221,30 @@ impl ArchiveWriter {
             }
 
             let file_archive_path = Self::file_archive_path(publisher, digest);
-            let temp_dir = tempfile::tempdir()
-                .map_err(|e| RepositoryError::ArchiveError(format!("failed to create temp dir: {}", e)))?;
+            let temp_dir = tempfile::tempdir().map_err(|e| {
+                RepositoryError::ArchiveError(format!("failed to create temp dir: {}", e))
+            })?;
             let temp_path = temp_dir.path().join(digest);
 
             match source.fetch_payload(publisher, digest, &temp_path) {
                 Ok(()) => {
-                    let payload_bytes = fs::read(&temp_path).map_err(|e| {
-                        RepositoryError::FileReadError {
+                    let payload_bytes =
+                        fs::read(&temp_path).map_err(|e| RepositoryError::FileReadError {
                             path: temp_path.clone(),
                             source: e,
-                        }
-                    })?;
+                        })?;
 
                     self.zip
                         .start_file(&file_archive_path, options)
-                        .map_err(|e| RepositoryError::ArchiveError(format!("failed to start sig entry: {}", e)))?;
-                    self.zip
-                        .write_all(&payload_bytes)
-                        .map_err(|e| RepositoryError::ArchiveError(format!("failed to write sig: {}", e)))?;
+                        .map_err(|e| {
+                            RepositoryError::ArchiveError(format!(
+                                "failed to start sig entry: {}",
+                                e
+                            ))
+                        })?;
+                    self.zip.write_all(&payload_bytes).map_err(|e| {
+                        RepositoryError::ArchiveError(format!("failed to write sig: {}", e))
+                    })?;
 
                     self.written_files.insert(digest.clone());
                     self.total_files += 1;
@@ -250,15 +262,13 @@ impl ArchiveWriter {
             .find(|a| a.key == "pkg.summary")
             .and_then(|a| a.values.first().cloned());
 
-        let obsolete = manifest
-            .attributes
-            .iter()
-            .any(|a| a.key == "pkg.obsolete" && a.values.first().map(|v| v == "true").unwrap_or(false));
+        let obsolete = manifest.attributes.iter().any(|a| {
+            a.key == "pkg.obsolete" && a.values.first().map(|v| v == "true").unwrap_or(false)
+        });
 
-        let renamed = manifest
-            .attributes
-            .iter()
-            .any(|a| a.key == "pkg.renamed" && a.values.first().map(|v| v == "true").unwrap_or(false));
+        let renamed = manifest.attributes.iter().any(|a| {
+            a.key == "pkg.renamed" && a.values.first().map(|v| v == "true").unwrap_or(false)
+        });
 
         self.packages.push(ArchivePackageEntry {
             fmri: fmri.to_string(),
@@ -305,8 +315,7 @@ impl ArchiveWriter {
         }
 
         // Try LZ4 decompression (LZ4 frame magic: 04 22 4D 18)
-        if raw.len() >= 4 && raw[0] == 0x04 && raw[1] == 0x22 && raw[2] == 0x4D && raw[3] == 0x18
-        {
+        if raw.len() >= 4 && raw[0] == 0x04 && raw[1] == 0x22 && raw[2] == 0x4D && raw[3] == 0x18 {
             let decoder = lz4::Decoder::new(&raw[..]);
             if let Ok(mut decoder) = decoder {
                 let mut decompressed = Vec::new();
@@ -347,9 +356,9 @@ impl ArchiveWriter {
             .write_all(&json)
             .map_err(|e| RepositoryError::ArchiveError(format!("failed to write index: {}", e)))?;
 
-        self.zip
-            .finish()
-            .map_err(|e| RepositoryError::ArchiveError(format!("failed to finalize archive: {}", e)))?;
+        self.zip.finish().map_err(|e| {
+            RepositoryError::ArchiveError(format!("failed to finalize archive: {}", e))
+        })?;
 
         info!(
             "Archive complete: {} packages, {} files",

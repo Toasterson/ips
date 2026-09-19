@@ -65,10 +65,8 @@ pub fn unquote_action_value(s: &str) -> String {
 /// is empty, contains whitespace, or contains either quote character.
 /// Inverse of [`unquote_action_value`].
 pub fn quote_action_value(s: &str) -> String {
-    let needs_quote = s.is_empty()
-        || s.chars().any(|c| c.is_whitespace())
-        || s.contains('"')
-        || s.contains('\'');
+    let needs_quote =
+        s.is_empty() || s.chars().any(|c| c.is_whitespace()) || s.contains('"') || s.contains('\'');
     if needs_quote {
         let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{}\"", escaped)
@@ -1084,9 +1082,7 @@ impl Manifest {
     /// manifests with thousands of file actions. JSON manifests fall back
     /// to the structured deserializer (small in practice) and we keep only
     /// attributes + dependencies.
-    pub fn extract_metadata<P: AsRef<Path>>(
-        path: P,
-    ) -> Result<(Vec<Attr>, Vec<Dependency>)> {
+    pub fn extract_metadata<P: AsRef<Path>>(path: P) -> Result<(Vec<Attr>, Vec<Dependency>)> {
         use std::io::{BufRead, BufReader, Read};
 
         // JSON-detection: peek at the first non-whitespace byte. If it's
@@ -1365,10 +1361,7 @@ fn split_property(property_string: String) -> (String, String) {
     match property_string.find('=') {
         Some(_) => {
             let v: Vec<_> = property_string.split('=').collect();
-            (
-                String::from(v[0]),
-                unquote_action_value(v[1]),
-            )
+            (String::from(v[0]), unquote_action_value(v[1]))
         }
         None => (property_string.clone(), String::new()),
     }

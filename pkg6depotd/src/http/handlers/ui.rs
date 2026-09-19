@@ -4,7 +4,7 @@ use crate::repo::DepotRepo;
 use askama::Template;
 use axum::{
     extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use libips::actions::Manifest;
@@ -46,8 +46,9 @@ fn encode_fmri(fmri_str: &str) -> String {
 fn parse_manifest(content: &str) -> Result<Manifest, DepotError> {
     match serde_json::from_str::<Manifest>(content) {
         Ok(m) => Ok(m),
-        Err(_) => Manifest::parse_string(content.to_string())
-            .map_err(|e| DepotError::Repo(libips::repository::RepositoryError::Other(e.to_string()))),
+        Err(_) => Manifest::parse_string(content.to_string()).map_err(|e| {
+            DepotError::Repo(libips::repository::RepositoryError::Other(e.to_string()))
+        }),
     }
 }
 
@@ -222,9 +223,7 @@ pub struct P5iParams {
 // ===========================================================================
 
 /// GET /ui/ - Home page: publisher list with package counts
-pub async fn ui_index(
-    State(repo): State<Arc<DepotRepo>>,
-) -> Result<Response, DepotError> {
+pub async fn ui_index(State(repo): State<Arc<DepotRepo>>) -> Result<Response, DepotError> {
     let info = repo.get_info()?;
     let publishers = info
         .publishers
@@ -307,9 +306,7 @@ pub async fn ui_packages(
 }
 
 /// GET /ui/search - Search page (full page)
-pub async fn ui_search(
-    State(repo): State<Arc<DepotRepo>>,
-) -> Result<Response, DepotError> {
+pub async fn ui_search(State(repo): State<Arc<DepotRepo>>) -> Result<Response, DepotError> {
     let info = repo.get_info()?;
     let publishers = info.publishers.into_iter().map(|p| p.name).collect();
     render_template(&SearchTemplate { publishers })
@@ -329,10 +326,7 @@ pub async fn ui_search_results(
         }
     };
 
-    let publisher = params
-        .publisher
-        .as_deref()
-        .filter(|p| !p.is_empty());
+    let publisher = params.publisher.as_deref().filter(|p| !p.is_empty());
 
     let entries = repo.search(publisher, &query, false)?;
 
@@ -342,20 +336,19 @@ pub async fn ui_search_results(
     for entry in entries {
         if seen.insert(entry.fmri.clone()) {
             // Extract publisher, name, and version from the FMRI string
-            let (pub_name, pkg_name, path_fmri) =
-                if let Ok(fmri) = Fmri::from_str(&entry.fmri) {
-                    let pub_name = fmri.publisher.clone().unwrap_or_default();
-                    let name = fmri.name.clone();
-                    let version = fmri.version();
-                    let path = if version.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{}@{}", name, version)
-                    };
-                    (pub_name, name, path)
+            let (pub_name, pkg_name, path_fmri) = if let Ok(fmri) = Fmri::from_str(&entry.fmri) {
+                let pub_name = fmri.publisher.clone().unwrap_or_default();
+                let name = fmri.name.clone();
+                let version = fmri.version();
+                let path = if version.is_empty() {
+                    name.clone()
                 } else {
-                    (String::new(), entry.fmri.clone(), entry.fmri.clone())
+                    format!("{}@{}", name, version)
                 };
+                (pub_name, name, path)
+            } else {
+                (String::new(), entry.fmri.clone(), entry.fmri.clone())
+            };
             let fmri_encoded = encode_fmri(&path_fmri);
             results.push(SearchResultRow {
                 name: pkg_name,
@@ -400,18 +393,15 @@ pub async fn ui_package_detail(
                 {
                     let version = latest.fmri.version();
                     let path = format!("{}@{}", pkg_name, version);
-                    let redirect_url = format!(
-                        "/ui/package/{}/{}",
-                        publisher,
-                        encode_fmri(&path)
-                    );
+                    let redirect_url = format!("/ui/package/{}/{}", publisher, encode_fmri(&path));
                     return Ok(axum::response::Redirect::to(&redirect_url).into_response());
                 }
             }
             return Err(DepotError::Repo(
-                libips::repository::RepositoryError::NotFound(
-                    format!("Package {} not found in {}", pkg_name, publisher),
-                ),
+                libips::repository::RepositoryError::NotFound(format!(
+                    "Package {} not found in {}",
+                    pkg_name, publisher
+                )),
             ));
         }
         Err(e) => return Err(e),
@@ -422,10 +412,7 @@ pub async fn ui_package_detail(
     let version_full = fmri.version();
     let vp = parse_version_parts(&version_full);
 
-    let packaging_date = vp
-        .timestamp
-        .as_deref()
-        .and_then(format_packaging_date);
+    let packaging_date = vp.timestamp.as_deref().and_then(format_packaging_date);
 
     let (total_size, total_csize) = compute_sizes(&manifest);
 
@@ -457,7 +444,11 @@ pub async fn ui_package_detail(
                 // Link to package name only — dependency versions are constraints,
                 // not exact versions, so they won't match a specific manifest
                 let dep_path = dep_fmri.stem().to_string();
-                Some(format!("/ui/package/{}/{}", publisher, encode_fmri(&dep_path)))
+                Some(format!(
+                    "/ui/package/{}/{}",
+                    publisher,
+                    encode_fmri(&dep_path)
+                ))
             } else {
                 None
             };
@@ -512,9 +503,7 @@ pub async fn ui_p5i_generate(
     Query(params): Query<P5iParams>,
 ) -> Result<Response, DepotError> {
     if params.pkg.is_empty() {
-        return Err(DepotError::Server(
-            "No packages selected".to_string(),
-        ));
+        return Err(DepotError::Server("No packages selected".to_string()));
     }
 
     let host = headers
@@ -549,8 +538,7 @@ pub async fn ui_p5i_generate(
         version: 1,
     };
 
-    let json = serde_json::to_string_pretty(&p5i)
-        .map_err(|e| DepotError::Server(e.to_string()))?;
+    let json = serde_json::to_string_pretty(&p5i).map_err(|e| DepotError::Server(e.to_string()))?;
 
     Ok((
         StatusCode::OK,
@@ -576,7 +564,10 @@ static HTMX_JS_CONTENT: &str = include_str!("../../../static/js/htmx.min.js");
 pub async fn static_htmx_js() -> Response {
     (
         [
-            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         HTMX_JS_CONTENT,

@@ -194,9 +194,8 @@ impl StreamingCatalogPartWriter {
         let mut writer = BufWriter::with_capacity(64 * 1024, f);
         let mut hasher = Sha1::new();
 
-        let pub_json = serde_json::to_string(publisher).map_err(|e| {
-            RepositoryError::JsonSerializeError(format!("publisher json: {}", e))
-        })?;
+        let pub_json = serde_json::to_string(publisher)
+            .map_err(|e| RepositoryError::JsonSerializeError(format!("publisher json: {}", e)))?;
         let opening = format!("{{{}:{{", pub_json);
         writer
             .write_all(opening.as_bytes())
@@ -217,11 +216,7 @@ impl StreamingCatalogPartWriter {
     /// Emit one stem's entries: `,"<stem>":[<entries...>]` (or omit the
     /// leading comma on the first stem). `entries` is small — one stem's
     /// worth of versions.
-    pub(crate) fn write_stem(
-        &mut self,
-        stem: &str,
-        entries: &[PackageVersionEntry],
-    ) -> Result<()> {
+    pub(crate) fn write_stem(&mut self, stem: &str, entries: &[PackageVersionEntry]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -244,9 +239,9 @@ impl StreamingCatalogPartWriter {
         {
             let formatter = PythonFormatter;
             let mut ser = Serializer::with_formatter(&mut buf, formatter);
-            entries.serialize(&mut ser).map_err(|e| {
-                RepositoryError::JsonSerializeError(format!("stem entries: {}", e))
-            })?;
+            entries
+                .serialize(&mut ser)
+                .map_err(|e| RepositoryError::JsonSerializeError(format!("stem entries: {}", e)))?;
         }
 
         self.writer

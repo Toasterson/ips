@@ -247,7 +247,10 @@ mod tests {
             FileBackend::create(source_dir.path(), RepositoryVersion::V4).unwrap();
         source_repo.add_publisher("test").unwrap();
 
-        for (name, summary) in [("web/nginx", "Nginx Webserver"), ("web/apache", "Apache HTTP")] {
+        for (name, summary) in [
+            ("web/nginx", "Nginx Webserver"),
+            ("web/apache", "Apache HTTP"),
+        ] {
             let fmri = Fmri::parse(&format!("pkg://test/{}@1.0", name)).unwrap();
             let mut manifest = Manifest::new();
             manifest.attributes.push(Attr {

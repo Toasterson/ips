@@ -224,117 +224,109 @@ pub fn build_shards(
         for part_name in part_names {
             let part_path = catalog_parts_dir.join(&part_name);
 
-            let mut on_entry =
-                |pkg_name: &str,
-                 version_entry: &crate::repository::catalog::PackageVersionEntry|
-                 -> std::result::Result<(), rusqlite::Error> {
-                    let pkg_version = &version_entry.version;
+            let mut on_entry = |pkg_name: &str,
+                                version_entry: &crate::repository::catalog::PackageVersionEntry|
+             -> std::result::Result<(), rusqlite::Error> {
+                let pkg_version = &version_entry.version;
 
-                    // Build a minimal manifest from the actions
-                    let mut manifest = Manifest::new();
-                    if let Some(actions) = &version_entry.actions {
-                        for action_str in actions {
-                            if action_str.starts_with("set ") {
-                                let parts: Vec<&str> = action_str.split_whitespace().collect();
-                                if parts.len() >= 3 {
-                                    if let Some(name_part) = parts.get(1) {
-                                        if let Some(key) = name_part.strip_prefix("name=") {
-                                            if let Some(value_part) = parts.get(2) {
-                                                if let Some(mut value) =
-                                                    value_part.strip_prefix("value=")
-                                                {
-                                                    value = value.trim_matches('"');
-                                                    let mut attr =
-                                                        crate::actions::Attr::default();
-                                                    attr.key = key.to_string();
-                                                    attr.values = vec![value.to_string()];
-                                                    manifest.attributes.push(attr);
-                                                }
+                // Build a minimal manifest from the actions
+                let mut manifest = Manifest::new();
+                if let Some(actions) = &version_entry.actions {
+                    for action_str in actions {
+                        if action_str.starts_with("set ") {
+                            let parts: Vec<&str> = action_str.split_whitespace().collect();
+                            if parts.len() >= 3 {
+                                if let Some(name_part) = parts.get(1) {
+                                    if let Some(key) = name_part.strip_prefix("name=") {
+                                        if let Some(value_part) = parts.get(2) {
+                                            if let Some(mut value) =
+                                                value_part.strip_prefix("value=")
+                                            {
+                                                value = value.trim_matches('"');
+                                                let mut attr = crate::actions::Attr::default();
+                                                attr.key = key.to_string();
+                                                attr.values = vec![value.to_string()];
+                                                manifest.attributes.push(attr);
                                             }
                                         }
                                     }
                                 }
-                            } else if action_str.starts_with("depend ") {
-                                let mut dep = crate::actions::Dependency::default();
-                                for part in action_str.split_whitespace().skip(1) {
-                                    if let Some((k, v)) = part.split_once('=') {
-                                        match k {
-                                            "fmri" => {
-                                                if let Ok(f) = crate::fmri::Fmri::parse(v) {
-                                                    dep.fmri = Some(f);
-                                                }
+                            }
+                        } else if action_str.starts_with("depend ") {
+                            let mut dep = crate::actions::Dependency::default();
+                            for part in action_str.split_whitespace().skip(1) {
+                                if let Some((k, v)) = part.split_once('=') {
+                                    match k {
+                                        "fmri" => {
+                                            if let Ok(f) = crate::fmri::Fmri::parse(v) {
+                                                dep.fmri = Some(f);
                                             }
-                                            "type" => {
-                                                dep.dependency_type = v.to_string();
-                                            }
-                                            _ => {}
                                         }
+                                        "type" => {
+                                            dep.dependency_type = v.to_string();
+                                        }
+                                        _ => {}
                                     }
                                 }
-                                if dep.fmri.is_some() && !dep.dependency_type.is_empty() {
-                                    manifest.dependencies.push(dep);
-                                }
+                            }
+                            if dep.fmri.is_some() && !dep.dependency_type.is_empty() {
+                                manifest.dependencies.push(dep);
                             }
                         }
                     }
+                }
 
-                    let is_obsolete = crate::image::catalog::is_package_obsolete(&manifest);
-                    package_version_count += 1;
+                let is_obsolete = crate::image::catalog::is_package_obsolete(&manifest);
+                package_version_count += 1;
 
-                    if is_obsolete {
-                        insert_obs.execute(rusqlite::params![
-                            publisher,
-                            pkg_name,
-                            pkg_version
-                        ])?;
-                    } else {
-                        let pkg_id: i64 = insert_pkg.query_row(
-                            rusqlite::params![pkg_name, pkg_version, publisher],
-                            |row| row.get(0),
-                        )?;
-                        for dep in &manifest.dependencies {
-                            if dep.dependency_type == "require"
-                                || dep.dependency_type == "incorporate"
-                            {
-                                if let Some(dep_fmri) = &dep.fmri {
-                                    let dep_stem = dep_fmri.stem();
-                                    let dep_version =
-                                        dep_fmri.version.as_ref().map(|v| v.to_string());
-                                    insert_dep.execute(rusqlite::params![
-                                        pkg_id,
-                                        &dep.dependency_type,
-                                        dep_stem,
-                                        dep_version
-                                    ])?;
-                                }
+                if is_obsolete {
+                    insert_obs.execute(rusqlite::params![publisher, pkg_name, pkg_version])?;
+                } else {
+                    let pkg_id: i64 = insert_pkg
+                        .query_row(rusqlite::params![pkg_name, pkg_version, publisher], |row| {
+                            row.get(0)
+                        })?;
+                    for dep in &manifest.dependencies {
+                        if dep.dependency_type == "require" || dep.dependency_type == "incorporate"
+                        {
+                            if let Some(dep_fmri) = &dep.fmri {
+                                let dep_stem = dep_fmri.stem();
+                                let dep_version = dep_fmri.version.as_ref().map(|v| v.to_string());
+                                insert_dep.execute(rusqlite::params![
+                                    pkg_id,
+                                    &dep.dependency_type,
+                                    dep_stem,
+                                    dep_version
+                                ])?;
                             }
                         }
                     }
+                }
 
-                    if fts_seen.insert(pkg_name.to_string()) {
-                        let summary = manifest
-                            .attributes
-                            .iter()
-                            .find(|a| a.key == "pkg.summary")
-                            .and_then(|a| a.values.first())
-                            .map(|s| s.as_str())
-                            .unwrap_or("");
-                        let description = manifest
-                            .attributes
-                            .iter()
-                            .find(|a| a.key == "pkg.description")
-                            .and_then(|a| a.values.first())
-                            .map(|s| s.as_str())
-                            .unwrap_or("");
-                        insert_fts.execute(rusqlite::params![
-                            pkg_name,
-                            publisher,
-                            summary,
-                            description
-                        ])?;
-                    }
-                    Ok(())
-                };
+                if fts_seen.insert(pkg_name.to_string()) {
+                    let summary = manifest
+                        .attributes
+                        .iter()
+                        .find(|a| a.key == "pkg.summary")
+                        .and_then(|a| a.values.first())
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let description = manifest
+                        .attributes
+                        .iter()
+                        .find(|a| a.key == "pkg.description")
+                        .and_then(|a| a.values.first())
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    insert_fts.execute(rusqlite::params![
+                        pkg_name,
+                        publisher,
+                        summary,
+                        description
+                    ])?;
+                }
+                Ok(())
+            };
 
             stream_catalog_part_for_publisher(&part_path, publisher, &mut on_entry)?;
         }
@@ -452,9 +444,8 @@ where
     use serde::de::{DeserializeSeed, Deserializer as _, IgnoredAny, MapAccess, Visitor};
     use std::fmt;
 
-    let file = std::fs::File::open(path).map_err(|e| {
-        ShardBuildError::new(format!("Failed to open {}: {}", path.display(), e))
-    })?;
+    let file = std::fs::File::open(path)
+        .map_err(|e| ShardBuildError::new(format!("Failed to open {}: {}", path.display(), e)))?;
     let reader = std::io::BufReader::new(file);
     let mut de = serde_json::Deserializer::from_reader(reader);
 
@@ -551,9 +542,7 @@ where
 
     (&mut de)
         .deserialize_map(TopVisitor { state: &mut state })
-        .map_err(|e| {
-            ShardBuildError::new(format!("Failed to parse {}: {}", path.display(), e))
-        })?;
+        .map_err(|e| ShardBuildError::new(format!("Failed to parse {}: {}", path.display(), e)))?;
 
     if let Some(e) = state.sql_err {
         return Err(ShardBuildError::new(format!(
@@ -772,16 +761,31 @@ mod tests {
         conn.execute_batch(ACTIVE_SCHEMA).unwrap();
         conn.execute(
             "INSERT INTO packages (stem, version, publisher) VALUES (?1, ?2, ?3)",
-            rusqlite::params!["web/server/nginx", "1.24.0,5.11-2024.0.1.0", "openindiana.org"],
-        ).unwrap();
+            rusqlite::params![
+                "web/server/nginx",
+                "1.24.0,5.11-2024.0.1.0",
+                "openindiana.org"
+            ],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO packages (stem, version, publisher) VALUES (?1, ?2, ?3)",
-            rusqlite::params!["web/server/apache", "2.4.58,5.11-2024.0.1.0", "openindiana.org"],
-        ).unwrap();
+            rusqlite::params![
+                "web/server/apache",
+                "2.4.58,5.11-2024.0.1.0",
+                "openindiana.org"
+            ],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO packages (stem, version, publisher) VALUES (?1, ?2, ?3)",
-            rusqlite::params!["database/postgresql", "16.1,5.11-2024.0.1.0", "openindiana.org"],
-        ).unwrap();
+            rusqlite::params![
+                "database/postgresql",
+                "16.1,5.11-2024.0.1.0",
+                "openindiana.org"
+            ],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -834,14 +838,12 @@ mod tests {
         create_test_fts_db(&fts_path);
 
         // "coreutils" matches the otherpub entry only
-        let results =
-            search_fts(&fts_path, "coreutils", Some("otherpub"), None).unwrap();
+        let results = search_fts(&fts_path, "coreutils", Some("otherpub"), None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].publisher, "otherpub");
 
         // Same query but filtered to openindiana.org should return nothing
-        let results =
-            search_fts(&fts_path, "coreutils", Some("openindiana.org"), None).unwrap();
+        let results = search_fts(&fts_path, "coreutils", Some("openindiana.org"), None).unwrap();
         assert!(results.is_empty());
     }
 
@@ -862,17 +864,33 @@ mod tests {
         create_test_active_db(&active_path);
 
         let stems = vec![
-            ("web/server/nginx".to_string(), "openindiana.org".to_string()),
-            ("database/postgresql".to_string(), "openindiana.org".to_string()),
+            (
+                "web/server/nginx".to_string(),
+                "openindiana.org".to_string(),
+            ),
+            (
+                "database/postgresql".to_string(),
+                "openindiana.org".to_string(),
+            ),
             ("nonexistent/pkg".to_string(), "openindiana.org".to_string()),
         ];
 
         let fmris = resolve_latest_fmris(&active_path, &stems).unwrap();
         assert_eq!(fmris.len(), 2); // nonexistent should not be in results
-        assert!(fmris[&("web/server/nginx".to_string(), "openindiana.org".to_string())]
-            .contains("nginx"));
-        assert!(fmris[&("database/postgresql".to_string(), "openindiana.org".to_string())]
-            .contains("postgresql"));
+        assert!(
+            fmris[&(
+                "web/server/nginx".to_string(),
+                "openindiana.org".to_string()
+            )]
+                .contains("nginx")
+        );
+        assert!(
+            fmris[&(
+                "database/postgresql".to_string(),
+                "openindiana.org".to_string()
+            )]
+                .contains("postgresql")
+        );
     }
 
     #[test]

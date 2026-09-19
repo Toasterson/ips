@@ -1,7 +1,9 @@
 use crate::config::Config;
 use crate::errors::{DepotError, Result};
 use libips::fmri::Fmri;
-use libips::repository::{FileBackend, IndexEntry, PackageInfo, ReadableRepository, WritableRepository};
+use libips::repository::{
+    FileBackend, IndexEntry, PackageInfo, ReadableRepository, WritableRepository,
+};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -137,7 +139,9 @@ impl DepotRepo {
             .backend
             .lock()
             .map_err(|e| DepotError::Server(format!("Lock poisoned: {}", e)))?;
-        backend.list_packages(publisher, pattern).map_err(DepotError::Repo)
+        backend
+            .list_packages(publisher, pattern)
+            .map_err(DepotError::Repo)
     }
 
     pub fn get_info(&self) -> Result<libips::repository::RepositoryInfo> {

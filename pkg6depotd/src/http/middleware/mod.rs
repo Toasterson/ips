@@ -1,3 +1,3 @@
 pub mod auth;
 
-pub use auth::{require_auth, AuthState, AuthenticatedUser, AuthError};
+pub use auth::{AuthError, AuthState, AuthenticatedUser, require_auth};

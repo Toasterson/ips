@@ -7,7 +7,7 @@ use axum::{
 use serde::Serialize;
 use std::sync::Arc;
 
-use crate::http::middleware::{AuthState, AuthError};
+use crate::http::middleware::{AuthError, AuthState};
 use crate::repo::DepotRepo;
 
 #[derive(Serialize)]
@@ -47,7 +47,8 @@ pub async fn auth_check(
 
     // If no AuthState configured, just check token presence (dev mode)
     let Some(Extension(auth)) = auth_state else {
-        let authenticated = matches!(auth_header, Some(h) if h.to_ascii_lowercase().starts_with("bearer "));
+        let authenticated =
+            matches!(auth_header, Some(h) if h.to_ascii_lowercase().starts_with("bearer "));
         let resp = AuthCheckResponse {
             authenticated,
             token_present,
@@ -63,7 +64,11 @@ pub async fn auth_check(
                 None
             },
         };
-        let status = if authenticated { StatusCode::OK } else { StatusCode::UNAUTHORIZED };
+        let status = if authenticated {
+            StatusCode::OK
+        } else {
+            StatusCode::UNAUTHORIZED
+        };
         return (status, Json(resp)).into_response();
     };
 

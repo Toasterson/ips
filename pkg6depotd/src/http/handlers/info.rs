@@ -146,7 +146,11 @@ pub async fn get_info(
 // - Prefer publisher-scoped file path; fallback to global location.
 // - If content appears to be gzip-compressed (magic 1f 8b), decompress.
 // - Decode as UTF-8 (lossy) and enforce a maximum output size to avoid huge responses.
-pub(crate) fn resolve_license_text(repo: &DepotRepo, publisher: &str, digest: &str) -> Option<String> {
+pub(crate) fn resolve_license_text(
+    repo: &DepotRepo,
+    publisher: &str,
+    digest: &str,
+) -> Option<String> {
     let path = repo.get_file_path(publisher, digest)?;
     let bytes = fs::read(&path).ok()?;
 

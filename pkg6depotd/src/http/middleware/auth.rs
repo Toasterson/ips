@@ -1,12 +1,12 @@
 use crate::config::Oauth2Config;
 use axum::{
     extract::{FromRequestParts, Request},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use jsonwebtoken::{
-    decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, TokenData, Validation,
+    Algorithm, DecodingKey, TokenData, Validation, decode, decode_header, jwk::JwkSet,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -175,10 +175,7 @@ impl AuthState {
     /// 6. Return the AuthenticatedUser
     pub async fn validate_token(&self, token: &str) -> Result<AuthenticatedUser, AuthError> {
         let header = decode_header(token)?;
-        let kid = header
-            .kid
-            .as_deref()
-            .unwrap_or("");
+        let kid = header.kid.as_deref().unwrap_or("");
 
         debug!("Validating token with kid={:?}, alg={:?}", kid, header.alg);
 
@@ -196,11 +193,7 @@ impl AuthState {
         let claims = token_data.claims;
 
         // Check required scopes
-        let token_scopes: Vec<String> = claims
-            .scope
-            .split_whitespace()
-            .map(String::from)
-            .collect();
+        let token_scopes: Vec<String> = claims.scope.split_whitespace().map(String::from).collect();
 
         for required in &self.required_scopes {
             if !token_scopes.iter().any(|s| s == required) {
@@ -231,9 +224,7 @@ impl AuthState {
         let jwk = if !kid.is_empty() {
             jwks.keys
                 .iter()
-                .find(|k| {
-                    k.common.key_id.as_deref() == Some(kid)
-                })
+                .find(|k| k.common.key_id.as_deref() == Some(kid))
                 .ok_or_else(|| AuthError::KeyNotFound(kid.to_string()))?
         } else {
             // No kid — try first key that matches the algorithm

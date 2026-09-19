@@ -116,7 +116,10 @@ fn format_v1_results(results: &[IndexEntry], return_type: &str) -> String {
     for entry in results {
         match return_type {
             "1" => {
-                body.push_str(&format!("{} {} {}\n", query_number, return_type, entry.fmri));
+                body.push_str(&format!(
+                    "{} {} {}\n",
+                    query_number, return_type, entry.fmri
+                ));
             }
             _ => {
                 let matched_value = urlencoding::encode(&entry.value);

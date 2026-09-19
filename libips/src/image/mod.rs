@@ -814,10 +814,7 @@ impl Image {
     /// Unlike [`get_manifest_from_repository`] which returns a parsed [`Manifest`],
     /// this returns the original text so it can be cached on disk for offline use
     /// by `pkg verify` and `pkg fix`.
-    pub fn fetch_manifest_text_from_repository(
-        &self,
-        fmri: &crate::fmri::Fmri,
-    ) -> Result<String> {
+    pub fn fetch_manifest_text_from_repository(&self, fmri: &crate::fmri::Fmri) -> Result<String> {
         let publisher_name = if let Some(p) = &fmri.publisher {
             p.clone()
         } else {

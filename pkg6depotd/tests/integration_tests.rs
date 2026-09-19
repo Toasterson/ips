@@ -531,7 +531,10 @@ async fn test_search_endpoint() {
         .await
         .unwrap();
     let text = resp.text().await.unwrap();
-    assert!(text.contains("search 0 1"), "versions should advertise search");
+    assert!(
+        text.contains("search 0 1"),
+        "versions should advertise search"
+    );
 
     // 2. Test search v0 - search for "example" (the package stem)
     let resp = client
@@ -541,7 +544,10 @@ async fn test_search_endpoint() {
         .unwrap();
     assert!(resp.status().is_success(), "search v0 should succeed");
     let body = resp.text().await.unwrap();
-    assert!(body.contains("example"), "search v0 should find 'example' package");
+    assert!(
+        body.contains("example"),
+        "search v0 should find 'example' package"
+    );
 
     // 3. Test search v1 - search for "example"
     let resp = client
@@ -558,7 +564,10 @@ async fn test_search_endpoint() {
         body.contains("Return from search v1"),
         "search v1 should have header"
     );
-    assert!(body.contains("example"), "search v1 should find 'example' package");
+    assert!(
+        body.contains("example"),
+        "search v1 should find 'example' package"
+    );
 
     // 4. Test search v0 - no results returns 204
     let resp = client
@@ -618,10 +627,7 @@ async fn test_search_endpoint() {
 
     // 8. Test publisher-less search v1
     let resp = client
-        .get(format!(
-            "{}/search/1/False_2_None_None_example",
-            base_url
-        ))
+        .get(format!("{}/search/1/False_2_None_None_example", base_url))
         .send()
         .await
         .unwrap();
@@ -642,10 +648,7 @@ async fn test_search_endpoint() {
         .send()
         .await
         .unwrap();
-    assert!(
-        resp.status().is_success(),
-        "POST search v1 should succeed"
-    );
+    assert!(resp.status().is_success(), "POST search v1 should succeed");
     let body = resp.text().await.unwrap();
     assert!(
         body.contains("example"),

@@ -460,7 +460,7 @@ impl<'a> DependencyProvider for IpsProvider<'a> {
         let mut stmt = match self.catalog_conn.prepare(
             "SELECT d.dep_stem, d.dep_version FROM dependencies d
              JOIN packages p ON p.id = d.pkg_id
-             WHERE p.stem = ?1 AND p.version = ?2 AND p.publisher = ?3 AND d.dep_type = 'require'"
+             WHERE p.stem = ?1 AND p.version = ?2 AND p.publisher = ?3 AND d.dep_type = 'require'",
         ) {
             Ok(s) => s,
             Err(_) => return RDependencies::Known(KnownDependencies::default()),
@@ -825,38 +825,34 @@ pub fn resolve_install(
             // Try to fetch raw manifest text from the repository first.
             // We keep both parsed manifest and original text so the text can
             // be saved to disk for offline use by pkg verify / pkg fix.
-            let (manifest, manifest_text) =
-                match image_ref.fetch_manifest_text_from_repository(&fmri) {
-                    Ok(text) => {
-                        let m = crate::actions::Manifest::parse_string(text.clone()).map_err(
-                            |e| {
-                                SolverError::new(format!(
-                                    "failed to parse manifest for {}: {}",
+            let (manifest, manifest_text) = match image_ref
+                .fetch_manifest_text_from_repository(&fmri)
+            {
+                Ok(text) => {
+                    let m = crate::actions::Manifest::parse_string(text.clone()).map_err(|e| {
+                        SolverError::new(format!("failed to parse manifest for {}: {}", fmri, e))
+                    })?;
+                    (m, text)
+                }
+                Err(_repo_err) => {
+                    // Fall back to catalog cache (covers tests with mock publishers
+                    // and offline scenarios where the repo is unreachable).
+                    let m = match image_ref.get_manifest_from_catalog(&fmri) {
+                        Ok(Some(m)) => m,
+                        _ => match image_ref.get_manifest_from_repository(&fmri) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                return Err(SolverError::new(format!(
+                                    "failed to obtain manifest for {}: {}",
                                     fmri, e
-                                ))
-                            },
-                        )?;
-                        (m, text)
-                    }
-                    Err(_repo_err) => {
-                        // Fall back to catalog cache (covers tests with mock publishers
-                        // and offline scenarios where the repo is unreachable).
-                        let m = match image_ref.get_manifest_from_catalog(&fmri) {
-                            Ok(Some(m)) => m,
-                            _ => match image_ref.get_manifest_from_repository(&fmri) {
-                                Ok(m) => m,
-                                Err(e) => {
-                                    return Err(SolverError::new(format!(
-                                        "failed to obtain manifest for {}: {}",
-                                        fmri, e
-                                    )));
-                                }
-                            },
-                        };
-                        let text = serde_json::to_string(&m).unwrap_or_default();
-                        (m, text)
-                    }
-                };
+                                )));
+                            }
+                        },
+                    };
+                    let text = serde_json::to_string(&m).unwrap_or_default();
+                    (m, text)
+                }
+            };
             plan.reasons.push(format!("selected {} via solver", fmri));
             plan.add.push(ResolvedPkg {
                 fmri,
