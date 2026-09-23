@@ -364,13 +364,25 @@ cp -R "${work}/proto" "${proto2}"
 echo '// upgrade-test marker' >> "${proto2}/etc/pkg6depotd/pkg6depotd.kdl"
 sed -E "s/^(set name=pkg\.fmri value=[^@]+@[^,]+,[0-9.]+-[0-9.]+)(:)/\1.1\2/" \
   "${work}/pkg6depotd.dep.res" > "${work}/upgrade.p5m"
+old_fmri=$(sed -n 's/^set name=pkg\.fmri value=//p' "${work}/pkg6depotd.dep.res")
 new_fmri=$(sed -n 's/^set name=pkg\.fmri value=//p' "${work}/upgrade.p5m")
-echo "upgrade target ${new_fmri}"
-pkgsend -s "${work}/repo" publish -d "${proto2}" -d "${root}" "${work}/upgrade.p5m"
-sudo pkg update -v -g "${work}/repo" "${new_fmri}"
+[ -n "${new_fmri}" ] && [ "${new_fmri}" != "${old_fmri}" ] \
+  || fail "could not raise the branch of '${old_fmri}' for the upgrade package"
+# pkgsend publish replaces the manifest's timestamp with the publication time,
+# so request the new version (component,build-release-branch) without one.
 new_ver=${new_fmri#*@}
 new_ver=${new_ver%%:*}
-pkg list -H -v "${IPS_PKG_NAME}" | grep -qF "@${new_ver}:" || fail "upgrade did not install ${new_fmri}"
+echo "upgrade target ${IPS_PKG_NAME}@${new_ver}"
+pkgsend -s "${work}/repo" publish -d "${proto2}" -d "${root}" "${work}/upgrade.p5m"
+sudo pkg update -v -g "${work}/repo" "${IPS_PKG_NAME}@${new_ver}" \
+  || fail "pkg update to ${IPS_PKG_NAME}@${new_ver} failed"
+# pkg list -v prints the short version, without ",<build release>".
+new_short="${new_ver%%,*}-${new_ver#*-}"
+installed=$(pkg list -H -v "${IPS_PKG_NAME}" | awk '{ print $1 }')
+case "${installed}" in
+  "pkg://${IPS_PUBLISHER}/${IPS_PKG_NAME}@${new_short}:"*) echo "upgraded to ${installed}" ;;
+  *) fail "upgrade installed '${installed}', expected ${IPS_PKG_NAME}@${new_short}" ;;
+esac
 sudo grep -q "127.0.0.1:${port}" "${conf}" || fail "operator change to ${conf} was lost on upgrade"
 sudo grep -q 'upgrade-test marker' "${conf}.new" || fail "new default not delivered as ${conf}.new"
 expect_attr "${conf}" "-rw-r----- root pkg6srv"
