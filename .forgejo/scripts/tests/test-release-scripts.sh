@@ -105,9 +105,11 @@ for b in ${RELEASE_BINARIES}; do
 done
 check "tarball packs RELEASE_BINARIES" grep -q '^for b in \${RELEASE_BINARIES}; do$' "${scripts}/package-tarball.sh"
 check_not "tarball does not pack RELEASE_CRATES" grep -q 'RELEASE_CRATES' "${scripts}/package-tarball.sh"
-eq "IPS package delivers the released binaries" \
+# The IPS package delivers every released binary except pkgtree, whose
+# usr/bin/pkgtree belongs to OpenIndiana's developer/pkgtree.
+eq "IPS package delivers the released binaries except pkgtree" \
   "$(printf '%s\n' pkg6depotd $(sed -n 's/^for b in \(.*\); do$/\1/p' "${scripts}/build-ips-package.sh") | sort | tr '\n' ' ')" \
-  "$(printf '%s\n' ${RELEASE_BINARIES} | sort | tr '\n' ' ')"
+  "$(printf '%s\n' ${RELEASE_BINARIES} | grep -vx pkgtree | sort | tr '\n' ' ')"
 if command -v gtar >/dev/null 2>&1; then tar_cmd=gtar; else tar_cmd=tar; fi
 if "${tar_cmd}" --version 2>/dev/null | grep -q 'GNU tar'; then
   # End to end: fake binaries for every crate, pkg6 included; only the released
@@ -445,25 +447,32 @@ done
 fakebuild() { # fakebuild SCRIPT [VAR=VALUE...]: build into ${fb}/dist; prints fmri.env
   rm -rf "${fb}/dist" "${fb}/co/target/ips"
   (cd "${fb}/co" && unset CARGO_TARGET_DIR && env PATH="${fb}/bin:${PATH}" \
-    RELEASE_TAG_OVERRIDE=v1.0.0-rc.2 RELEASE_ALLOW_UNTAGGED=1 "${@:2}" bash "$1" "${fb}/dist") >"${fb}/log" 2>&1 \
+    RELEASE_TAG_OVERRIDE=v1.0.0-rc.3 RELEASE_ALLOW_UNTAGGED=1 "${@:2}" bash "$1" "${fb}/dist") >"${fb}/log" 2>&1 \
     && cat "${fb}/co/target/ips/fmri.env"
 }
 fails_closed() { # fails_closed WHAT LOGTEXT: after a failed fakebuild
   check "  ... on the ${1}" grep -qF "$2" "${fb}/log"
   check_not "  ... and writes no fmri.env" test -e "${fb}/co/target/ips/fmri.env"
-  check_not "  ... and leaves no archive in dist" test -e "${fb}/dist/pkg6depotd-1.0.0-rc.2-illumos-x86_64.p5p"
+  check_not "  ... and leaves no archive in dist" test -e "${fb}/dist/pkg6depotd-1.0.0-rc.3-illumos-x86_64.p5p"
 }
-want="pkg://openindiana.org/package/pkg6/depotd@1.0.0,5.11-0.3.2:20260923T102100Z"
-want_path="publisher/openindiana.org/pkg/package%2Fpkg6%2Fdepotd/1.0.0%2C5.11-0.3.2%3A20260923T102100Z"
+want="pkg://openindiana.org/package/pkg6/depotd@1.0.0,5.11-0.3.3:20260923T102100Z"
+want_path="publisher/openindiana.org/pkg/package%2Fpkg6%2Fdepotd/1.0.0%2C5.11-0.3.3%3A20260923T102100Z"
 eq "build publishes and archives the tagged FMRI" "$(fakebuild "${build}")" "IPS_FMRI=${want}"
-dist_p5p="${fb}/dist/pkg6depotd-1.0.0-rc.2-illumos-x86_64.p5p"
+dist_p5p="${fb}/dist/pkg6depotd-1.0.0-rc.3-illumos-x86_64.p5p"
 eq "the archive in dist stores the manifest under the full version" \
   "$(tar -tf "${dist_p5p}" | grep -E '/pkg/[^/]+/[^/]+$')" "${want_path}"
 eq "  ... declaring the full FMRI" \
   "$("${tar_cmd}" -xOf "${dist_p5p}" "${want_path}" | grep '^set name=pkg\.fmri ')" "set name=pkg.fmri value=${want}"
 eq "fake pkgrecv --newest drops the build release like pkg5" \
   "$(PATH="${fb}/bin:${PATH}" pkgrecv -s "${dist_p5p}" --newest)" \
-  "pkg://openindiana.org/package/pkg6/depotd@1.0.0-0.3.2:20260923T102100Z"
+  "pkg://openindiana.org/package/pkg6/depotd@1.0.0-0.3.3:20260923T102100Z"
+# OpenIndiana's developer/pkgtree owns usr/bin/pkgtree; delivering it too made
+# pkg install refuse the RC2 package. The binary exists in the fixture's
+# release dir (and in the tarball), yet the package must not stage it.
+check "fixture: the release dir has a pkgtree binary" test -f "${fb}/co/target/release/pkgtree"
+check_not "build stages no usr/bin/pkgtree into the proto" test -e "${fb}/co/target/ips/proto/usr/bin/pkgtree"
+check "build stages usr/bin/pkg6repo into the proto" test -f "${fb}/co/target/ips/proto/usr/bin/pkg6repo"
+check "build stages usr/bin/pkg6recv into the proto" test -f "${fb}/co/target/ips/proto/usr/bin/pkg6recv"
 check_not "build never trusts pkgrecv --newest as the full FMRI" grep -q '\[ "${got}" = "${IPS_FMRI}" \]' "${build}"
 mkdir -p "${fb}/noallow"
 cp "${scripts}/release-lib.sh" "${fb}/noallow/"
@@ -523,8 +532,14 @@ check "method execs the packaged daemon" grep -q '^DEPOTD=/usr/lib/pkg6depotd$' 
 check "instance disabled by default" grep -q "<create_default_instance enabled='false' />" "${xml}"
 check "child duration" grep -q "name='duration' type='astring' value='child'" "${xml}"
 tools=$(sed -n 's/^for b in \(.*\); do$/\1/p' "${build}")
-eq "build stages the operator tools" "${tools}" "pkg6repo pkg6recv pkgtree"
-for f in usr/lib/pkg6depotd usr/bin/pkg6repo usr/bin/pkg6recv usr/bin/pkgtree \
+eq "build stages the operator tools" "${tools}" "pkg6repo pkg6recv"
+check_not "p5m delivers nothing at usr/bin/pkgtree (developer/pkgtree owns it)" has_action 'path=usr/bin/pkgtree( |$)'
+check_not "p5m description does not advertise pkgtree" has_action '^set name=pkg\.description .*pkgtree'
+check "release tarballs still ship pkgtree" test "${RELEASE_BINARIES}" = "pkg6depotd pkg6repo pkg6recv pkgtree"
+tip_tools=$(sed -n 's/^for b in \(.*\); do$/\1/p' "${scripts}/test-ips-package.sh")
+eq "live install test expects the packaged tools" "${tip_tools}" "pkg6repo pkg6recv"
+check_not "live install test never expects usr/bin/pkgtree" grep -q 'usr/bin/pkgtree' "${scripts}/test-ips-package.sh"
+for f in usr/lib/pkg6depotd usr/bin/pkg6repo usr/bin/pkg6recv \
   lib/svc/method/svc-pkg6depotd lib/svc/manifest/application/pkg/pkg6depotd.xml \
   etc/pkg6depotd/pkg6depotd.kdl usr/share/man/man8/pkg6depotd.8 \
   usr/share/man/man1/pkg6repo.1 usr/share/man/man5/pkg6-policy.5 \

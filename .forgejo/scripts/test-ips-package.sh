@@ -114,7 +114,7 @@ expect_attr "${conf}" "-rw-r----- root pkg6srv"
 [ ! -e /var/pkg6depotd ] || fail "/var/pkg6depotd must not be delivered by the package"
 expect_attr /usr/lib/pkg6depotd "-r-xr-xr-x root bin"
 expect_attr /lib/svc/method/svc-pkg6depotd "-r-xr-xr-x root bin"
-for b in pkg6repo pkg6recv pkgtree; do
+for b in pkg6repo pkg6recv; do
   expect_attr "/usr/bin/${b}" "-r-xr-xr-x root bin"
 done
 /usr/bin/pkg6repo --version

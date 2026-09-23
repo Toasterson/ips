@@ -56,7 +56,8 @@ stage() {
   cp "$1" "${proto}/$2"
 }
 stage "${bindir}/pkg6depotd" usr/lib/pkg6depotd
-for b in pkg6repo pkg6recv pkgtree; do
+# pkgtree is not packaged: developer/pkgtree owns usr/bin/pkgtree on OpenIndiana.
+for b in pkg6repo pkg6recv; do
   stage "${bindir}/${b}" "usr/bin/${b}"
 done
 stage "${root}/packaging/ips/pkg6depotd.kdl" etc/pkg6depotd/pkg6depotd.kdl

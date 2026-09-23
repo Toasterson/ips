@@ -9,12 +9,16 @@ It is published as the release asset
 | Delivered | Path |
 |-----------|------|
 | Depot daemon | `/usr/lib/pkg6depotd` (after pkg5's `/usr/lib/pkg.depotd`) |
-| Local tools | `/usr/bin/pkg6repo`, `/usr/bin/pkg6recv`, `/usr/bin/pkgtree` |
+| Local tools | `/usr/bin/pkg6repo`, `/usr/bin/pkg6recv` |
 | Configuration | `/etc/pkg6depotd/pkg6depotd.kdl`, `root:pkg6srv`, mode `0640`, `preserve=renamenew` |
 | SMF manifest | `/lib/svc/manifest/application/pkg/pkg6depotd.xml` |
 | SMF method | `/lib/svc/method/svc-pkg6depotd` |
 | Manual page | `pkg6depotd(8)` |
 | Service account | user and group `pkg6srv`, UID/GID 94 |
+
+The package does not deliver `pkgtree`: OpenIndiana's `developer/pkgtree`
+already owns `/usr/bin/pkgtree`, and pkg(1) refuses two packages that
+deliver the same file. `pkgtree` stays in the release tarballs.
 
 The package delivers **no repository directory**. When pkg(1) removes a
 directory, it moves any unpackaged content into `/var/pkg/lost+found`. A

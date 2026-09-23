@@ -17,8 +17,11 @@ package. The release process is described in
 | `../../man/man5/pkg6-policy.5` | `/usr/share/man/man5/pkg6-policy.5` | mdoc; repository `policy.kdl` |
 | `pkglintrc` | (build only) | pkglint gate: errors fail the build |
 
-Binaries: `/usr/lib/pkg6depotd`, `/usr/bin/pkg6repo`, `/usr/bin/pkg6recv`,
-`/usr/bin/pkgtree`. The service account is `pkg6srv` with UID/GID 94.
+Binaries: `/usr/lib/pkg6depotd`, `/usr/bin/pkg6repo`, `/usr/bin/pkg6recv`.
+The service account is `pkg6srv` with UID/GID 94. `pkgtree` ships only in
+the release tarballs: OpenIndiana's `developer/pkgtree` already delivers
+`/usr/bin/pkgtree`, and pkg(1) refuses to install two packages that deliver
+the same file.
 
 The package does not deliver the repository location. On uninstall, pkg(1)
 moves unpackaged content of a directory it removes into

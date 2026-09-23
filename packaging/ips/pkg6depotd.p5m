@@ -13,7 +13,7 @@
 set name=pkg.fmri value=$(IPS_FMRI)
 set name=pkg.summary value="pkg6 IPS repository depot server and operator tools"
 set name=pkg.description \
-    value="pkg6depotd serves IPS package repositories to pkg(1) clients over the pkg5 depot protocol. Includes the SMF service svc:/application/pkg/pkg6depotd and the local repository tools pkg6repo, pkg6recv and pkgtree."
+    value="pkg6depotd serves IPS package repositories to pkg(1) clients over the pkg5 depot protocol. Includes the SMF service svc:/application/pkg/pkg6depotd and the local repository tools pkg6repo and pkg6recv."
 set name=pkg.human-version value=$(RELEASE_VERSION)
 set name=info.classification \
     value=org.opensolaris.category.2008:System/Packaging
@@ -52,9 +52,11 @@ file path=usr/lib/pkg6depotd owner=root group=bin mode=0555 \
     restart_fmri=svc:/application/pkg/pkg6depotd:default
 #
 # Local operator tools. Repository administration is local-only in v1.
+# pkgtree ships only in the release tarballs: OpenIndiana's developer/pkgtree
+# already delivers usr/bin/pkgtree, and pkg(1) refuses two packages that
+# deliver the same file.
 file path=usr/bin/pkg6recv owner=root group=bin mode=0555
 file path=usr/bin/pkg6repo owner=root group=bin mode=0555
-file path=usr/bin/pkgtree owner=root group=bin mode=0555
 #
 # Manual pages. pkg6repo-retire(8) and pkg6-policy(5) document retirement
 # and the repository policy file; the policy itself lives in the operator's
