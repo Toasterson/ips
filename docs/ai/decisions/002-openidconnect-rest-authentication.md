@@ -1,7 +1,7 @@
 # ADR-002: OpenID Connect Authentication for REST API
 
 **Date:** 2026-02-25
-**Status:** Accepted
+**Status:** Accepted (amended for v1 by [ADR-004](004-v1-read-only-public-http-and-obsoletion.md): no authenticated or mutating HTTP endpoints in v1; `auth_check` and the index-rebuild route are removed)
 
 ## Context
 

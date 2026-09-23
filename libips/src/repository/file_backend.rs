@@ -2557,9 +2557,10 @@ impl FileBackend {
                 }
             }
 
-            // Extract variant and facet actions
+            // Set actions that belong in the dependency part (variants, facets,
+            // pkg.depend.*, pkg.obsolete, pkg.renamed), as pkg5 groups them
             for attr in &manifest.attributes {
-                if attr.key.starts_with("variant.") || attr.key.starts_with("facet.") {
+                if is_dependency_part_attr(&attr.key) {
                     let values_str = attr
                         .values
                         .iter()
@@ -2579,12 +2580,12 @@ impl FileBackend {
                 });
             }
 
-            // Extract summary actions (set actions excluding variants and facets)
+            // Extract summary actions (all remaining set actions)
             let mut summary_actions = Vec::new();
             for attr in &manifest.attributes {
-                if !attr.key.starts_with("variant.")
-                    && !attr.key.starts_with("facet.")
+                if !is_dependency_part_attr(&attr.key)
                     && attr.key != "pkg.fmri"
+                    && attr.key != "fmri"
                 {
                     let values_str = attr
                         .values
@@ -3196,4 +3197,17 @@ impl FileBackend {
 
         Ok(hash)
     }
+}
+
+/// Whether a manifest `set` attribute belongs in `catalog.dependency.C`
+/// rather than `catalog.summary.C`. Mirrors pkg5's `Catalog.add_package`
+/// grouping (src/modules/catalog.py): legacy clients read `pkg.obsolete` and
+/// `pkg.renamed` only from the dependency part (`pkg_solver.__fmri_loadstate`,
+/// `Image` package state), so placing them elsewhere hides the flags.
+fn is_dependency_part_attr(key: &str) -> bool {
+    key.starts_with("variant")
+        || key.starts_with("facet")
+        || key.starts_with("pkg.depend.")
+        || key == "pkg.obsolete"
+        || key == "pkg.renamed"
 }

@@ -1,6 +1,6 @@
 use crate::http::admin;
 use crate::http::handlers::{
-    catalog, file, index, info, manifest, publisher, search, shard, ui, versions,
+    catalog, file, info, manifest, publisher, search, shard, ui, versions,
 };
 use crate::http::middleware::AuthState;
 use crate::repo::DepotRepo;
@@ -27,6 +27,12 @@ pub fn app_router_with_auth(state: Arc<DepotRepo>, auth: Option<Arc<AuthState>>)
     }
 }
 
+/// Public HTTP surface. In v1 every route here must leave repository state
+/// untouched: package serving, search and the web UI only. Mirroring pkg5's
+/// readonly depot (`REPO_OPS_READONLY`), the `index`, `admin/0` and
+/// publication (`open`/`add`/`close`/...) operations are not routed, and
+/// `/versions/0` does not advertise them. Repository administration
+/// (rebuilds, imports, retirement) is done with local `pkg6repo` commands.
 fn base_router(state: Arc<DepotRepo>) -> Router {
     Router::new()
         .route("/", get(|| async { Redirect::permanent("/ui/") }))
@@ -85,10 +91,8 @@ fn base_router(state: Arc<DepotRepo>) -> Router {
         .route("/search/0/{token}", get(search::get_default_search_v0))
         .route("/search/1/{token}", get(search::get_default_search_v1))
         .route("/search/1/", post(search::post_default_search_v1))
-        .route("/{publisher}/index/0/{command}", get(index::get_index_v0))
-        // Admin API over HTTP
+        // Liveness probe only; no administrative operations are exposed.
         .route("/admin/health", get(admin::health))
-        .route("/admin/auth/check", post(admin::auth_check))
         // Web UI routes
         .route("/ui/", get(ui::ui_index))
         .route("/ui/packages/{publisher}", get(ui::ui_packages))

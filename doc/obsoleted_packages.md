@@ -2,20 +2,35 @@
 
 This document describes the handling of obsoleted packages in the Image Packaging System (IPS).
 
+> **v1 status.** This document covers two different things. Keep them apart.
+>
+> - **pkg5 obsoletion (protocol-visible).** A package version is obsolete when
+>   its published manifest carries `set name=pkg.obsolete value=true`. It
+>   stays in the repository and catalog. Following pkg5
+>   (`Catalog.add_package` in `src/modules/catalog.py`), the catalog writer
+>   puts `pkg.obsolete` and `pkg.renamed` in `catalog.dependency.C`, the only
+>   part legacy clients read them from (`pkg_solver.__fmri_loadstate` and
+>   image package state). To obsolete a package, publish such a manifest.
+> - **The obsoleted store (`<repository>/obsoleted/`).** A pkg6-only side
+>   store, described in the rest of this document. Entries in it are *not* in
+>   the catalog, so legacy clients never see them, and the store gives them
+>   no `pkg.obsolete` semantics. It is not repository retirement either
+>   (retirement is designed separately in #39).
+>
+> The former `pkg6repo obsolete-package` command, which moved a manifest from
+> the active repository into this store, has been removed. The `*-obsoleted`
+> commands below inspect or maintain the store only. The pkg5 importer
+> (`import-pkg5`) still diverts `pkg.obsolete=true` packages into the store
+> instead of the catalog; that hides them from clients and is tracked for the
+> importer rework (#38).
+
 ## Overview
 
-Obsoleted packages are packages that are no longer maintained or have been replaced by other packages. In previous versions of IPS, obsoleted packages were marked with the `pkg.obsolete` attribute in their manifest, but they remained in the main package repository. This approach had several drawbacks:
-
-1. Obsoleted packages cluttered the repository and catalog
-2. They were still visible in package listings and searches
-3. There was no structured way to store metadata about why a package was obsoleted or what replaced it
-
-The new approach stores obsoleted packages in a dedicated directory structure, separate from the main package repository. This provides several benefits:
-
-1. Keeps the main repository clean and focused on active packages
-2. Provides a structured way to store metadata about obsoleted packages
-3. Allows for better organization and management of obsoleted packages
-4. Preserves the original manifest for reference
+The obsoleted store keeps a record of package versions outside the active
+repository: a metadata JSON document per version (status, date, optional
+deprecation message and replacements) and optionally the original manifest.
+It exists today because the pkg5 importer places `pkg.obsolete=true`
+packages there and because earlier pkg6 builds provided `obsolete-package`.
 
 ## Directory Structure
 
@@ -102,27 +117,7 @@ This contains just enough information for clients to know that the package is ob
 
 ## CLI Commands
 
-The following CLI commands are available for managing obsoleted packages:
-
-### Mark a Package as Obsoleted
-
-```bash
-pkg6repo obsolete-package -s <repository> -p <publisher> -f <fmri> [-m <message>] [-r <replacement-fmri>...]
-```
-
-This command:
-1. Moves the package from the main repository to the obsoleted directory
-2. Creates metadata for the obsoleted package
-3. Removes the package from the catalog
-4. Rebuilds the repository metadata
-
-**Example:**
-```bash
-# Mark a package as obsoleted with a deprecation message and replacement package
-pkg6repo obsolete-package -s /path/to/repo -p openindiana.org -f "pkg://openindiana.org/library/perl-5/postgres-dbi-5100@2.19.3" \
-  -m "This package is deprecated. Use library/perl-5/postgres-dbi instead." \
-  -r "pkg://openindiana.org/library/perl-5/postgres-dbi@3.0.0"
-```
+The following CLI commands are available for managing the obsoleted package store:
 
 ### List Obsoleted Packages
 
@@ -202,12 +197,15 @@ pkg6repo restore-obsoleted -s <repository> -p <publisher> -f <fmri> [--no-rebuil
 ```
 
 This command restores an obsoleted package to the main repository:
-1. Retrieves the original manifest from the obsoleted package
-2. Creates a transaction in the main repository
-3. Adds the package to the transaction
-4. Commits the transaction
-5. Removes the obsoleted package from the obsoleted packages directory
-6. Rebuilds the catalog (unless `--no-rebuild` is specified)
+1. Retrieves the manifest from the store and removes the store entry
+2. Publishes the manifest to the main repository in a transaction
+3. Rebuilds the catalog (unless `--no-rebuild` is specified)
+
+The store entry is removed *before* the transaction commits, so a failed
+commit loses the stored manifest. Export the entry first
+(`export-obsoleted -q <pattern>`) if it matters. For entries imported from
+pkg5 with a null hash, the restored manifest is the minimal one described
+under "Null Hash for Obsoleted Packages".
 
 **Example:**
 ```bash
@@ -252,7 +250,7 @@ pkg6repo import-obsoleted -s /path/to/repo -i /path/to/export.json -p new-publis
 
 ## Importing Obsoleted Packages
 
-When importing packages from a pkg5 repository, packages with the `pkg.obsolete` attribute are automatically detected and stored in the obsoleted directory instead of the main repository. This ensures that obsoleted packages are properly handled during import.
+When importing packages from a pkg5 repository, packages with the `pkg.obsolete` attribute are currently stored in the obsoleted directory instead of the main repository. This departs from pkg5, where such packages stay in the catalog so clients can act on them (for example, to remove an obsolete package on update). Correcting it is part of the importer rework (#38).
 
 ## API
 
@@ -346,42 +344,25 @@ pub struct ObsoletedPackageMetadata {
 
 ## Integration with Repository Operations
 
-The obsoleted package system is integrated with the following repository operations:
+- **Package listing and catalog building**: a version present in the store is
+  skipped when the repository lists packages from disk with the store loaded.
+  Store entries usually have no manifest under `pkg/`, so they are absent
+  from the catalog and search.
+- **Published `pkg.obsolete=true` manifests** are unaffected by the store.
+  They are listed and catalogued, with the flag in `catalog.dependency.C` for
+  legacy clients. The client-side shard layout is separate from that protocol.
 
-1. **Package Listing**: Obsoleted packages are excluded from regular package listings
-2. **Catalog Building**: Obsoleted packages are excluded from the catalog
-3. **Search**: Obsoleted packages are excluded from search results
+## Operational Guidance
 
-This ensures that obsoleted packages don't clutter the repository and are properly managed.
-
-## Best Practices for Managing Obsoleted Packages
-
-Here are some best practices for managing obsoleted packages:
-
-### When to Mark a Package as Obsoleted
-
-- **Package is no longer maintained**: When a package is no longer being maintained or updated
-- **Package has been replaced**: When a package has been replaced by a newer version or a different package
-- **Package is deprecated**: When a package is deprecated and should not be used in new installations
-- **Package has security vulnerabilities**: When a package has security vulnerabilities and should not be used
-
-### Providing Useful Metadata
-
-- **Always include a deprecation message**: Explain why the package is obsoleted and what users should do instead
-- **Specify replacement packages**: If the package has been replaced, specify the replacement package(s)
-- **Be specific about versions**: If only certain versions are obsoleted, be clear about which ones
-
-### Managing Large Numbers of Obsoleted Packages
-
-- **Use batch operations**: Use the export/import commands to manage large numbers of obsoleted packages
-- **Use search to find related packages**: Use the search command to find related packages that might also need to be obsoleted
-- **Organize by publisher**: Keep obsoleted packages organized by publisher
-
-### Repository Maintenance
-
-- **Regularly clean up obsoleted packages**: Remove obsoleted packages that are no longer needed
-- **Export obsoleted packages before repository cleanup**: Export obsoleted packages before cleaning up a repository
-- **Rebuild catalogs after bulk operations**: Rebuild catalogs after bulk operations to ensure consistency
+- **To obsolete a package**, publish a new version whose manifest sets
+  `pkg.obsolete=true` (and no other content), as with pkg5. Do not use the
+  store for this: legacy clients cannot see store entries.
+- **Deleting store entries is permanent.** `cleanup-obsoleted` removes entries
+  older than its TTL without checking dependencies or snapshot use. Run it with
+  `--dry-run` first and export anything you may need to restore. It is not the
+  v1 purge operation (#39).
+- **Rebuild catalogs after bulk operations** (`restore-obsoleted --no-rebuild`)
+  to keep them consistent.
 
 ## Troubleshooting
 
@@ -433,10 +414,10 @@ Here's a simplified workflow for managing obsoleted packages:
 
 ```
                                  +-------------------+
-                                 | Active Repository |
+                                 | pkg5 source repo  |
                                  +-------------------+
                                           |
-                                          | obsolete-package
+                                          | import-pkg5 (pkg.obsolete=true, see #38)
                                           v
                                  +-------------------+
                                  | Obsoleted Storage |

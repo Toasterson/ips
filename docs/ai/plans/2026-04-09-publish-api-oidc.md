@@ -1,7 +1,7 @@
 # Publish API with OIDC Authentication
 
 **Date:** 2026-04-09  
-**Status:** Active  
+**Status:** Active (deferred past v1 per ADR-004: v1 exposes no publication or admin HTTP endpoints)
 **Issue:** [#3 Server Publish](https://code.aopc.cloud/OpenIndiana/ips/issues/3)
 
 ## Goal
@@ -189,7 +189,7 @@ These admin endpoints require the `admin` role on the target publisher (or a glo
 1. Add `jsonwebtoken` to pkg6depotd deps
 2. Implement JWKS fetcher with caching (`AuthState`)
 3. Implement `require_auth` axum middleware
-4. Wire up to existing `auth_check` endpoint (replace placeholder)
+4. ~~Wire up to existing `auth_check` endpoint (replace placeholder)~~ — the endpoint was removed for v1 (ADR-004); reintroduce an auth check endpoint together with authenticated publication
 5. Add `audience` field to `Oauth2Config`
 6. Test with a real OIDC provider
 

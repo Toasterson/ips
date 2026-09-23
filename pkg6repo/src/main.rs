@@ -372,29 +372,6 @@ enum Commands {
         publisher: Option<String>,
     },
 
-    /// Mark a package as obsoleted
-    ObsoletePackage {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
-
-        /// Publisher of the package
-        #[clap(short = 'p')]
-        publisher: String,
-
-        /// FMRI of the package to mark as obsoleted
-        #[clap(short = 'f')]
-        fmri: String,
-
-        /// Optional deprecation message explaining why the package is obsoleted
-        #[clap(short = 'm', long = "message")]
-        message: Option<String>,
-
-        /// Optional list of packages that replace this obsoleted package
-        #[clap(short = 'r', long = "replaced-by")]
-        replaced_by: Option<Vec<String>>,
-    },
-
     /// List obsoleted packages in a repository
     ListObsoleted {
         /// Path or URI of the repository
@@ -1407,69 +1384,6 @@ fn main() -> Result<()> {
             importer.import(publisher.as_deref())?;
 
             info!("Repository imported successfully");
-            Ok(())
-        }
-
-        Commands::ObsoletePackage {
-            repo_uri_or_path,
-            publisher,
-            fmri,
-            message,
-            replaced_by,
-        } => {
-            info!("Marking package as obsoleted: {}", fmri);
-
-            // Open the repository
-            let mut repo = FileBackend::open(repo_uri_or_path)?;
-
-            // Parse the FMRI
-            let parsed_fmri = libips::fmri::Fmri::parse(fmri)?;
-
-            // Get the manifest for the package using the helper method
-            let manifest_path = FileBackend::construct_manifest_path(
-                &repo.path,
-                publisher,
-                parsed_fmri.stem(),
-                &parsed_fmri.version(),
-            );
-
-            println!("Looking for manifest at: {}", manifest_path.display());
-            println!("Publisher: {}", publisher);
-            println!("Stem: {}", parsed_fmri.stem());
-            println!("Version: {}", parsed_fmri.version());
-
-            if !manifest_path.exists() {
-                return Err(Pkg6RepoError::from(format!(
-                    "Package not found: {}",
-                    parsed_fmri
-                )));
-            }
-
-            // Read the manifest content
-            let manifest_content = std::fs::read_to_string(&manifest_path)?;
-
-            // Create a new scope for the obsoleted_manager to ensure it's dropped before we call repo.rebuild()
-            {
-                // Get the obsoleted package manager
-                let obsoleted_manager = repo.get_obsoleted_manager()?;
-
-                // Store the obsoleted package
-                obsoleted_manager.store_obsoleted_package(
-                    publisher,
-                    &parsed_fmri,
-                    &manifest_content,
-                    replaced_by.clone(),
-                    message.clone(),
-                )?;
-            } // obsoleted_manager is dropped here, releasing the mutable borrow on repo
-
-            // Remove the original package from the repository
-            std::fs::remove_file(&manifest_path)?;
-
-            // Rebuild the catalog to reflect the changes
-            repo.rebuild(Some(publisher), false, false)?;
-
-            info!("Package marked as obsoleted successfully: {}", parsed_fmri);
             Ok(())
         }
 
