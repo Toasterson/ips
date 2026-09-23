@@ -391,7 +391,9 @@ new_ver=${new_fmri#*@}
 new_ver=${new_ver%%:*}
 echo "upgrade target ${IPS_PKG_NAME}@${new_ver}"
 pkgsend -s "${work}/repo" publish -d "${proto2}" -d "${root}" "${work}/upgrade.p5m"
-sudo pkg update -v -g "${work}/repo" "${IPS_PKG_NAME}@${new_ver}" \
+# Updating an installed package makes pkg5's default be-policy clone a backup
+# BE, which the disposable CI VM cannot do. The upgrade still runs live.
+sudo pkg update -v --no-backup-be -g "${work}/repo" "${IPS_PKG_NAME}@${new_ver}" \
   || fail "pkg update to ${IPS_PKG_NAME}@${new_ver} failed"
 # pkg list -v prints the short version, without ",<build release>".
 new_short="${new_ver%%,*}-${new_ver#*-}"
