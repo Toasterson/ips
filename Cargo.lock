@@ -2372,10 +2372,12 @@ dependencies = [
 name = "pkg6depotd"
 version = "0.5.3"
 dependencies = [
+ "arc-swap",
  "askama",
  "assert_cmd",
  "axum",
  "axum-server",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "clap",
@@ -2394,6 +2396,7 @@ dependencies = [
  "opentelemetry_sdk",
  "predicates",
  "reqwest",
+ "ring",
  "rusqlite",
  "rustls",
  "serde",

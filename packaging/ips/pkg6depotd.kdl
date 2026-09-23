@@ -32,3 +32,49 @@ telemetry {
     service-name "pkg6depotd"
     log-format "json"
 }
+
+// TLS. Without a tls block the depot serves plain HTTP for a reverse proxy
+// that terminates TLS (the default above). To serve HTTPS directly, bind
+// the public address (server { bind "0.0.0.0:443" }) and uncomment ONE of
+// the two tls blocks below. An invalid tls block stops the service; it
+// never falls back to plain HTTP. See pkg6depotd(8), TLS.
+//
+// Certificate files you renew yourself. The files must be readable by
+// pkg6srv; after replacing them, run: svcadm refresh pkg6depotd:default
+//
+// tls {
+//     certificate "/etc/pkg6depotd/tls/fullchain.pem"
+//     key "/etc/pkg6depotd/tls/key.pem"
+// }
+//
+// Certificates from Let's Encrypt (or another ACME CA), obtained at first
+// start and renewed automatically. Try staging first: staging certificates
+// are not trusted by clients, but the CA's rate limits are generous.
+//
+// tls {
+//     acme {
+//         domains "pkg.example.org"
+//         contact "mailto:hostmaster@example.org"
+//         terms-agreed true           // you accept the CA's subscriber agreement
+//         staging true                // remove once issuance works
+//         // Not created by the package. As root, before the first start:
+//         //   mkdir -m 0700 /var/pkg6depotd/acme
+//         //   chown pkg6srv:pkg6srv /var/pkg6depotd/acme
+//         state-dir "/var/pkg6depotd/acme"
+//
+//         // http-01: the CA fetches http://<domain>/.well-known/acme-challenge/
+//         // from this listener; port 80 of every domain must reach it.
+//         challenge "http-01"
+//         http01-bind "0.0.0.0:80"
+//
+//         // dns-01 instead (required for wildcards): TXT records are created
+//         // through the provider API. The token file holds only the token,
+//         // owner root, group pkg6srv, mode 0640.
+//         // challenge "dns-01"
+//         // dns01 {
+//         //     provider "cloudflare"   // or "gandi"
+//         //     api-token-file "/etc/pkg6depotd/dns-api-token"
+//         //     zone "example.org"
+//         // }
+//     }
+// }

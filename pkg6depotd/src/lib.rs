@@ -5,6 +5,7 @@ pub mod errors;
 pub mod http;
 pub mod repo;
 pub mod telemetry;
+pub mod tls;
 
 use clap::Parser;
 use cli::{Cli, Commands};
@@ -35,6 +36,7 @@ pub fn load_config(path: Option<PathBuf>) -> Result<Config> {
         )
     })?;
     bind_addr(&config)?;
+    tls::plan(&config)?;
     Ok(config)
 }
 
@@ -83,6 +85,9 @@ pub async fn run() -> Result<()> {
             if !args.no_daemon {
                 daemon::daemonize().map_err(|e| miette::miette!(e))?;
             }
+            // Before anything slow (OIDC discovery, ACME issuance and its
+            // backoff), so `svcadm refresh` cannot terminate startup.
+            let hangup = tls::spawn_hangup_handler()?;
 
             // Initialize OIDC auth if configured
             let auth_state = http::middleware::AuthState::from_config(&config.oauth2)
@@ -91,15 +96,27 @@ pub async fn run() -> Result<()> {
 
             let router = http::routes::app_router_with_auth(state, auth_state);
             let addr = bind_addr(&config)?;
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(crate::errors::DepotError::Io)?;
-
-            tracing::info!("Starting pkg6depotd on {}", addr);
-
-            http::server::run(router, listener)
-                .await
-                .map_err(|e| miette::miette!(e))?;
+            match tls::plan(&config)? {
+                None => {
+                    let listener = tokio::net::TcpListener::bind(addr)
+                        .await
+                        .map_err(crate::errors::DepotError::Io)?;
+                    tracing::info!("Starting pkg6depotd on {}", addr);
+                    http::server::run(router, listener).await?;
+                }
+                Some(plan) => {
+                    // Fails closed: the port is only opened once a valid
+                    // certificate is loaded or issued.
+                    let store = tls::start(&plan, addr.port()).await?;
+                    hangup.set(store.clone());
+                    let listener = tokio::net::TcpListener::bind(addr)
+                        .await
+                        .map_err(crate::errors::DepotError::Io)?;
+                    tracing::info!("Starting pkg6depotd on {} with TLS", addr);
+                    http::server::run_tls(router, listener, store, plan.handshake_timeout())
+                        .await?;
+                }
+            }
         }
         Commands::ConfigTest => {
             // Validates the file only; the repository may not exist yet.
@@ -116,6 +133,10 @@ pub async fn run() -> Result<()> {
                 config.repository.root.display(),
                 config.repository.mode.as_deref().unwrap_or("readonly")
             );
+            let tls_plan = tls::plan(&config)?;
+            for line in tls::preflight(tls_plan.as_ref())? {
+                println!("  {line}");
+            }
         }
         _ => {
             println!("Command not yet implemented");

@@ -80,6 +80,7 @@ async fn test_depot_server() {
         publishers: None,
         admin: None,
         oauth2: None,
+        tls: None,
     };
 
     let repo = DepotRepo::new(&config).unwrap();
@@ -294,6 +295,7 @@ async fn test_ini_only_repo_serving_catalog() {
         publishers: None,
         admin: None,
         oauth2: None,
+        tls: None,
     };
     let repo = DepotRepo::new(&config).unwrap();
     let state = Arc::new(repo);
@@ -387,6 +389,7 @@ async fn test_file_url_without_algo() {
         publishers: None,
         admin: None,
         oauth2: None,
+        tls: None,
     };
 
     let repo = DepotRepo::new(&config).unwrap();
@@ -449,6 +452,7 @@ async fn test_multiple_publishers_default_route() {
         publishers: None,
         admin: None,
         oauth2: None,
+        tls: None,
     };
 
     let repo = DepotRepo::new(&config).unwrap();
@@ -508,6 +512,7 @@ async fn test_search_endpoint() {
         publishers: None,
         admin: None,
         oauth2: None,
+        tls: None,
     };
 
     let repo = DepotRepo::new(&config).unwrap();

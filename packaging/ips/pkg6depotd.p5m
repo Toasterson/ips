@@ -32,8 +32,11 @@ group groupname=pkg6srv gid=94
 user username=pkg6srv ftpuser=false gcos-field="pkg6 depot server Reserved UID" \
     group=pkg6srv password=NP uid=94
 #
-# Configuration. The service user may read it, nobody else: later releases
-# keep TLS and ACME credentials here. Operator edits survive upgrades.
+# Configuration. The service user may read it, nobody else: it names TLS
+# keys and DNS API token files, which the operator places next to it with
+# the same ownership. Operator edits survive upgrades. ACME state lives in
+# an operator-created pkg6srv 0700 directory (suggested
+# /var/pkg6depotd/acme), not delivered for the reason given below.
 dir  path=etc/pkg6depotd owner=root group=pkg6srv mode=0750
 file path=etc/pkg6depotd/pkg6depotd.kdl owner=root group=pkg6srv mode=0640 \
     preserve=renamenew

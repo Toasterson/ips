@@ -40,6 +40,14 @@
 	<exec_method type='method' name='stop' exec=':kill'
 	    timeout_seconds='60' />
 
+	<!--
+	    SIGHUP re-reads the TLS certificate and key; a bad file is logged
+	    and the current certificate stays in service. Other configuration
+	    changes need a restart.
+	-->
+	<exec_method type='method' name='refresh' exec=':kill -HUP'
+	    timeout_seconds='60' />
+
 	<property_group name='startd' type='framework'>
 		<!-- pkg6depotd runs in the foreground (no-daemon). -->
 		<propval name='duration' type='astring' value='child' />
