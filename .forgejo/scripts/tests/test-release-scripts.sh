@@ -498,7 +498,28 @@ fails_closed "p5p archive manifest's pkg.fmri" 'the p5p archive manifest declare
 
 # --- uninstall check is scoped to the repository --------------------------------
 check "uninstall test searches lost+found for repository paths" \
-  grep -qF "find /var/pkg/lost+found -path '*var/pkg6depotd*'" "${scripts}/test-ips-package.sh"
+  grep -qFe "-path '*var/pkg6depotd*'" "${scripts}/test-ips-package.sh"
+check "uninstall test inspects /var/pkg/lost+found" \
+  grep -qx 'lost_found=/var/pkg/lost+found' "${scripts}/test-ips-package.sh"
+# repo_salvage runs under set -euo pipefail. A fresh image has no lost+found
+# (pkg(1) creates it on first salvage): that is an empty result, while a
+# lost+found that cannot be searched must still fail.
+salvage_fn=$(sed -n '/^repo_salvage() {$/,/^}$/p' "${scripts}/test-ips-package.sh")
+salvage() { # salvage LOST_FOUND
+  bash -c 'set -euo pipefail; sudo() { "$@"; }; lost_found=$1; eval "$2"; out=$(repo_salvage); printf "%s" "${out}"' \
+    _ "$1" "${salvage_fn}"
+}
+check "repo_salvage is defined in the live install test" test -n "${salvage_fn}"
+eq "absent lost+found salvages nothing" "$(salvage "${tmp}/no-lost+found" 2>&1)" ""
+mkdir -p "${tmp}/lf/var/pkg6depotd/repo" "${tmp}/lf/etc/pkg6depotd"
+eq "repository content in lost+found is listed" "$(salvage "${tmp}/lf")" \
+  "$(printf '%s\n' "${tmp}/lf/var/pkg6depotd" "${tmp}/lf/var/pkg6depotd/repo")"
+if [ "$(id -u)" != 0 ]; then
+  mkdir -p "${tmp}/lf-locked/x"
+  chmod 000 "${tmp}/lf-locked/x"
+  check_not "unreadable lost+found is an error, not an empty result" salvage "${tmp}/lf-locked"
+  chmod 700 "${tmp}/lf-locked/x"
+fi
 check_not "uninstall test does not forbid salvaging the edited config" \
   grep -q 'ls /var/pkg/lost+found' "${scripts}/test-ips-package.sh"
 

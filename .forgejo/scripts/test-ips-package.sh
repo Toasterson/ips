@@ -414,17 +414,25 @@ echo "=== uninstall"
 # Salvaging the operator-edited config (and its .kdl.new) into lost+found is
 # expected pkg(1) behaviour for modified preserved files. What must never
 # happen is anything from the repository location being salvaged or changed.
-repo_salvage() { sudo find /var/pkg/lost+found -path '*var/pkg6depotd*' 2>/dev/null | sort; }
+# pkg(1) creates lost+found only on its first salvage, so on a fresh image it
+# is absent: that means nothing salvaged, not an error. Any other find failure
+# is reported rather than ending the run with a bare set -e exit.
+lost_found=/var/pkg/lost+found
+repo_salvage() {
+  sudo test -e "${lost_found}" || return 0
+  sudo find "${lost_found}" -path '*var/pkg6depotd*' | sort
+}
 repo_before=$(sudo find /var/pkg6depotd -exec cksum {} + 2>/dev/null | sort; sudo find /var/pkg6depotd | sort)
-salvage_before=$(repo_salvage)
+salvage_before=$(repo_salvage) || fail "cannot list ${lost_found} before uninstall"
 sudo pkg uninstall -v "${IPS_PKG_NAME}"
 sudo test -d /var/pkg6depotd/repo || fail "/var/pkg6depotd/repo is gone after uninstall"
 [ "$(sudo find /var/pkg6depotd -exec cksum {} + 2>/dev/null | sort; sudo find /var/pkg6depotd | sort)" = "${repo_before}" ] \
   || fail "uninstall changed content under /var/pkg6depotd"
-[ "$(repo_salvage)" = "${salvage_before}" ] \
-  || fail "uninstall salvaged repository content into /var/pkg/lost+found: $(repo_salvage)"
+salvage_after=$(repo_salvage) || fail "cannot list ${lost_found} after uninstall"
+[ "${salvage_after}" = "${salvage_before}" ] \
+  || fail "uninstall salvaged repository content into ${lost_found}: ${salvage_after}"
 echo "lost+found after uninstall (edited config expected):"
-sudo find /var/pkg/lost+found -path '*etc/pkg6depotd*' 2>/dev/null || true
+sudo find "${lost_found}" -path '*etc/pkg6depotd*' 2>/dev/null || true
 [ ! -e /usr/lib/pkg6depotd ] || fail "/usr/lib/pkg6depotd still present after uninstall"
 for m in ${man_pages}; do
   [ ! -e "/usr/share/man/${m}" ] || fail "/usr/share/man/${m} still present after uninstall"

@@ -1672,7 +1672,7 @@ checksum = "37c93d8daa9d8a012fd8ab92f088405fb202ea0b6ab73ee2482ae66af4f42091"
 
 [[package]]
 name = "libips"
-version = "1.0.0-rc.8"
+version = "1.0.0-rc.9"
 dependencies = [
  "chrono",
  "diff-struct",
@@ -2364,7 +2364,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "pkg6"
-version = "1.0.0-rc.8"
+version = "1.0.0-rc.9"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2381,7 +2381,7 @@ dependencies = [
 
 [[package]]
 name = "pkg6depotd"
-version = "1.0.0-rc.8"
+version = "1.0.0-rc.9"
 dependencies = [
  "arc-swap",
  "askama",
@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "pkg6recv"
-version = "1.0.0-rc.8"
+version = "1.0.0-rc.9"
 dependencies = [
  "clap",
  "libips",
@@ -2448,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "pkg6repo"
-version = "1.0.0-rc.8"
+version = "1.0.0-rc.9"
 dependencies = [
  "chrono",
  "clap",
@@ -2466,7 +2466,7 @@ dependencies = [
 
 [[package]]
 name = "pkgtree"
-version = "1.0.0-rc.8"
+version = "1.0.0-rc.9"
 dependencies = [
  "clap",
  "libips",
@@ -2486,7 +2486,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "ports"
-version = "1.0.0-rc.8"
+version = "1.0.0-rc.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -3238,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "specfile"
-version = "1.0.0-rc.8"
+version = "1.0.0-rc.9"
 dependencies = [
  "anyhow",
  "pest",
@@ -3887,7 +3887,7 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "userland"
-version = "1.0.0-rc.8"
+version = "1.0.0-rc.9"
 dependencies = [
  "anyhow",
  "lazy_static",
