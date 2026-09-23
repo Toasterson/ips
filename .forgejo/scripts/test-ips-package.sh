@@ -80,14 +80,22 @@ wait_state() {
   done
   fail "${svc} is '${s}', expected '$1'"
 }
-# attr PATH: print "mode owner group" of PATH.
+# attr COMMAND...: run a long-listing COMMAND (e.g. `ls -ld PATH` or
+# `sudo ls -ld PATH`) and print its "mode owner group" fields.
 attr() {
-  # shellcheck disable=SC2012
-  ls -ld "$1" | awk '{ print $1, $3, $4 }'
+  "$@" | awk '{ print $1, $3, $4 }'
 }
+# expect_attr PATH WANT: PATH must be visible to the CI user and have WANT.
 expect_attr() {
   local got
-  got=$(attr "$1")
+  got=$(attr ls -ld "$1") || fail "cannot stat $1"
+  [ "${got}" = "$2" ] || fail "$1 has '${got}', expected '$2'"
+}
+# expect_root_attr PATH WANT: the same for a PATH below a directory the CI
+# user may not traverse (the root:pkg6srv 0750 config directory).
+expect_root_attr() {
+  local got
+  got=$(attr sudo ls -ld "$1") || fail "cannot stat $1 as root"
   [ "${got}" = "$2" ] || fail "$1 has '${got}', expected '$2'"
 }
 probe() {
@@ -110,7 +118,14 @@ echo "=== account and files"
 [ "$(getent passwd pkg6srv | cut -d: -f3,4)" = "94:94" ] || fail "pkg6srv is not uid/gid 94: $(getent passwd pkg6srv)"
 getent group pkg6srv | grep -q '^pkg6srv:[^:]*:94:' || fail "group pkg6srv is not gid 94"
 expect_attr /etc/pkg6depotd "drwxr-x--- root pkg6srv"
-expect_attr "${conf}" "-rw-r----- root pkg6srv"
+expect_root_attr "${conf}" "-rw-r----- root pkg6srv"
+# The protection must hold for an ordinary account: unless the CI user is
+# root or in pkg6srv, it can neither read the config nor stat through its
+# directory.
+if [ "$(id -u)" != 0 ] && ! id -Gn | tr ' ' '\n' | grep -qx pkg6srv; then
+  ! cat "${conf}" >/dev/null 2>&1 || fail "${conf} is readable by unprivileged $(id -un)"
+  ! ls -ld "${conf}" >/dev/null 2>&1 || fail "/etc/pkg6depotd is traversable by unprivileged $(id -un)"
+fi
 [ ! -e /var/pkg6depotd ] || fail "/var/pkg6depotd must not be delivered by the package"
 expect_attr /usr/lib/pkg6depotd "-r-xr-xr-x root bin"
 expect_attr /lib/svc/method/svc-pkg6depotd "-r-xr-xr-x root bin"
@@ -385,7 +400,7 @@ case "${installed}" in
 esac
 sudo grep -q "127.0.0.1:${port}" "${conf}" || fail "operator change to ${conf} was lost on upgrade"
 sudo grep -q 'upgrade-test marker' "${conf}.new" || fail "new default not delivered as ${conf}.new"
-expect_attr "${conf}" "-rw-r----- root pkg6srv"
+expect_root_attr "${conf}" "-rw-r----- root pkg6srv"
 wait_state online
 probe
 pid2=$(pgrep -u pkg6srv -f /usr/lib/pkg6depotd)
@@ -399,7 +414,7 @@ repo_salvage() { sudo find /var/pkg/lost+found -path '*var/pkg6depotd*' 2>/dev/n
 repo_before=$(sudo find /var/pkg6depotd -exec cksum {} + 2>/dev/null | sort; sudo find /var/pkg6depotd | sort)
 salvage_before=$(repo_salvage)
 sudo pkg uninstall -v "${IPS_PKG_NAME}"
-[ -d /var/pkg6depotd/repo ] || fail "/var/pkg6depotd/repo is gone after uninstall"
+sudo test -d /var/pkg6depotd/repo || fail "/var/pkg6depotd/repo is gone after uninstall"
 [ "$(sudo find /var/pkg6depotd -exec cksum {} + 2>/dev/null | sort; sudo find /var/pkg6depotd | sort)" = "${repo_before}" ] \
   || fail "uninstall changed content under /var/pkg6depotd"
 [ "$(repo_salvage)" = "${salvage_before}" ] \
