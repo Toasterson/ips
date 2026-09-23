@@ -867,6 +867,60 @@ eq "after switching back the depot restarts and no longer serves the smoke publi
   "$(sed -n "$((switch_back + 1)),$((switch_back + 2))p" "${tip}")" \
   "$(printf '%s\n%s' depot_restart '! serves_pub || fail "depot still serves ${pub} after switching back to ${conf}"')"
 
+# --- unprivileged pkg5 smoke: test-pkg5-unprivileged.sh ---------------------------
+# Its argument and preflight errors, which fail before any scratch directory
+# exists. The pkg5 run itself needs OpenIndiana and is done by hand on a build
+# host (docs/release-process.md). The lint below only catches obvious
+# regressions in confinement; it does not prove the script is safe.
+tpu="${scripts}/test-pkg5-unprivileged.sh"
+check "test-pkg5-unprivileged.sh is valid bash" bash -n "${tpu}"
+check "unprivileged smoke is executable" test -x "${tpu}"
+tpu_code=$(grep -v '^[[:space:]]*#' "${tpu}")
+check_not "unprivileged smoke uses no sudo, su, pfexec or SMF" \
+  grep -qE '(^|[^[:alnum:]_-])(sudo|su|pfexec|svccfg|svcadm)( |$)' <(echo "${tpu_code}")
+check_not "unprivileged smoke never runs the installed /usr/bin/pkg6*" grep -q '/usr/bin/pkg6' <(echo "${tpu_code}")
+eq "unprivileged smoke removes only its scratch directory" \
+  "$(echo "${tpu_code}" | grep -oE 'rm -[a-z]+ .*' | sort -u)" 'rm -rf -- "${smoke}"'
+eq "unprivileged smoke signals only its own depot" \
+  "$(echo "${tpu_code}" | grep -oE 'kill( -[0-9A-Z]+)? "[^"]*"' | sed -E 's/kill( -[0-9A-Z]+)? //' | sort -u)" '"${depot_pid}"'
+if [ "$(id -u)" != 0 ]; then
+  tpu_run() { # tpu_run ENV... -- ARGS...: run the smoke, print "rc=N" and its output
+    local env=()
+    while [ "$1" != -- ]; do env+=("$1"); shift; done
+    shift
+    local out rc=0
+    out=$(env "${env[@]+"${env[@]}"}" "${tpu}" "$@" 2>&1) || rc=$?
+    printf 'rc=%s\n%s\n' "${rc}" "${out}"
+  }
+  out=$(tpu_run --)
+  check "unprivileged smoke without an archive prints usage and exits 2" \
+    grep -qx 'rc=2' <(echo "${out}")
+  check "  ... naming the argument" grep -q 'usage: .* P5P' <(echo "${out}")
+  out=$(tpu_run -- "${tmp}/absent.p5p")
+  check "unprivileged smoke rejects a missing archive" grep -qx 'rc=1' <(echo "${out}")
+  check "  ... and names it" grep -qF "FAIL: release archive '${tmp}/absent.p5p' does not exist" <(echo "${out}")
+  : >"${tmp}/fake.p5p"
+  mkdir -p "${tmp}/tpu-bin"
+  printf '#!/bin/sh\nexit 0\n' >"${tmp}/tpu-bin/pkg6repo"
+  cp "${tmp}/tpu-bin/pkg6repo" "${tmp}/tpu-bin/pkg6depotd"
+  chmod +x "${tmp}/tpu-bin/pkg6repo" "${tmp}/tpu-bin/pkg6depotd"
+  out=$(tpu_run PKG6_BIN_DIR="${tmp}/absent-bin" -- "${tmp}/fake.p5p")
+  check "unprivileged smoke names a missing pkg6 binary" \
+    grep -qF "FAIL: ${tmp}/absent-bin/pkg6repo is missing" <(echo "${out}")
+  out=$(tpu_run PKG6_BIN_DIR="${tmp}/tpu-bin" PKG6_SMOKE_PORT=80 -- "${tmp}/fake.p5p")
+  check "unprivileged smoke rejects a privileged port" \
+    grep -qF 'FAIL: PKG6_SMOKE_PORT=80 is not an unprivileged port' <(echo "${out}")
+  out=$(tpu_run PKG6_BIN_DIR="${tmp}/tpu-bin" PKG6_SMOKE_PORT=8x -- "${tmp}/fake.p5p")
+  check "unprivileged smoke rejects a non-numeric port" \
+    grep -qF "FAIL: PKG6_SMOKE_PORT='8x' is not a port number" <(echo "${out}")
+  # Only where pkg5 is absent: on OpenIndiana the preflight would pass.
+  if ! PATH=/usr/bin:/bin command -v pkgrecv >/dev/null 2>&1; then
+    out=$(tpu_run PKG6_BIN_DIR="${tmp}/tpu-bin" PATH=/usr/bin:/bin -- "${tmp}/fake.p5p")
+    check "unprivileged smoke names a missing pkg5 tool" \
+      grep -qE "FAIL: required tool '[a-z]+' is not in PATH" <(echo "${out}")
+  fi
+fi
+
 # --- release test inventory -----------------------------------------------------
 # Synthetic `cargo nextest list --message-format json` documents.
 inv() { # inv FILE SUITE=COUNT... -> write a nextest list JSON of selected tests

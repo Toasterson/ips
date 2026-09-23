@@ -15,6 +15,10 @@ Any other `v*` tag fails the pipeline.
 
 ## Cutting a release
 
+Before tagging, run the [pre-tag pkg5 gate](#pre-tag-pkg5-gate) on an
+OpenIndiana build host. It does not replace the live-image test the illumos
+job runs in step 3.4.
+
 1. Set `version` in `[workspace.package]` of `Cargo.toml` to the version
    without the `v`, for example `1.0.0-rc.1`. Refresh `Cargo.lock` with
    `cargo check`. Commit the change.
@@ -135,8 +139,50 @@ RELEASE_TAG_OVERRIDE=v0.0.0-alpha.0 RELEASE_ALLOW_UNTAGGED=1 \
   .forgejo/scripts/build-ips-package.sh dist
 ```
 
-This writes only to `target/ips` and `dist`. Do not run
-`test-ips-package.sh` on a shared host. It installs packages and changes SMF
-state on the live system. It also points the running depot at a scratch
-repository for the pkg5 client smoke (see `packaging/ips/README.md`,
+This writes only to `target/ips` and `dist`.
+
+### Pre-tag pkg5 gate
+
+Before tagging, check on an OpenIndiana build host (for example the oibuild
+zone), as an ordinary user, that the native pkg5 client (`pkg(1)`,
+`pkgrecv`) consumes what this checkout's `pkg6repo` and `pkg6depotd` serve:
+
+```sh
+candidate=v1.0.0-rc.11   # replace; must be "v" + Cargo.toml workspace version
+cargo build --workspace --release --locked -j2
+RELEASE_TAG_OVERRIDE="$candidate" RELEASE_ALLOW_UNTAGGED=1 \
+  .forgejo/scripts/build-ips-package.sh dist
+.forgejo/scripts/test-pkg5-unprivileged.sh \
+  "dist/pkg6depotd-${candidate#v}-illumos-x86_64.p5p"
+```
+
+Set `candidate` to the tag you are about to cut. It must equal `v` plus
+`version` in `[workspace.package]` of `Cargo.toml` (step 1 of Cutting a
+release). `v1.0.0-rc.11` is only an example.
+
+The `.p5p` is a local dry-run package built from the current `HEAD`; the tag
+does not exist yet, so its manifest records `HEAD` as
+`info.repository-changeset`. It is not a release asset. Do
+not substitute a previous release's `.p5p`: it contains the old binaries, not
+the code you are about to tag. After the tag is pushed, the tagged CI run
+still builds the real release assets and runs the live-image test.
+
+The script imports the `.p5p` and a dummy package into a scratch repository,
+checks that a re-import changes nothing, serves the repository with
+`pkg6depotd` on a loopback high port, and runs `pkg` (catalog, `info -r`,
+install, verify, uninstall into a scratch user image) and `pkgrecv` (listing
+and byte-level comparison) against it. It uses no sudo, SMF or live image,
+and removes its `/var/tmp/pkg6-pkg5-unpriv.*` directory on exit.
+`PKG6_BIN_DIR`, `PKG6_SMOKE_PORT`, `PKG6_SMOKE_TMPDIR` and
+`PKG6_SMOKE_KEEP=1` are described in its header. Run it for every release
+candidate. It is not part of `release.yml`.
+
+It is a fast gate, not a substitute: it does not test the package itself
+(SMF service, `pkg6srv`, upgrade, uninstall). That remains the job of
+`test-ips-package.sh`, which the illumos release job runs on its throwaway
+Solstice VM.
+
+Do not run `test-ips-package.sh` on a shared host. It installs packages and
+changes SMF state on the live system. It also points the running depot at a
+scratch repository for the pkg5 client smoke (see `packaging/ips/README.md`,
 Validation).

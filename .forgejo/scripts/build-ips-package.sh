@@ -14,7 +14,8 @@
 # Nothing is installed or changed outside the checkout.
 #
 # Local dry runs on an untagged checkout: RELEASE_TAG_OVERRIDE=v1.2.3-rc.1
-# RELEASE_ALLOW_UNTAGGED=1 (the FMRI then records HEAD).
+# RELEASE_ALLOW_UNTAGGED=1 (the manifest's info.repository-changeset then
+# records HEAD).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)

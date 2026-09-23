@@ -200,3 +200,31 @@ before removing it.
     checks see the operator repository unchanged. The comparison and snapshot
     helpers are tested offline by `test-release-scripts.sh`. The smoke itself runs
     only on the tag-triggered illumos release VM.
+- Before tagging, as an ordinary user on an OpenIndiana build host, the
+  pre-tag pkg5 gate runs the same client checks without root, SMF or the live
+  image:
+
+  ```sh
+  candidate=v1.0.0-rc.11   # replace; must be "v" + Cargo.toml workspace version
+  cargo build --workspace --release --locked -j2
+  RELEASE_TAG_OVERRIDE="$candidate" RELEASE_ALLOW_UNTAGGED=1 \
+    .forgejo/scripts/build-ips-package.sh dist
+  .forgejo/scripts/test-pkg5-unprivileged.sh \
+    "dist/pkg6depotd-${candidate#v}-illumos-x86_64.p5p"
+  ```
+
+  `v1.0.0-rc.11` is only an example: set `candidate` to the tag you are about
+  to cut, matching `version` in `[workspace.package]` of `Cargo.toml`. The
+  `.p5p` is a local dry-run package built from the current `HEAD`, not a
+  release asset, and a previous release's `.p5p` does not test the code about
+  to be tagged. The tagged CI run still builds the release assets and runs the
+  live-image test.
+
+  It imports the `.p5p` and a dummy owned by the running user with the
+  checkout's `target/release/pkg6repo`, runs `target/release/pkg6depotd` in
+  the foreground on a loopback high port, and uses a scratch user image
+  (`pkg image-create -U`). Steps 1 and 4 to 6 above apply, in that user
+  image; the negative control and the config switches do not, as there is
+  no SMF instance. It is a fast gate before the tag, not a replacement for the
+  live-image test above, which still runs on the Solstice release VM. See
+  `docs/release-process.md`, Pre-tag pkg5 gate.

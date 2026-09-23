@@ -1,7 +1,9 @@
 # shellcheck shell=bash
-# Helpers for the pkg5 client smoke in test-ips-package.sh. They only touch
-# the directories passed to them, so tests/test-release-scripts.sh exercises
-# them offline. bash 3.2 compatible.
+# Helpers for the pkg5 client smokes: the root-only live-image one in
+# test-ips-package.sh (release CI) and the unprivileged pre-tag one in
+# test-pkg5-unprivileged.sh. They only touch the directories passed to them,
+# so tests/test-release-scripts.sh exercises them offline. bash 3.2
+# compatible.
 
 # pkg5_smoke_unpack P5P DIR: unpack a .p5p (a pax tar) into DIR, which must
 # not exist yet. Prefers GNU tar where installed.
