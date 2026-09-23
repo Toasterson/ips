@@ -1,0 +1,6 @@
+# pkglint settings for the release gate in build-ips-package.sh: only errors
+# fail the build. The script prints a full INFO-level pass beforehand.
+[pkglint]
+log_level = ERROR
+use_progress_tracker = False
+do_pub_checks = True

@@ -1,0 +1,34 @@
+// pkg6depotd configuration, read by svc:/application/pkg/pkg6depotd.
+//
+// This file is delivered with preserve=renamenew: once you edit it, package
+// upgrades leave your copy untouched and install the new default next to it
+// as pkg6depotd.kdl.new. Compare the two after an upgrade.
+//
+// The config/file property lives on the service, so set it there and then
+// refresh and restart the instance:
+//   svccfg -s pkg6depotd setprop config/file = astring: /etc/pkg6depotd/other.kdl
+//   svcadm refresh pkg6depotd:default && svcadm restart pkg6depotd:default
+// A second instance needs its own property group to override the service
+// value; see pkg6depotd(8).
+
+server {
+    // Loopback only by default. In reverse-proxy mode, bind the address the
+    // proxy connects to. Ports below 1024 work: the service holds
+    // net_privaddr.
+    bind "127.0.0.1:8080"
+}
+
+repository {
+    // The package does not create this location, so uninstalling it never
+    // touches repository data. Before enabling the service, as root:
+    //   zfs create -o mountpoint=/var/pkg6depotd rpool/pkg6depotd  (or mkdir)
+    //   chown pkg6srv:pkg6srv /var/pkg6depotd && chmod 0750 /var/pkg6depotd
+    //   su pkg6srv -c '/usr/bin/pkg6repo create /var/pkg6depotd/repo'
+    root "/var/pkg6depotd/repo"
+    mode "readonly"
+}
+
+telemetry {
+    service-name "pkg6depotd"
+    log-format "json"
+}

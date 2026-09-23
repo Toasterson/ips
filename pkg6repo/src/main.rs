@@ -15,8 +15,8 @@ use tracing::{debug, info};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{EnvFilter, fmt};
 
-#[cfg(test)]
-mod e2e_tests;
+// e2e_tests.rs is the separate `e2e_tests` integration-test target (see
+// Cargo.toml); it drives the built binary and must not be compiled into it.
 #[cfg(test)]
 mod tests;
 

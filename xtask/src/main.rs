@@ -1,15 +1,14 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 // Constants
 const TEST_BASE_DIR: &str = "/tmp/pkg6_test";
 const PROTOTYPE_DIR: &str = "/tmp/pkg6_test/prototype";
 const MANIFEST_DIR: &str = "/tmp/pkg6_test/manifests";
-const E2E_TEST_BIN_DIR: &str = "/tmp/pkg6_test/bin";
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -45,10 +44,10 @@ enum Commands {
         package: Option<String>,
     },
 
-    /// Build binaries for end-to-end tests
+    /// Build the end-to-end tests without running them
     BuildE2E,
 
-    /// Run end-to-end tests using pre-built binaries
+    /// Run the end-to-end tests (pkg6repo e2e_tests target, via nextest)
     RunE2E {
         /// Specific test to run (runs all e2e tests if not specified)
         #[arg(short, long)]
@@ -78,6 +77,19 @@ fn main() -> Result<()> {
         Commands::Clippy => clippy(),
         Commands::Clean => clean(),
     }
+}
+
+/// Run `cmd` and fail unless it exits successfully. Every spawned command
+/// goes through here: a bare `.status()` only reports whether the process
+/// could be started, which made failed builds and tests look green.
+fn run(cmd: &mut Command, what: &str) -> Result<()> {
+    let status = cmd
+        .status()
+        .with_context(|| format!("Failed to start: {what}"))?;
+    if !status.success() {
+        bail!("{what} failed ({status})");
+    }
+    Ok(())
 }
 
 /// Set up the test environment for repository tests
@@ -114,10 +126,7 @@ fn setup_test_env() -> Result<()> {
 
     // Compile the applications
     println!("Compiling applications...");
-    Command::new("cargo")
-        .arg("build")
-        .status()
-        .context("Failed to compile applications")?;
+    run(Command::new("cargo").arg("build"), "cargo build")?;
 
     // Create a simple prototype directory structure with some files
     println!("Creating prototype directory structure...");
@@ -226,7 +235,7 @@ fn build(release: &bool, package: &Option<String>) -> Result<()> {
         cmd.args(["--package", pkg]);
     }
 
-    cmd.status().context("Failed to build project")?;
+    run(&mut cmd, "cargo build")?;
 
     Ok(())
 }
@@ -244,116 +253,68 @@ fn test(release: &bool, package: &Option<String>) -> Result<()> {
         cmd.args(["--package", pkg]);
     }
 
-    cmd.status().context("Failed to run tests")?;
+    run(&mut cmd, "cargo test")?;
 
     Ok(())
 }
 
 /// Format code
 fn fmt() -> Result<()> {
-    Command::new("cargo")
-        .arg("fmt")
-        .status()
-        .context("Failed to format code")?;
+    run(Command::new("cargo").arg("fmt"), "cargo fmt")?;
 
     Ok(())
 }
 
 /// Run clippy
 fn clippy() -> Result<()> {
-    Command::new("cargo")
-        .args(["clippy", "--all-targets", "--all-features"])
-        .status()
-        .context("Failed to run clippy")?;
+    run(
+        Command::new("cargo").args(["clippy", "--all-targets", "--all-features"]),
+        "cargo clippy",
+    )?;
 
     Ok(())
 }
 
 /// Clean build artifacts
 fn clean() -> Result<()> {
-    Command::new("cargo")
-        .arg("clean")
-        .status()
-        .context("Failed to clean build artifacts")?;
+    run(Command::new("cargo").arg("clean"), "cargo clean")?;
 
     Ok(())
 }
 
-/// Build binaries for end-to-end tests
+/// Build the end-to-end test target (and the pkg6repo binary it drives)
+/// without running it.
 fn build_e2e() -> Result<()> {
-    println!("Building binaries for end-to-end tests...");
-
-    // Create the bin directory if it doesn't exist
-    fs::create_dir_all(E2E_TEST_BIN_DIR).context("Failed to create bin directory")?;
-
-    // Build pkg6repo in release mode
-    println!("Building pkg6repo...");
-    Command::new("cargo")
-        .args(["build", "--release", "--package", "pkg6repo"])
-        .status()
-        .context("Failed to build pkg6repo")?;
-
-    // Build pkg6 in release mode
-    println!("Building pkg6...");
-    Command::new("cargo")
-        .args(["build", "--release", "--package", "pkg6"])
-        .status()
-        .context("Failed to build pkg6")?;
-
-    // Copy the binaries to the bin directory
-    let target_dir = PathBuf::from("target/release");
-
-    println!("Copying binaries to test directory...");
-    fs::copy(
-        target_dir.join("pkg6repo"),
-        PathBuf::from(E2E_TEST_BIN_DIR).join("pkg6repo"),
+    run(
+        Command::new("cargo").args([
+            "nextest",
+            "run",
+            "--no-run",
+            "--package",
+            "pkg6repo",
+            "--test",
+            "e2e_tests",
+        ]),
+        "building the e2e tests",
     )
-    .context("Failed to copy pkg6repo binary")?;
-
-    fs::copy(
-        target_dir.join("pkg6"),
-        PathBuf::from(E2E_TEST_BIN_DIR).join("pkg6"),
-    )
-    .context("Failed to copy pkg6 binary")?;
-
-    println!("End-to-end test binaries built successfully!");
-    println!("Binaries are located at: {}", E2E_TEST_BIN_DIR);
-
-    Ok(())
 }
 
-/// Run end-to-end tests using pre-built binaries
+/// Run the pkg6repo end-to-end tests under nextest. The tests are
+/// self-contained: each drives the `pkg6repo` binary Cargo built for the
+/// test profile in its own temporary directory, so no pre-built binaries or
+/// shared /tmp fixtures are needed.
 fn run_e2e(test: &Option<String>) -> Result<()> {
-    println!("Running end-to-end tests...");
-
-    // Check if the binaries exist
-    let pkg6repo_bin = PathBuf::from(E2E_TEST_BIN_DIR).join("pkg6repo");
-    let pkg6_bin = PathBuf::from(E2E_TEST_BIN_DIR).join("pkg6");
-
-    if !pkg6repo_bin.exists() || !pkg6_bin.exists() {
-        println!("Pre-built binaries not found. Building them first...");
-        build_e2e()?;
-    }
-
-    // Set up the test environment
-    setup_test_env()?;
-
-    // Run the tests
     let mut cmd = Command::new("cargo");
-    cmd.arg("test");
-
+    cmd.args([
+        "nextest",
+        "run",
+        "--package",
+        "pkg6repo",
+        "--test",
+        "e2e_tests",
+    ]);
     if let Some(test_name) = test {
-        cmd.args(["--package", "pkg6repo", "--test", "e2e_tests", test_name]);
-    } else {
-        cmd.args(["--package", "pkg6repo", "--test", "e2e_tests"]);
+        cmd.arg(test_name);
     }
-
-    // Set the environment variable for the test binaries
-    cmd.env("PKG6_TEST_BIN_DIR", E2E_TEST_BIN_DIR);
-
-    cmd.status().context("Failed to run end-to-end tests")?;
-
-    println!("End-to-end tests completed!");
-
-    Ok(())
+    run(&mut cmd, "e2e tests")
 }

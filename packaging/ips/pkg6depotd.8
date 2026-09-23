@@ -1,0 +1,163 @@
+.\"
+.\" This Source Code Form is subject to the terms of the Mozilla Public
+.\" License, v. 2.0. If a copy of the MPL was not distributed with this
+.\" file, You can obtain one at https://mozilla.org/MPL/2.0/.
+.\"
+.Dd September 23, 2026
+.Dt PKG6DEPOTD 8
+.Os
+.Sh NAME
+.Nm pkg6depotd
+.Nd IPS repository depot server
+.Sh SYNOPSIS
+.Nm /usr/lib/pkg6depotd
+.Op Fl c Ar file
+.Op Fl -no-daemon
+.Op Ar command
+.Sh DESCRIPTION
+The
+.Nm
+daemon serves an IPS package repository to
+.Xr pkg 1
+clients over the pkg5 depot protocol.
+It is normally run by the
+.Xr smf 7
+service
+.Sy svc:/application/pkg/pkg6depotd
+and not invoked directly.
+.Pp
+The public HTTP interface is read-only.
+Repositories are created and changed with the local
+.Nm pkg6repo
+command.
+.Pp
+The following options are supported:
+.Bl -tag -width Ds
+.It Fl c Ar file , Fl -config Ar file
+Read the KDL configuration from
+.Ar file .
+.It Fl -no-daemon
+Stay in the foreground.
+The SMF service always passes this option.
+.El
+.Pp
+The following commands are supported:
+.Bl -tag -width Ds
+.It Cm start
+Serve the repository.
+This is the default.
+.It Cm config-test
+Load and validate the configuration and print a summary: the file, the bind
+address and the repository root.
+Other settings are not printed, because they may hold credentials.
+Exits non-zero if the file is missing or invalid.
+The repository is not opened.
+.El
+.Sh SERVICE
+The service runs as the
+.Sy pkg6srv
+user and group with the privileges
+.Sy basic ,
+.Sy net_privaddr ,
+less
+.Sy file_link_any ,
+.Sy proc_info
+and
+.Sy proc_session .
+It can therefore bind ports below 1024.
+.Pp
+The default instance is delivered disabled.
+The package does not create the repository location, so removing the
+package never touches repository data.
+Before enabling the service, create it, preferably as its own ZFS dataset,
+create the repository as the service user and review the configuration file:
+.Bd -literal -offset indent
+# zfs create -o mountpoint=/var/pkg6depotd rpool/pkg6depotd
+# chown pkg6srv:pkg6srv /var/pkg6depotd
+# chmod 0750 /var/pkg6depotd
+# su pkg6srv -c '/usr/bin/pkg6repo create /var/pkg6depotd/repo'
+# su pkg6srv -c '/usr/bin/pkg6repo add-publisher \e
+      -s /var/pkg6depotd/repo openindiana.org'
+# svcadm enable pkg6depotd
+.Ed
+.Pp
+The service is configured with the following properties:
+.Bl -tag -width Ds
+.It Sy config/file
+Path of the configuration file.
+The default is
+.Pa /etc/pkg6depotd/pkg6depotd.kdl .
+The service will not start if the file is missing, unreadable by
+.Sy pkg6srv ,
+or invalid; there are no built-in defaults.
+.It Sy config/log_filter
+A
+.Ev RUST_LOG
+filter such as
+.Sy info
+or
+.Sy pkg6depotd=debug .
+Empty selects the built-in default.
+.El
+.Pp
+These properties are defined on the service, not on the
+.Sy default
+instance.
+Set them on the service, then refresh and restart the instance:
+.Bd -literal -offset indent
+# svccfg -s pkg6depotd setprop config/log_filter = astring: debug
+# svcadm refresh pkg6depotd:default
+# svcadm restart pkg6depotd:default
+.Ed
+.Pp
+Running
+.Nm svccfg Fl s Sy pkg6depotd:default Cm setprop
+fails with
+.Dq \&No such property group ,
+because the instance has no
+.Sy config
+property group of its own.
+.Pp
+Configuration file changes take effect on
+.Nm svcadm restart .
+Diagnostic output goes to the SMF log shown by
+.Nm svcs Fl L Sy pkg6depotd .
+.Pp
+Several depots can run side by side as separate instances.
+Give each additional instance its own
+.Sy config
+property group, which overrides the service value for that instance only:
+.Bd -literal -offset indent
+# svccfg -s pkg6depotd add second
+# svccfg -s pkg6depotd:second addpg config application
+# svccfg -s pkg6depotd:second setprop config/file = \e
+      astring: /etc/pkg6depotd/second.kdl
+# svcadm refresh pkg6depotd:second
+# svcadm enable pkg6depotd:second
+.Ed
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/pkg6depotd/pkg6depotd.kdl
+Default configuration.
+It is readable by root and the
+.Sy pkg6srv
+group only.
+Package upgrades keep an edited copy and install the new default as
+.Pa pkg6depotd.kdl.new .
+.It Pa /var/pkg6depotd
+Default location of repositories.
+Created by the administrator, not by the package.
+.It Pa /lib/svc/manifest/application/pkg/pkg6depotd.xml
+SMF service manifest.
+.It Pa /lib/svc/method/svc-pkg6depotd
+SMF start method.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh INTERFACE STABILITY
+.Sy Uncommitted
+.Sh SEE ALSO
+.Xr pkg 1 ,
+.Xr smf 7 ,
+.Xr svcadm 8 ,
+.Xr svccfg 8

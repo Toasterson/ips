@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Minimal stand-in for curl against the Forgejo release API, for the uploader
+# tests in test-release-scripts.sh. State lives in $FAKE_FORGE_STATE:
+#   releases.json   array of release objects (with an "assets" array)
+#   blobs/<id>/<name>
+# Supports exactly the calls upload-release-assets.sh makes.
+#
+# Fault injection: FAKE_FORGE_FAIL_LIST=1 makes the release list return 500.
+# Every call is counted in $FAKE_FORGE_STATE/calls; after 200 calls the fake
+# answers the release list with [] so a retry-forever bug ends the loop and
+# shows up as a call count instead of hanging the test.
+set -euo pipefail
+
+state="${FAKE_FORGE_STATE:?}"
+[ -f "${state}/releases.json" ] || echo '[]' > "${state}/releases.json"
+
+calls=$(( $(cat "${state}/calls" 2>/dev/null || echo 0) + 1 ))
+echo "${calls}" > "${state}/calls"
+
+out=/dev/stdout write_out="" method=GET data="" attach="" url="" fail_http=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w) write_out="$2"; shift 2 ;;
+    -X) method="$2"; shift 2 ;;
+    -H) shift 2 ;;
+    -d) data="$2"; shift 2 ;;
+    -F) attach="${2#attachment=@}"; shift 2 ;;
+    -*f*) fail_http=1; shift ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+status=200
+body=""
+rel="${state}/releases.json"
+path="${url#*/api/v1/repos/*/*/}"
+
+case "${method} ${url}" in
+  "GET file://"*)
+    cp "${url#file://}" "${out}" 2>/dev/null || exit 22
+    exit 0
+    ;;
+esac
+
+case "${method} ${path}" in
+  "GET releases?"*)
+    if [ "${FAKE_FORGE_FAIL_LIST:-}" = 1 ] && [ "${calls}" -le 200 ]; then
+      status=500 body='{"message":"injected failure"}'
+    else
+    case "${path}" in
+      *page=1) body=$(jq -c '[.[] | del(.assets)]' "${rel}") ;;
+      *) body='[]' ;;
+    esac
+    fi
+    ;;
+  "POST releases")
+    tag=$(printf '%s' "${data}" | jq -r .tag_name)
+    if jq -e --arg t "${tag}" 'any(.[]; .tag_name == $t)' "${rel}" >/dev/null; then
+      status=409 body='{"message":"release exists"}'
+    else
+      id=$(( $(jq 'length' "${rel}") + 1 ))
+      jq --argjson id "${id}" --argjson r "${data}" '. + [$r + {id: $id, assets: []}]' "${rel}" > "${rel}.new"
+      mv "${rel}.new" "${rel}"
+      status=201
+      body=$(jq -c --argjson id "${id}" '.[] | select(.id == $id) | del(.assets)' "${rel}")
+    fi
+    ;;
+  "GET releases/"*"/assets")
+    id=${path#releases/}; id=${id%/assets}
+    body=$(jq -c --argjson id "${id}" '.[] | select(.id == $id) | .assets' "${rel}")
+    ;;
+  "POST releases/"*"/assets?name="*)
+    id=${path#releases/}; id=${id%%/*}
+    name=${path#*name=}
+    mkdir -p "${state}/blobs/${id}"
+    cp "${attach}" "${state}/blobs/${id}/${name}"
+    size=$(wc -c < "${attach}" | tr -d ' ')
+    asset=$(jq -n --arg n "${name}" --argjson s "${size}" --arg u "file://${state}/blobs/${id}/${name}" \
+      '{name: $n, size: $s, browser_download_url: $u, uuid: $n}')
+    jq --argjson id "${id}" --argjson a "${asset}" 'map(if .id == $id then .assets += [$a] else . end)' "${rel}" > "${rel}.new"
+    mv "${rel}.new" "${rel}"
+    echo "${method} ${path}" >> "${state}/log"
+    status=201 body="${asset}"
+    ;;
+  "DELETE "*)
+    echo "${method} ${path}" >> "${state}/log"
+    status=204
+    ;;
+  "PATCH releases/"*)
+    id=${path#releases/}
+    jq --argjson id "${id}" --argjson p "${data}" 'map(if .id == $id then . + $p else . end)' "${rel}" > "${rel}.new"
+    mv "${rel}.new" "${rel}"
+    echo "${method} ${path} ${data}" >> "${state}/log"
+    body=$(jq -c --argjson id "${id}" '.[] | select(.id == $id) | del(.assets)' "${rel}")
+    ;;
+  *)
+    status=404 body='{"message":"not faked"}'
+    ;;
+esac
+
+printf '%s' "${body}" > "${out}"
+[ -z "${write_out}" ] || printf '%s' "${status}"
+if [ "${fail_http}" = 1 ] && [ "${status}" -ge 400 ]; then
+  exit 22
+fi

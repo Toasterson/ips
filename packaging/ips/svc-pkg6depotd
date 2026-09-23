@@ -1,0 +1,48 @@
+#!/sbin/sh
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# SMF method for svc:/application/pkg/pkg6depotd. The daemon stays in the
+# foreground (startd/duration=child); SMF stops it with :kill.
+
+# shellcheck disable=SC1091
+. /lib/svc/share/smf_include.sh
+
+DEPOTD=/usr/lib/pkg6depotd
+DEFAULT_CONFIG=/etc/pkg6depotd/pkg6depotd.kdl
+
+getprop() {
+	val=$(/usr/bin/svcprop -p "$1" "$SMF_FMRI" 2>/dev/null)
+	# svcprop prints "" for an empty astring
+	[ "$val" = '""' ] && val=
+	echo "$val"
+}
+
+case "$1" in
+start)
+	config=$(getprop config/file)
+	[ -n "$config" ] || config=$DEFAULT_CONFIG
+
+	# pkg6depotd itself refuses a missing or invalid configuration; checking
+	# here as well reports SMF_EXIT_ERR_CONFIG with a clear log line.
+	if [ ! -r "$config" ]; then
+		echo "pkg6depotd: configuration $config is missing or" \
+		    "unreadable by $(/usr/bin/id -un)"
+		exit "$SMF_EXIT_ERR_CONFIG"
+	fi
+
+	log_filter=$(getprop config/log_filter)
+	if [ -n "$log_filter" ]; then
+		RUST_LOG=$log_filter
+		export RUST_LOG
+	fi
+
+	exec $DEPOTD --no-daemon --config "$config" start
+	;;
+*)
+	echo "Usage: $0 start"
+	exit "$SMF_EXIT_ERR_FATAL"
+	;;
+esac
