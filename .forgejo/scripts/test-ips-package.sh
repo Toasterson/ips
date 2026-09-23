@@ -69,6 +69,37 @@ dump() {
   echo "=== diagnostics"
   svcs -xv "${svc}" 2>&1 || true
   sudo tail -n 50 "/var/svc/log/application-pkg-pkg6depotd:default.log" 2>&1 || true
+  restarter_dump
+}
+# The master restarter (svc.startd) publishes its state in the NONPERSISTENT
+# restarter property group of its own instance. When that group is missing,
+# every svcadm that waits for a state change (e.g. pkg(1)'s disable_fmri on
+# uninstall) fails with "Restarter ... is unavailable" (RC9, Solstice job
+# 22786). check_restarter records at which stage it disappears.
+master_restarter=svc:/system/svc/restarter:default
+# check_restarter STAGE: the master restarter must report restarter/state
+# online; otherwise fail naming STAGE.
+check_restarter() {
+  local s
+  s=$(svcprop -p restarter/state "${master_restarter}" 2>&1) \
+    || fail "master restarter unavailable ${1}: svcprop -p restarter/state ${master_restarter}: ${s}"
+  [ "${s}" = online ] || fail "master restarter is '${s}' ${1}, expected online"
+  echo "master restarter online ${1} ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+}
+# restarter_dump: bounded master restarter state, processes and logs.
+restarter_dump() {
+  echo "--- master restarter ${master_restarter} ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+  svcprop -p restarter "${master_restarter}" 2>&1 | head -n 20 || true
+  svcs -H -o state,stime,fmri "${master_restarter}" svc:/system/svc/global:default 2>&1 || true
+  svcs -x 2>&1 | head -n 40 || true
+  ps -eo pid,ppid,stime,etime,comm 2>&1 | awk 'NR == 1 || $5 ~ /svc\.(startd|configd)$/' | head -n 10 || true
+  for f in /var/svc/log/svc.startd.log /etc/svc/volatile/svc.startd.log; do
+    sudo test -f "${f}" || continue
+    echo "--- tail ${f}"
+    sudo tail -n 30 "${f}" 2>&1 || true
+  done
+  echo "--- svc.startd/svc.configd in /var/adm/messages"
+  sudo grep -E 'svc\.(startd|configd)' /var/adm/messages 2>&1 | tail -n 20 || true
 }
 # wait_state STATE: poll the instance for up to 90 s.
 wait_state() {
@@ -109,10 +140,13 @@ probe() {
   fail "depot did not answer http://127.0.0.1:${port}/versions/0/"
 }
 
+check_restarter "before package install"
 echo "=== install from ${p5p}"
 sudo pkg install -v -g "${p5p}" "${IPS_PKG_NAME}"
 pkg list -v "${IPS_PKG_NAME}"
 sudo pkg verify -v "${IPS_PKG_NAME}" || fail "pkg verify after install"
+
+check_restarter "after package install"
 
 echo "=== account and files"
 [ "$(getent passwd pkg6srv | cut -d: -f3,4)" = "94:94" ] || fail "pkg6srv is not uid/gid 94: $(getent passwd pkg6srv)"
@@ -197,6 +231,7 @@ set_config_file "${conf}"
 smf svcadm clear "${svc}"
 wait_state online
 probe
+check_restarter "after the missing/invalid config exercise"
 
 echo "=== pkg5 client smoke: native pkg(1) and pkgrecv against the running depot"
 # Proves that the legacy Python client consumes what import-pkg5 publishes,
@@ -371,6 +406,7 @@ cleanup_smoke
 trap - EXIT
 [ ! -e "${smoke}" ] || fail "scratch directory ${smoke} was not removed"
 echo "pkg5 client smoke passed"
+check_restarter "after the pkg5 client smoke"
 pid1=$(pgrep -u pkg6srv -f /usr/lib/pkg6depotd)
 
 echo "=== upgrade: operator config must survive"
@@ -409,6 +445,7 @@ wait_state online
 probe
 pid2=$(pgrep -u pkg6srv -f /usr/lib/pkg6depotd)
 echo "depot pid before upgrade ${pid1}, after ${pid2}"
+check_restarter "after upgrade, before uninstall"
 
 echo "=== uninstall"
 # Salvaging the operator-edited config (and its .kdl.new) into lost+found is
@@ -424,7 +461,7 @@ repo_salvage() {
 }
 repo_before=$(sudo find /var/pkg6depotd -exec cksum {} + 2>/dev/null | sort; sudo find /var/pkg6depotd | sort)
 salvage_before=$(repo_salvage) || fail "cannot list ${lost_found} before uninstall"
-sudo pkg uninstall -v "${IPS_PKG_NAME}"
+sudo pkg uninstall -v "${IPS_PKG_NAME}" || fail "pkg uninstall of ${IPS_PKG_NAME} failed"
 sudo test -d /var/pkg6depotd/repo || fail "/var/pkg6depotd/repo is gone after uninstall"
 [ "$(sudo find /var/pkg6depotd -exec cksum {} + 2>/dev/null | sort; sudo find /var/pkg6depotd | sort)" = "${repo_before}" ] \
   || fail "uninstall changed content under /var/pkg6depotd"

@@ -522,6 +522,50 @@ if [ "$(id -u)" != 0 ]; then
 fi
 check_not "uninstall test does not forbid salvaging the edited config" \
   grep -q 'ls /var/pkg/lost+found' "${scripts}/test-ips-package.sh"
+check "a failed pkg uninstall is reported through fail()" \
+  grep -qxF 'sudo pkg uninstall -v "${IPS_PKG_NAME}" || fail "pkg uninstall of ${IPS_PKG_NAME} failed"' \
+  "${scripts}/test-ips-package.sh"
+
+# --- master restarter checkpoints -------------------------------------------------
+# RC9: svcadm disable -s failed on uninstall because the master restarter had
+# lost its restarter property group. The live test records at which stage.
+tip_s="${scripts}/test-ips-package.sh"
+rline() { grep -nxF -- "$1" "${tip_s}" | head -1 | cut -d: -f1; }
+r_install=$(rline 'check_restarter "before package install"')
+r_installed=$(rline 'check_restarter "after package install"')
+r_config=$(rline 'check_restarter "after the missing/invalid config exercise"')
+r_smoke=$(rline 'check_restarter "after the pkg5 client smoke"')
+r_upgrade=$(rline 'check_restarter "after upgrade, before uninstall"')
+r_uninstall=$(rline 'sudo pkg uninstall -v "${IPS_PKG_NAME}" || fail "pkg uninstall of ${IPS_PKG_NAME} failed"')
+check "restarter checkpoints run in lifecycle order before the uninstall" test -n "${r_install}" \
+  -a -n "${r_installed}" -a -n "${r_config}" -a -n "${r_smoke}" -a -n "${r_upgrade}" -a -n "${r_uninstall}" \
+  -a "${r_install:-0}" -lt "$(rline "sudo pkg install -v -g \"\${p5p}\" \"\${IPS_PKG_NAME}\"")" \
+  -a "${r_installed:-0}" -lt "${r_config:-0}" \
+  -a "$(rline 'echo "=== invalid (readable) config also fails closed in the daemon"')" -lt "${r_config:-0}" \
+  -a "${r_config:-0}" -lt "$(rline 'echo "=== pkg5 client smoke: native pkg(1) and pkgrecv against the running depot"')" \
+  -a "$(rline 'echo "pkg5 client smoke passed"')" -lt "${r_smoke:-0}" \
+  -a "$(rline 'echo "=== upgrade: operator config must survive"')" -lt "${r_upgrade:-0}" \
+  -a "${r_upgrade:-0}" -lt "${r_uninstall:-0}"
+check "dump() includes the master restarter diagnostics" \
+  grep -qx '  restarter_dump' <(sed -n '/^dump() {$/,/^}$/p' "${tip_s}")
+restarter_fns=$(sed -n '/^master_restarter=/p; /^check_restarter() {$/,/^}$/p' "${tip_s}")
+check "check_restarter is defined in the live install test" grep -q '^check_restarter() {$' <(echo "${restarter_fns}")
+restarter() { # restarter SVCPROP_OUT SVCPROP_RC -> run check_restarter with a fake svcprop
+  FAKE_OUT="$1" FAKE_RC="$2" bash -c 'set -euo pipefail
+    svcprop() {
+      [ "$*" = "-p restarter/state svc:/system/svc/restarter:default" ] || { echo "unexpected svcprop $*"; return 99; }
+      printf "%s\n" "${FAKE_OUT}"; return "${FAKE_RC}"
+    }
+    fail() { echo "FAIL: $*"; exit 1; }
+    eval "$1"; check_restarter "at test stage"' _ "${restarter_fns}"
+}
+check "online master restarter passes" restarter online 0
+case "$(restarter online 0)" in "master restarter online at test stage ("*) ok ;; *) bad "online restarter message" ;; esac
+check_not "missing restarter group fails" restarter "svcprop: Couldn't find property group \`restarter'" 1
+eq "missing restarter group names the stage and the svcprop error" "$(restarter "no pg" 1 || true)" \
+  "FAIL: master restarter unavailable at test stage: svcprop -p restarter/state svc:/system/svc/restarter:default: no pg"
+eq "non-online restarter names the stage and the state" "$(restarter maintenance 0 || true)" \
+  "FAIL: master restarter is 'maintenance' at test stage, expected online"
 
 # --- packaging files agree with each other ----------------------------------
 p5m="${root}/packaging/ips/pkg6depotd.p5m"
