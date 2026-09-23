@@ -340,6 +340,153 @@ check "pkgrepo verify skips dependency resolution in the scratch repo" \
   grep -q '^pkgrepo verify --disable dependency -s "${repo}"$' "${build}"
 check "live install test still resolves dependencies" grep -q 'sudo pkg install -v -g' "${scripts}/test-ips-package.sh"
 
+# --- published FMRI keeps the tagged timestamp ----------------------------------
+# Runs build-ips-package.sh against fake pkg5 tools in a throwaway checkout.
+# The fakes keep pkg5's layout: repository and p5p both store each manifest
+# at publisher/PUB/pkg/STEM/VERSION, %-quoted, declaring the full pkg.fmri.
+# The fake pkgsend behaves like pkg5 publish.py: it replaces the manifest's
+# timestamp with the publication time unless the global -D allow-timestamp
+# precedes the subcommand. The fake pkgrecv --newest prints like pkg5's
+# (get_fmri(include_build=False)): no build release. FAKE_PUBLISH_FMRI,
+# FAKE_ARCHIVE_FMRI, FAKE_ARCHIVE_EXTRA and FAKE_ARCHIVE_DECLARES make the
+# fakes publish or archive something else.
+fb="${tmp}/fakebuild"
+mkdir -p "${fb}/bin" "${fb}/co/target/release" "${fb}/co/packaging/ips" "${fb}/co/pkg6repo" "${fb}/co/man/man5" "${fb}/co/man/man8"
+cat >"${fb}/fake-store.sh" <<'EOF'
+# fake_store DIR FMRI: store a manifest for FMRI in the pkg5 layout under DIR.
+fake_store() {
+  local rest="${2#pkg://}" q
+  q() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's|/|%2F|g' -e 's/,/%2C/g' -e 's/:/%3A/g'; }
+  rest="${rest#*/}"
+  local d="$1/publisher/${2#pkg://}"
+  d="${d%%/"${rest}"}/pkg/$(q "${rest%%@*}")"
+  mkdir -p "${d}"
+  printf 'set name=pkg.fmri value=%s\nset name=pkg.summary value=x\n' "$2" >"${d}/$(q "${rest#*@}")"
+}
+EOF
+cat >"${fb}/bin/pkgmogrify" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+while [ "$#" -gt 1 ]; do
+  [ "$1" = -D ] && { args+=(-e "s|\$(${2%%=*})|${2#*=}|g"); shift; }
+  shift
+done
+sed "${args[@]}" "$1"
+EOF
+cat >"${fb}/bin/pkgdepend" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  generate) eval "cat \"\${$#}\"" ;;
+  resolve) { cat "$3"
+    echo 'set name=org.opensolaris.smf.fmri value=svc:/application/pkg/pkg6depotd value=svc:/application/pkg/pkg6depotd:default'
+    echo 'depend fmri=pkg:/system/library@0.5.11 type=require'; } >"$3.res" ;;
+esac
+EOF
+cat >"${fb}/bin/pkglint" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat >"${fb}/bin/pkgrepo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in create) mkdir -p "$2" ;; esac
+EOF
+cat >"${fb}/bin/pkgsend" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+. "$(dirname "$0")/../fake-store.sh"
+keep=""
+while [ "$1" != publish ]; do
+  case "$1" in -D) [ "$2" = allow-timestamp ] && keep=1; shift 2 ;; -s) repo="$2"; shift 2 ;; *) exit 2 ;; esac
+done
+fmri=$(sed -n 's/^set name=pkg\.fmri value=\([^ ]*\).*/\1/p' "${@: -1}")
+[ -n "${keep}" ] || fmri="${fmri%:*}:20991231T235959Z"
+fmri="${FAKE_PUBLISH_FMRI:-${fmri}}"
+fake_store "${repo}" "${fmri}"
+echo "${fmri}"
+echo PUBLISHED
+EOF
+cat >"${fb}/bin/pkgrecv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+. "$(dirname "$0")/../fake-store.sh"
+src="$2" x=$(mktemp -d)
+trap 'rm -rf "${x}"' EXIT
+case "$3" in
+  --newest)
+    [ -d "${src}" ] || { (cd "${x}" && tar -xf "${src}"); src="${x}"; }
+    find "${src}/publisher" -path '*/pkg/*/*' -type f -exec sed -n 's/^set name=pkg\.fmri value=//p' {} + \
+      | sed 's/,[^-]*-/-/' | sort ;;
+  -a)
+    cp -R "${src}/publisher" "${x}/"
+    [ -z "${FAKE_ARCHIVE_FMRI:-}" ] || { rm -rf "${x}/publisher"; fake_store "${x}" "${FAKE_ARCHIVE_FMRI}"; }
+    [ -z "${FAKE_ARCHIVE_EXTRA:-}" ] || fake_store "${x}" "${FAKE_ARCHIVE_EXTRA}"
+    if [ -n "${FAKE_ARCHIVE_DECLARES:-}" ]; then
+      for m in "${x}"/publisher/*/pkg/*/*; do
+        sed "s|^set name=pkg\.fmri value=.*|set name=pkg.fmri value=${FAKE_ARCHIVE_DECLARES}|" "${m}" >"${x}/m"
+        mv "${x}/m" "${m}"
+      done
+    fi
+    (cd "${x}" && tar -cf "$5" publisher) ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "${fb}"/bin/*
+cp "${root}/packaging/ips/pkg6depotd.p5m" "${fb}/co/packaging/ips/"
+for f in target/release/pkg6depotd target/release/pkg6repo target/release/pkg6recv target/release/pkgtree \
+  packaging/ips/pkg6depotd.kdl packaging/ips/pkg6depotd.xml packaging/ips/svc-pkg6depotd packaging/ips/pkg6depotd.8 \
+  packaging/ips/pkglintrc pkg6repo/pkg6repo.1 man/man5/pkg6-policy.5 man/man8/pkg6repo-retire.8; do
+  echo x >"${fb}/co/${f}"
+done
+(cd "${fb}/co" && git init -q && git add packaging && \
+  GIT_COMMITTER_DATE="2026-09-23T10:21:00Z" git commit -qm fixture)
+fakebuild() { # fakebuild SCRIPT [VAR=VALUE...]: build into ${fb}/dist; prints fmri.env
+  rm -rf "${fb}/dist" "${fb}/co/target/ips"
+  (cd "${fb}/co" && unset CARGO_TARGET_DIR && env PATH="${fb}/bin:${PATH}" \
+    RELEASE_TAG_OVERRIDE=v1.0.0-rc.2 RELEASE_ALLOW_UNTAGGED=1 "${@:2}" bash "$1" "${fb}/dist") >"${fb}/log" 2>&1 \
+    && cat "${fb}/co/target/ips/fmri.env"
+}
+fails_closed() { # fails_closed WHAT LOGTEXT: after a failed fakebuild
+  check "  ... on the ${1}" grep -qF "$2" "${fb}/log"
+  check_not "  ... and writes no fmri.env" test -e "${fb}/co/target/ips/fmri.env"
+  check_not "  ... and leaves no archive in dist" test -e "${fb}/dist/pkg6depotd-1.0.0-rc.2-illumos-x86_64.p5p"
+}
+want="pkg://openindiana.org/package/pkg6/depotd@1.0.0,5.11-0.3.2:20260923T102100Z"
+want_path="publisher/openindiana.org/pkg/package%2Fpkg6%2Fdepotd/1.0.0%2C5.11-0.3.2%3A20260923T102100Z"
+eq "build publishes and archives the tagged FMRI" "$(fakebuild "${build}")" "IPS_FMRI=${want}"
+dist_p5p="${fb}/dist/pkg6depotd-1.0.0-rc.2-illumos-x86_64.p5p"
+eq "the archive in dist stores the manifest under the full version" \
+  "$(tar -tf "${dist_p5p}" | grep -E '/pkg/[^/]+/[^/]+$')" "${want_path}"
+eq "  ... declaring the full FMRI" \
+  "$("${tar_cmd}" -xOf "${dist_p5p}" "${want_path}" | grep '^set name=pkg\.fmri ')" "set name=pkg.fmri value=${want}"
+eq "fake pkgrecv --newest drops the build release like pkg5" \
+  "$(PATH="${fb}/bin:${PATH}" pkgrecv -s "${dist_p5p}" --newest)" \
+  "pkg://openindiana.org/package/pkg6/depotd@1.0.0-0.3.2:20260923T102100Z"
+check_not "build never trusts pkgrecv --newest as the full FMRI" grep -q '\[ "${got}" = "${IPS_FMRI}" \]' "${build}"
+mkdir -p "${fb}/noallow"
+cp "${scripts}/release-lib.sh" "${fb}/noallow/"
+sed 's/pkgsend -D allow-timestamp /pkgsend /' "${build}" >"${fb}/noallow/build-ips-package.sh"
+check_not "fixture: the variant really drops -D allow-timestamp" grep -q "pkgsend -D allow-timestamp" "${fb}/noallow/build-ips-package.sh"
+check_not "build without -D allow-timestamp fails" fakebuild "${fb}/noallow/build-ips-package.sh"
+fails_closed "scratch repository's publication-time FMRI" ':20991231T235959Z'
+check_not "scratch repository under another build release fails the build" \
+  fakebuild "${build}" FAKE_PUBLISH_FMRI="${want/,5.11-/,5.12-}"
+fails_closed "scratch repository's manifest path" 'the scratch repository holds the manifests'
+check_not "archive under another build release fails the build" \
+  fakebuild "${build}" FAKE_ARCHIVE_FMRI="${want/,5.11-/,5.12-}"
+fails_closed "p5p archive's manifest path" 'the p5p archive holds the manifests'
+check_not "archive under another timestamp fails the build" \
+  fakebuild "${build}" FAKE_ARCHIVE_FMRI="${want%:*}:20260923T112700Z"
+fails_closed "p5p archive's timestamp" ':20260923T112700Z'
+check_not "archive with a second package fails the build" \
+  fakebuild "${build}" FAKE_ARCHIVE_EXTRA="pkg://openindiana.org/package/other@1.0,5.11-0:20260923T102100Z"
+fails_closed "p5p archive's extra package" 'package/other'
+check_not "archive manifest declaring another build release fails the build" \
+  fakebuild "${build}" FAKE_ARCHIVE_DECLARES="${want/,5.11-/,5.12-}"
+fails_closed "p5p archive manifest's pkg.fmri" 'the p5p archive manifest declares'
+
 # --- uninstall check is scoped to the repository --------------------------------
 check "uninstall test searches lost+found for repository paths" \
   grep -qF "find /var/pkg/lost+found -path '*var/pkg6depotd*'" "${scripts}/test-ips-package.sh"

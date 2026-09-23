@@ -97,10 +97,62 @@ pkglint "${resolved}" || true
 echo "--- pkglint (gate: errors only)"
 pkglint -f "${root}/packaging/ips/pkglintrc" "${resolved}"
 
-# 4. Publish into a scratch repository and verify it.
+# pkg5_quote S: S %-quoted as pkg5 names manifest paths (urllib quote with
+# no safe characters, fmri.get_dir_path()).
+pkg5_quote() {
+  printf '%s' "$1" | grep -q '^[A-Za-z0-9_.~,:/%-]*$' || release_die "cannot quote '$1'"
+  printf '%s' "$1" | sed -e 's/%/%25/g' -e 's|/|%2F|g' -e 's/,/%2C/g' -e 's/:/%3A/g'
+}
+tar=tar
+command -v gtar >/dev/null 2>&1 && tar=gtar
+ips_stem_version="${IPS_FMRI#pkg://"${IPS_PUBLISHER}"/}"
+[ "${ips_stem_version}" != "${IPS_FMRI}" ] || release_die "${IPS_FMRI} does not name publisher ${IPS_PUBLISHER}"
+ips_quoted_stem=$(pkg5_quote "${ips_stem_version%%@*}")
+ips_quoted_version=$(pkg5_quote "${ips_stem_version#*@}")
+ips_manifest_path="publisher/${IPS_PUBLISHER}/pkg/${ips_quoted_stem}/${ips_quoted_version}"
+
+# check_fmri REPO_OR_P5P WHAT: die unless the source holds exactly one
+# package manifest, stored under IPS_FMRI's full version (build release and
+# timestamp included) and declaring pkg.fmri=IPS_FMRI. A repository and a
+# p5p share the layout publisher/PUB/pkg/STEM/VERSION. pkgrecv --newest is
+# only a cross-check: it prints the FMRI without the build release.
+check_fmri() {
+  local src="$1" what="$2" got check
+  got=$(pkgrecv -s "${src}" --newest) || release_die "pkgrecv --newest failed on the ${what}"
+  [ "${got}" = "${IPS_FMRI/,"${IPS_BUILD_RELEASE}"-/-}" ] \
+    || release_die "pkgrecv --newest on the ${what} lists"$'\n'"${got}"$'\n'"instead of exactly"$'\n'"${IPS_FMRI} (less the build release)"
+  if [ -d "${src}" ]; then
+    got=$(cd "${src}" && find publisher -type f) || release_die "cannot list the ${what}"
+  else
+    got=$("${tar}" -tf "${src}") || release_die "cannot list the ${what}"
+  fi
+  got=$(printf '%s\n' "${got}" | grep -E '^publisher/[^/]+/pkg/[^/]+/[^/]+$' || true)
+  [ "${got}" = "${ips_manifest_path}" ] \
+    || release_die "the ${what} holds the manifests"$'\n'"${got}"$'\n'"instead of exactly"$'\n'"${ips_manifest_path}"
+  check="${work}/check-fmri"
+  rm -rf "${check}"
+  mkdir "${check}"
+  if [ -d "${src}" ]; then
+    cp "${src}/${ips_manifest_path}" "${check}/manifest"
+  else
+    (cd "${check}" && "${tar}" -xf "${src}" "${ips_manifest_path}") \
+      && mv "${check}/${ips_manifest_path}" "${check}/manifest"
+  fi || release_die "cannot read ${ips_manifest_path} from the ${what}"
+  got=$(grep '^set name=pkg\.fmri ' "${check}/manifest" || true)
+  [ "${got}" = "set name=pkg.fmri value=${IPS_FMRI}" ] \
+    || release_die "the ${what} manifest declares"$'\n'"${got}"$'\n'"instead of"$'\n'"set name=pkg.fmri value=${IPS_FMRI}"
+  rm -rf "${check}"
+}
+
+# 4. Publish into a scratch repository and verify it. pkgsend replaces the
+#    manifest's pkg.fmri timestamp with the publication time unless the
+#    global -D allow-timestamp comes before the subcommand (pkg5
+#    publish.py); with it, the timestamp is the tagged commit's, so a
+#    rebuild of the same tag yields the same FMRI.
 pkgrepo create "${repo}"
 pkgrepo -s "${repo}" set "publisher/prefix=${IPS_PUBLISHER}"
-pkgsend -s "${repo}" publish -d "${proto}" -d "${root}" "${resolved}"
+pkgsend -D allow-timestamp -s "${repo}" publish -d "${proto}" -d "${root}" "${resolved}"
+check_fmri "${repo}" "scratch repository"
 # Integrity only: the scratch repository holds just this package, so its
 # dependencies on OS packages (SUNWcs, shells, system libraries) cannot
 # resolve here. test-ips-package.sh checks dependencies by installing the
@@ -108,12 +160,16 @@ pkgsend -s "${repo}" publish -d "${proto}" -d "${root}" "${resolved}"
 pkgrepo verify --disable dependency -s "${repo}"
 pkgrepo -s "${repo}" list
 
-# 5. Archive.
+# 5. Archive, and check the FMRI the archive actually carries before
+#    anything (fmri.env, provenance, dist) records IPS_FMRI.
+archive="${work}/$(release_p5p_name)"
+pkgrecv -s "${repo}" -a -d "${archive}" "${IPS_PKG_NAME}"
+pkgrepo -s "${archive}" list
+check_fmri "${archive}" "p5p archive"
 p5p="${outdir}/$(release_p5p_name)"
 rm -f "${p5p}"
-pkgrecv -s "${repo}" -a -d "${p5p}" "${IPS_PKG_NAME}"
+mv "${archive}" "${p5p}"
 cp "${resolved}" "${outdir}/$(release_manifest_name)"
-pkgrepo -s "${p5p}" list
 
 echo "IPS_FMRI=${IPS_FMRI}" > "${work}/fmri.env"
 echo "built ${p5p}"

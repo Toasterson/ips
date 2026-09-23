@@ -146,7 +146,13 @@ pub struct CatalogAttrs {
     pub parts: BTreeMap<String, CatalogPartInfo>,
 
     /// Available update logs
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    ///
+    /// Always serialized, even when empty: pkg5's `CatalogAttrs.load()`
+    /// rejects a catalog.attrs that lacks any of its required keys
+    /// (`created`, `last-modified`, `package-count`,
+    /// `package-version-count`, `parts`, `updates`, `version`) with
+    /// "Catalog file ... is invalid".
+    #[serde(default)]
     pub updates: BTreeMap<String, UpdateLogInfo>,
 
     /// Catalog version
@@ -363,30 +369,63 @@ pub enum CatalogOperationType {
 }
 
 /// Package update entry in an update log
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// Serialized with keys in sorted order (see the `Serialize` impl) because
+/// pkg5 signs catalog files with `json.dumps(..., sort_keys=True)`, and the
+/// flattened `catalog.*` part keys sort before `op-time`/`op-type`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageUpdateEntry {
-    /// Type of operation (add or remove)
-    #[serde(rename = "op-type")]
+    /// Type of operation (add or remove), serialized as `op-type`
     pub op_type: CatalogOperationType,
 
-    /// Timestamp of the operation in ISO-8601 'basic format' date in UTC
-    #[serde(rename = "op-time")]
+    /// Timestamp of the operation in ISO-8601 'basic format' date in UTC,
+    /// serialized as `op-time`
     pub op_time: String,
 
     /// Package version string
     pub version: String,
 
-    /// Catalog part entries
-    #[serde(flatten)]
+    /// Catalog part entries, flattened into the entry keyed by part name
     pub catalog_parts: BTreeMap<String, BTreeMap<String, Vec<String>>>,
 
-    /// Optional SHA-1 signature of the package manifest
-    #[serde(rename = "signature-sha-1", skip_serializing_if = "Option::is_none")]
+    /// Optional SHA-1 signature of the package manifest, serialized as
+    /// `signature-sha-1` when present
     pub signature_sha1: Option<String>,
 
-    /// Metadata fields (keys starting with '_')
-    #[serde(flatten)]
+    /// Metadata fields, flattened into the entry
     pub metadata: BTreeMap<String, Value>,
+}
+
+impl Serialize for PackageUpdateEntry {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::{Error as _, SerializeMap};
+
+        let mut entries: BTreeMap<&str, Value> = BTreeMap::new();
+        for (k, v) in &self.metadata {
+            entries.insert(k, v.clone());
+        }
+        for (k, v) in &self.catalog_parts {
+            entries.insert(k, serde_json::to_value(v).map_err(S::Error::custom)?);
+        }
+        entries.insert(
+            "op-type",
+            serde_json::to_value(self.op_type).map_err(S::Error::custom)?,
+        );
+        entries.insert("op-time", Value::String(self.op_time.clone()));
+        entries.insert("version", Value::String(self.version.clone()));
+        if let Some(sig) = &self.signature_sha1 {
+            entries.insert("signature-sha-1", Value::String(sig.clone()));
+        }
+
+        let mut map = serializer.serialize_map(Some(entries.len()))?;
+        for (k, v) in &entries {
+            map.serialize_entry(k, v)?;
+        }
+        map.end()
+    }
 }
 
 impl<'de> Deserialize<'de> for PackageUpdateEntry {
@@ -435,9 +474,14 @@ impl<'de> Deserialize<'de> for PackageUpdateEntry {
 }
 
 /// Update log
+///
+/// On disk this matches pkg5's `CatalogUpdate`: publishers are top-level
+/// keys (`{"<publisher>": {"<stem>": [entries]}, "_SIGNATURE": ...}`), the
+/// same layout as a catalog part.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpdateLog {
     /// Updates by publisher and stem
+    #[serde(flatten)]
     pub updates: BTreeMap<String, BTreeMap<String, Vec<PackageUpdateEntry>>>,
 
     /// Metadata fields (keys starting with '_')
@@ -450,22 +494,36 @@ impl<'de> Deserialize<'de> for UpdateLog {
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct Internal {
-            #[serde(default)]
-            updates: BTreeMap<String, BTreeMap<String, Vec<PackageUpdateEntry>>>,
-            #[serde(flatten)]
-            all_entries: BTreeMap<String, Value>,
+        type PublisherUpdates = BTreeMap<String, BTreeMap<String, Vec<PackageUpdateEntry>>>;
+
+        let all_entries = BTreeMap::<String, Value>::deserialize(deserializer)?;
+        let mut updates: PublisherUpdates = BTreeMap::new();
+        let mut metadata = BTreeMap::new();
+
+        for (key, value) in all_entries {
+            if key.starts_with('_') {
+                metadata.insert(key, value);
+                continue;
+            }
+            // Earlier libips releases wrapped every publisher in an extra
+            // "updates" object. Accept that layout on read so existing
+            // repositories keep loading; a publisher actually named
+            // "updates" maps stems to arrays and so never parses as the
+            // wrapped form.
+            if key == "updates" {
+                if let Ok(legacy) = serde_json::from_value::<PublisherUpdates>(value.clone()) {
+                    for (publisher, stems) in legacy {
+                        updates.entry(publisher).or_default().extend(stems);
+                    }
+                    continue;
+                }
+            }
+            let stems: BTreeMap<String, Vec<PackageUpdateEntry>> =
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            updates.entry(key).or_default().extend(stems);
         }
 
-        let internal = Internal::deserialize(deserializer)?;
-        let mut metadata = internal.all_entries;
-        metadata.remove("updates");
-
-        Ok(UpdateLog {
-            updates: internal.updates,
-            metadata,
-        })
+        Ok(UpdateLog { updates, metadata })
     }
 }
 
@@ -784,5 +842,176 @@ mod tests {
                 path
             );
         }
+    }
+
+    /// Required top-level keys of pkg5's `CatalogAttrs.__DEFAULT_ELEMS`
+    /// (src/modules/catalog.py). `CatalogAttrs.load()` rejects the file as
+    /// invalid unless every one of these is present.
+    const PKG5_REQUIRED_ATTRS_KEYS: &[&str] = &[
+        "created",
+        "last-modified",
+        "package-count",
+        "package-version-count",
+        "parts",
+        "updates",
+        "version",
+    ];
+
+    /// Extract the key names of `CatalogAttrs.__DEFAULT_ELEMS` from a pkg5
+    /// `catalog.py`.
+    fn pkg5_default_elems_keys(catalog_py: &str) -> Vec<String> {
+        let start = catalog_py
+            .find("__DEFAULT_ELEMS = {")
+            .expect("__DEFAULT_ELEMS not found in pkg5 catalog.py");
+        // One `"key": default,` per line; the dict closes on a line holding
+        // only `}` (inline `{}` defaults must not end the scan).
+        catalog_py[start..]
+            .lines()
+            .skip(1)
+            .take_while(|line| line.trim() != "}")
+            .filter_map(|line| {
+                let line = line.trim();
+                let rest = line.strip_prefix('"')?;
+                Some(rest[..rest.find('"')?].to_string())
+            })
+            .collect()
+    }
+
+    /// Keeps `PKG5_REQUIRED_ATTRS_KEYS` honest against real pkg5 source when
+    /// it is available: set `PKG5_CATALOG_PY` to the path of pkg5's
+    /// src/modules/catalog.py.
+    #[test]
+    fn pkg5_required_attrs_keys_match_pkg5_source() {
+        let Ok(path) = std::env::var("PKG5_CATALOG_PY") else {
+            println!("PKG5_CATALOG_PY not set; skipping pkg5 source cross-check");
+            return;
+        };
+        let source = fs::read_to_string(&path).expect("read PKG5_CATALOG_PY");
+        let mut from_pkg5 = pkg5_default_elems_keys(&source);
+        from_pkg5.sort();
+        assert_eq!(from_pkg5, PKG5_REQUIRED_ATTRS_KEYS);
+    }
+
+    #[test]
+    fn written_catalog_attrs_contain_every_pkg5_required_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.attrs");
+
+        let mut attrs = CatalogAttrs::new();
+        attrs.package_count = 2;
+        attrs.package_version_count = 2;
+        attrs.parts.insert(
+            "catalog.base.C".to_string(),
+            CatalogPartInfo {
+                last_modified: attrs.last_modified.clone(),
+                signature_sha1: Some("0".repeat(40)),
+            },
+        );
+        assert!(
+            attrs.updates.is_empty(),
+            "the pkg5 failure case has no update logs"
+        );
+        crate::repository::catalog_writer::write_catalog_attrs(&path, &mut attrs).unwrap();
+
+        let raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let obj = raw
+            .as_object()
+            .expect("catalog.attrs must be a JSON object");
+        for key in PKG5_REQUIRED_ATTRS_KEYS {
+            assert!(
+                obj.contains_key(*key),
+                "catalog.attrs missing pkg5-required key {key:?}: {raw}"
+            );
+        }
+        // pkg5 additionally requires "parts" and "updates" to be dicts.
+        assert!(obj["parts"].is_object());
+        assert_eq!(obj["updates"], serde_json::json!({}));
+
+        assert_eq!(CatalogAttrs::load(&path).unwrap(), attrs);
+    }
+
+    fn update_log_with_one_entry() -> UpdateLog {
+        let mut log = UpdateLog::new();
+        let fmri =
+            Fmri::parse("pkg://openindiana.org/web/server@1.0,5.11-0.1:20260923T113332Z").unwrap();
+        let mut parts = BTreeMap::new();
+        parts.insert(
+            "catalog.dependency.C".to_string(),
+            BTreeMap::from([(
+                "actions".to_string(),
+                vec!["depend fmri=pkg:/library/zlib type=require".to_string()],
+            )]),
+        );
+        log.add_update(
+            "openindiana.org",
+            &fmri,
+            CatalogOperationType::Add,
+            parts,
+            Some("f".repeat(40)),
+        );
+        log
+    }
+
+    /// pkg5's `CatalogUpdate.updates()` iterates publishers as top-level
+    /// keys, then stems, then a list of entries, and reads `op-time`,
+    /// `op-type`, `version` and every `catalog.*` key from each entry.
+    #[test]
+    fn written_update_log_uses_pkg5_publisher_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update.20260923T11Z.C");
+        let mut log = update_log_with_one_entry();
+        crate::repository::catalog_writer::write_update_log(&path, &mut log).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        let raw: Value = serde_json::from_str(&text).unwrap();
+        let obj = raw.as_object().unwrap();
+        let publishers: Vec<&String> = obj.keys().filter(|k| !k.starts_with('_')).collect();
+        assert_eq!(
+            publishers,
+            ["openindiana.org"],
+            "unexpected top level: {raw}"
+        );
+
+        let entries = raw["openindiana.org"]["web/server"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry["op-type"], "add");
+        assert_eq!(entry["version"], "1.0,5.11-0.1:20260923T113332Z");
+        assert!(entry["op-time"].is_string());
+        assert_eq!(
+            entry["catalog.dependency.C"]["actions"][0],
+            "depend fmri=pkg:/library/zlib type=require"
+        );
+
+        // pkg5 signs with sort_keys=True, so entry keys must be emitted sorted.
+        let entry_start = text.find(r#"[{"#).unwrap();
+        let order: Vec<usize> = [
+            r#""catalog.dependency.C""#,
+            r#""op-time""#,
+            r#""op-type""#,
+            r#""signature-sha-1""#,
+            r#""version""#,
+        ]
+        .iter()
+        .map(|k| entry_start + text[entry_start..].find(k).unwrap())
+        .collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "entry keys not sorted: {text}"
+        );
+
+        assert_eq!(UpdateLog::load(&path).unwrap(), log);
+    }
+
+    #[test]
+    fn update_log_reads_legacy_wrapped_layout() {
+        let log = update_log_with_one_entry();
+        let wrapped = serde_json::json!({
+            "updates": serde_json::to_value(&log.updates).unwrap(),
+            "_SIGNATURE": {"sha-1": "0"},
+        });
+        let loaded: UpdateLog = serde_json::from_value(wrapped).unwrap();
+        assert_eq!(loaded.updates, log.updates);
+        assert!(loaded.metadata.contains_key("_SIGNATURE"));
     }
 }

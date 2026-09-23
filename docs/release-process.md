@@ -59,7 +59,7 @@ release stays a draft with that platform's assets missing.
 |-------|----------|
 | `ips-<version>-linux-x86_64.tar.gz` | Reproducible tarball of `bin/pkg6depotd`, `bin/pkg6repo`, `bin/pkg6recv`, `bin/pkgtree`, `LICENSE` and `README.md` |
 | `ips-<version>-illumos-x86_64.tar.gz` | The same, built on OpenIndiana |
-| `pkg6depotd-<version>-illumos-x86_64.p5p` | Installable IPS archive |
+| `pkg6depotd-<version>-illumos-x86_64.p5p` | Installable IPS archive. Its FMRI timestamp is the tagged commit's commit time (UTC); the build fails unless the archive carries exactly the FMRI recorded in provenance |
 | `pkg6depotd-<version>-illumos-x86_64.p5m` | The published, dependency-resolved manifest |
 | `SHA256SUMS-<platform>` | Checksums of that platform's payloads |
 | `provenance-<platform>.json` | Canonical public repository URL (never the runner's remote, which may carry credentials), tag, tag object, commit, tree, `Cargo.lock` hash, OS, toolchain, artifact hashes |
@@ -99,8 +99,9 @@ Linux re-runs are clean. The tarball is reproducible, and
 source, toolchain and artifacts. Per-run details (host, runner request) go to
 the job log.
 
-illumos re-runs fail closed once its `.p5p` is on the release. The archive
-embeds its publication time, so a rebuild never matches it. To rebuild:
+illumos re-runs fail closed once its `.p5p` is on the release. A rebuild
+publishes the same FMRI, but the archive bytes still record when it was
+built, so they never match. To rebuild:
 
 1. Make sure the release is still a draft. Never touch a published release.
 2. In Forgejo, delete that platform's assets from the draft, or delete the
