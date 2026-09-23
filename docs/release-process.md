@@ -25,7 +25,11 @@ Any other `v*` tag fails the pipeline.
       are the same commit, and that every crate version equals the tag. For
       an annotated tag the runner may report the tag object instead of the
       commit; that is accepted, anything else is not.
-   2. Runs the script self-tests and builds the release profile.
+   2. Runs the script self-tests and builds the release profile. The
+      `linux` job also checks the operator book in `docs/book`
+      (`docs/book/test-check-book.sh` and `docs/book/check-book.sh`, plus
+      `mdbook build` when the image has mdbook). PR CI runs the same book
+      step.
    3. Checks the test inventory, then runs `cargo nextest run --workspace
       --release` with no filters. The run includes the pkg6repo e2e tests,
       which drive the release `pkg6repo` binary. The inventory check fails

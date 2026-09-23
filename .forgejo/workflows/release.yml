@@ -24,6 +24,9 @@ name: release
 #     inventory step (release_check_test_inventory) fails the job if a
 #     required suite is missing or shrinks, or if any test other than the
 #     allow-listed opt-in network test would not run.
+#   * The linux job checks the operator book (docs/book/test-check-book.sh,
+#     then docs/book/check-book.sh), as PR CI does, and builds it with mdbook
+#     only when the image provides mdbook.
 #   * For an annotated tag the runner's GITHUB_SHA may be the tag object;
 #     release_verify_commit accepts that or the peeled commit, nothing else.
 #
@@ -70,6 +73,22 @@ jobs:
 
       - name: Release script self-tests
         run: .forgejo/scripts/tests/test-release-scripts.sh
+
+      - name: Operator book (source and links; mdbook build if installed)
+        # check-book.sh needs only sh and awk. The rust image does not ship
+        # mdbook, and fetching an unpinned binary here would add an
+        # unverified input to the release, so the HTML build runs only when
+        # the image provides it.
+        run: |
+          set -euo pipefail
+          docs/book/test-check-book.sh
+          docs/book/check-book.sh
+          if command -v mdbook >/dev/null 2>&1; then
+            mdbook --version
+            mdbook build docs/book -d "${PWD}/target/book"
+          else
+            echo "mdbook not installed: book source and link check only"
+          fi
 
       - name: Install cargo-nextest
         run: |

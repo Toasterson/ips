@@ -1,0 +1,13 @@
+[book]
+title = "pkg6depotd v1 Operator Guide"
+description = "Deploying and operating the pkg6 IPS depot on illumos"
+authors = ["OpenIndiana IPS contributors"]
+language = "en"
+src = "src"
+
+[build]
+# A SUMMARY.md entry without a file is an error, never an empty page.
+create-missing = false
+
+[output.html]
+git-repository-url = "https://code.aopc.cloud/OpenIndiana/ips"
