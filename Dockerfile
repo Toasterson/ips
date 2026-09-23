@@ -28,4 +28,5 @@ RUN mkdir -p /var/pkg/repo
 
 EXPOSE 8080
 
-ENTRYPOINT ["pkg6depotd", "--config", "/etc/pkg6depotd.kdl", "--no-daemon"]
+ENTRYPOINT ["pkg6depotd", "--config", "/etc/pkg6depotd.kdl"]
+CMD ["start"]

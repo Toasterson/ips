@@ -12,8 +12,7 @@
 .Sh SYNOPSIS
 .Nm /usr/lib/pkg6depotd
 .Op Fl c Ar file
-.Op Fl -no-daemon
-.Op Ar command
+.Op Cm start | Cm config-test
 .Sh DESCRIPTION
 The
 .Nm
@@ -42,10 +41,21 @@ The following options are supported:
 .It Fl c Ar file , Fl -config Ar file
 Read the KDL configuration from
 .Ar file .
-.It Fl -no-daemon
-Stay in the foreground.
-The SMF service always passes this option.
 .El
+.Pp
+.Nm
+always runs in the foreground; SMF supervises it.
+There is no daemon mode, pid file or control command: stop the depot with
+.Dv SIGTERM ,
+for example through
+.Nm svcadm disable ,
+and reload its TLS certificate with
+.Dv SIGHUP ,
+for example through
+.Nm svcadm refresh .
+The option
+.Fl -no-daemon
+of earlier releases is accepted and ignored.
 .Pp
 The following commands are supported:
 .Bl -tag -width Ds
@@ -561,7 +571,19 @@ SMF service manifest.
 SMF start method.
 .El
 .Sh EXIT STATUS
-.Ex -std
+The following exit values are returned:
+.Bl -tag -width Ds
+.It Sy 0
+.Cm start :
+the depot stopped after a signal.
+.Cm config-test :
+the configuration is valid.
+.It Sy 1
+The configuration is missing or invalid, or the depot could not start or
+failed while serving.
+.It Sy 2
+Invalid command line, including an unknown command.
+.El
 .Sh INTERFACE STABILITY
 .Sy Uncommitted
 .Sh SEE ALSO

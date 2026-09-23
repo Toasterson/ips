@@ -61,9 +61,78 @@ pub enum Pkg6Error {
     )]
     UnsupportedOutputFormat(String),
 
+    #[error("{0} is not implemented in this release")]
+    #[diagnostic(
+        code(pkg6::unsupported),
+        help("pkg6 made no changes. Use pkg(1) for this operation.")
+    )]
+    Unsupported(String),
+
+    /// pkg(1) `list` exits 1 when nothing matches.
+    #[error("{0}")]
+    #[diagnostic(
+        code(pkg6::no_packages),
+        help(
+            "Use 'pkg6 list -a' to include packages that are not installed, or 'pkg6 refresh' to update the catalogs."
+        )
+    )]
+    NoPackagesListed(String),
+
+    #[error("unknown publisher(s): {}", .0.join(", "))]
+    #[diagnostic(
+        code(pkg6::unknown_publisher),
+        help("Run 'pkg6 publisher' to see the configured publishers.")
+    )]
+    UnknownPublishers(Vec<String>),
+
+    #[error(
+        "publisher {publisher} was removed, but the image catalog could not be rebuilt: {source}"
+    )]
+    #[diagnostic(
+        code(pkg6::catalog_rebuild_failed),
+        help(
+            "The catalog may still offer packages from {publisher}; run 'pkg6 refresh' to rebuild it."
+        )
+    )]
+    CatalogRebuildFailed {
+        publisher: String,
+        #[source]
+        source: ImageError,
+    },
+
+    #[error("license acceptance required for: {}", .0.join(", "))]
+    #[diagnostic(
+        code(pkg6::license_acceptance_required),
+        help("pkg6 made no changes. Review the licenses and pass --accept to accept them.")
+    )]
+    LicenseAcceptanceRequired(Vec<String>),
+
+    /// A failure already reported through the exit status alone (`-q`).
+    #[error("exit status {0}")]
+    Quiet(u8),
+
     #[error("other error: {0}")]
     #[diagnostic(code(pkg6::other_error), help("See error message for details"))]
     Other(String),
+}
+
+/// Exit status for a command or option this release does not implement.
+/// Same as a command-line usage error, as in pkg(1).
+pub const EXIT_UNSUPPORTED: u8 = 2;
+
+/// Exit status when a license must be accepted first, as pkg(1)'s EXIT_LICENSE.
+pub const EXIT_LICENSE: u8 = 6;
+
+impl Pkg6Error {
+    /// The process exit status for this error.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Pkg6Error::Unsupported(_) => EXIT_UNSUPPORTED,
+            Pkg6Error::LicenseAcceptanceRequired(_) => EXIT_LICENSE,
+            Pkg6Error::Quiet(code) => *code,
+            _ => 1,
+        }
+    }
 }
 
 /// Convert a string to a Pkg6Error::Other

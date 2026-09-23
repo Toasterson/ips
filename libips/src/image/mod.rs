@@ -11,7 +11,9 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::repository::generation::is_valid_publisher_name;
 use crate::repository::{FileBackend, ReadableRepository, RepositoryError, RestBackend};
+use tracing::warn;
 
 // Export the catalog module
 pub mod catalog;
@@ -77,6 +79,15 @@ pub enum ImageError {
         help("Configure at least one publisher before performing this operation")
     )]
     NoPublishers,
+
+    #[error("Invalid publisher name: {0:?}")]
+    #[diagnostic(
+        code(ips::image_error::invalid_publisher_name),
+        help(
+            "Publisher names use only ASCII letters, digits, '.', '-' and '_', and must not start with '.' or '-'"
+        )
+    )]
+    InvalidPublisherName(String),
 }
 
 impl From<rusqlite::Error> for ImageError {
@@ -163,6 +174,11 @@ impl Image {
         mirrors: Vec<String>,
         is_default: bool,
     ) -> Result<()> {
+        // The name becomes a directory under the image metadata.
+        if !is_valid_publisher_name(name) {
+            return Err(ImageError::InvalidPublisherName(name.to_string()));
+        }
+
         // Check if publisher already exists
         if self.publishers.iter().any(|p| p.name == name) {
             // Update existing publisher
@@ -298,6 +314,18 @@ impl Image {
     /// Returns the path to the catalog directory
     pub fn catalog_dir(&self) -> PathBuf {
         self.metadata_dir().join("catalog")
+    }
+
+    /// Returns the downloaded catalog directory of a publisher.
+    ///
+    /// Refuses names that are not a single safe path component, such as `..`
+    /// or `a/b`, which an image configured before names were checked may
+    /// still hold: such a path could reach, and delete, the image metadata.
+    pub fn publisher_catalog_dir(&self, publisher_name: &str) -> Result<PathBuf> {
+        if !is_valid_publisher_name(publisher_name) {
+            return Err(ImageError::InvalidPublisherName(publisher_name.to_string()));
+        }
+        Ok(self.catalog_dir().join(publisher_name))
     }
 
     /// Returns the path to the active catalog database (packages and dependencies)
@@ -578,12 +606,18 @@ impl Image {
         // Create catalog directory if it doesn't exist
         self.create_catalog_dir()?;
 
-        // Determine which publishers to refresh
+        // Determine which publishers to refresh; a known name must not hide
+        // an unknown one.
+        if let Some(unknown) = publishers
+            .iter()
+            .find(|name| !self.publishers.iter().any(|p| &p.name == *name))
+        {
+            return Err(ImageError::PublisherNotFound(unknown.clone()));
+        }
         let publishers_to_refresh: Vec<&Publisher> = if publishers.is_empty() {
             // If no publishers specified, refresh all
             self.publishers.iter().collect()
         } else {
-            // Otherwise, filter publishers by name
             self.publishers
                 .iter()
                 .filter(|p| publishers.contains(&p.name))
@@ -595,10 +629,17 @@ impl Image {
             return Err(ImageError::NoPublishers);
         }
 
+        // Resolve every catalog directory before deleting any of them.
+        let catalog_dirs = publishers_to_refresh
+            .iter()
+            .map(|p| self.publisher_catalog_dir(&p.name))
+            .collect::<Result<Vec<_>>>()?;
+
         // If full refresh is requested, clear the catalog directory for each publisher
         if full {
-            for publisher in &publishers_to_refresh {
-                let publisher_catalog_dir = self.catalog_dir().join(&publisher.name);
+            for (publisher, publisher_catalog_dir) in
+                publishers_to_refresh.iter().zip(&catalog_dirs)
+            {
                 if publisher_catalog_dir.exists() {
                     fs::remove_dir_all(&publisher_catalog_dir).map_err(|e| {
                         ImageError::IO(std::io::Error::new(
@@ -631,6 +672,51 @@ impl Image {
         self.build_catalog()?;
 
         Ok(())
+    }
+
+    /// Forget the catalog of a publisher that is no longer configured.
+    ///
+    /// Deletes its downloaded catalog and rebuilds the merged catalog from the
+    /// remaining publishers' downloaded catalogs, without network access. With
+    /// no publisher left the merged catalog is empty.
+    /// A name that is not a safe path component has no catalog directory of
+    /// its own, so nothing is deleted for it; the merged catalog is still
+    /// rebuilt.
+    pub fn purge_publisher_catalog(&self, publisher_name: &str) -> Result<()> {
+        match self.publisher_catalog_dir(publisher_name) {
+            Ok(dir) => {
+                if dir.exists() {
+                    fs::remove_dir_all(&dir)?;
+                }
+            }
+            Err(ImageError::InvalidPublisherName(_)) => {
+                warn!(
+                    "not deleting a catalog directory for invalid publisher name {:?}",
+                    publisher_name
+                );
+            }
+            Err(e) => return Err(e),
+        }
+
+        // A rebuild only replaces the shards when some publisher has a
+        // downloaded catalog; drop them first so none of the removed
+        // publisher's packages survive.
+        for db in [
+            self.active_db_path(),
+            self.obsolete_db_path(),
+            self.fts_db_path(),
+        ] {
+            match fs::remove_file(&db) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        if self.publishers.is_empty() {
+            return Ok(());
+        }
+        self.build_catalog()
     }
 
     /// Build the merged catalog from downloaded catalogs
@@ -802,7 +888,7 @@ impl Image {
         } else {
             let mut repo = RestBackend::open(origin)?;
             // Optionally set a per-publisher cache directory (used by other REST ops)
-            let publisher_catalog_dir = self.catalog_dir().join(&publisher.name);
+            let publisher_catalog_dir = self.publisher_catalog_dir(&publisher.name)?;
             repo.set_local_cache_path(&publisher_catalog_dir)?;
             repo.fetch_manifest(&publisher_name, fmri)
                 .map_err(Into::into)
@@ -838,7 +924,7 @@ impl Image {
                 .map_err(Into::into)
         } else {
             let mut repo = RestBackend::open(origin)?;
-            let publisher_catalog_dir = self.catalog_dir().join(&publisher.name);
+            let publisher_catalog_dir = self.publisher_catalog_dir(&publisher.name)?;
             repo.set_local_cache_path(&publisher_catalog_dir)?;
             repo.fetch_manifest_text(&publisher_name, fmri)
                 .map_err(Into::into)
@@ -854,7 +940,7 @@ impl Image {
         let mut repo = RestBackend::open(&publisher.origin)?;
 
         // Set local cache path to the catalog directory for this publisher
-        let publisher_catalog_dir = self.catalog_dir().join(&publisher.name);
+        let publisher_catalog_dir = self.publisher_catalog_dir(&publisher.name)?;
         fs::create_dir_all(&publisher_catalog_dir)?;
         repo.set_local_cache_path(&publisher_catalog_dir)?;
 

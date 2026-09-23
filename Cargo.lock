@@ -2364,11 +2364,14 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 name = "pkg6"
 version = "0.5.3"
 dependencies = [
+ "assert_cmd",
  "clap",
  "libips",
  "miette 7.6.0",
+ "predicates",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.17",
  "tracing",
  "tracing-subscriber",

@@ -90,6 +90,11 @@ depot privilege set: `basic,!file_link_any,!proc_info,!proc_session,net_privaddr
 The illumos DTD has no `security_flags`, so the Solaris ASLR attribute is
 omitted.
 
+*Amended 2026-09-23:* the SMF method no longer passes `--no-daemon`. The
+daemonize placeholder was removed, so `pkg6depotd` always runs in the
+foreground; `--no-daemon` is hidden and ignored. See
+[the v1 CLI surface plan](../plans/2026-09-23-v1-cli-surface.md).
+
 The default instance is delivered disabled. `pkg6depotd` no longer has
 built-in defaults. It used to fall back to `0.0.0.0:8080` and `/tmp/pkg_repo`
 when it could not load its config. Now a missing or invalid file, or anything

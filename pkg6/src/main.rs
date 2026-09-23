@@ -1,10 +1,11 @@
 mod error;
 use error::{Pkg6Error, Result};
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 use tracing_subscriber::filter::LevelFilter;
@@ -76,7 +77,7 @@ enum Commands {
     /// the newest version available.
     Install {
         /// Dry run, don't make actual changes
-        #[clap(short)]
+        #[clap(short = 'n', short_alias = 'd')]
         dry_run: bool,
 
         /// Verbose output
@@ -87,142 +88,35 @@ enum Commands {
         #[clap(short)]
         quiet: bool,
 
-        /// Number of concurrent operations
-        #[clap(short = 'C')]
+        /// Linked child images to update in parallel (not implemented; fails
+        /// with exit status 2)
+        #[clap(short = 'C', hide = true)]
         concurrency: Option<usize>,
 
-        /// Additional package repository to use
-        #[clap(short = 'g')]
+        /// Temporary package source (not implemented; fails with exit status 2)
+        #[clap(short = 'g', hide = true)]
         repo: Vec<String>,
 
-        /// Accept all licenses
+        /// Accept the licenses of the packages being installed; without it,
+        /// install fails (exit status 6) on licenses marked must-accept
         #[clap(long)]
         accept: bool,
 
-        /// Show all licenses
-        #[clap(long)]
+        /// Display licenses (not implemented; fails with exit status 2)
+        #[clap(long, hide = true)]
         licenses: bool,
 
-        /// Don't update the search index
+        /// Don't update the search index (pkg6 install never updates it, with
+        /// or without this option)
         #[clap(long)]
         no_index: bool,
 
-        /// Don't refresh the catalog
+        /// Don't refresh the catalogs first (pkg6 install never refreshes them,
+        /// with or without this option; run 'pkg6 refresh')
         #[clap(long)]
         no_refresh: bool,
 
         /// Packages to install
-        pkg_fmri_patterns: Vec<String>,
-    },
-
-    /// Install packages while removing all other packages
-    ///
-    /// The exact-install command installs the specified packages and removes
-    /// all other packages. This is useful for creating a clean installation
-    /// with only the specified packages.
-    ExactInstall {
-        /// Dry run, don't make actual changes
-        #[clap(short)]
-        dry_run: bool,
-
-        /// Verbose output
-        #[clap(short)]
-        verbose: bool,
-
-        /// Quiet mode, show less output
-        #[clap(short)]
-        quiet: bool,
-
-        /// Number of concurrent operations
-        #[clap(short = 'C')]
-        concurrency: Option<usize>,
-
-        /// Additional package repository to use
-        #[clap(short = 'g')]
-        repo: Vec<String>,
-
-        /// Accept all licenses
-        #[clap(long)]
-        accept: bool,
-
-        /// Show all licenses
-        #[clap(long)]
-        licenses: bool,
-
-        /// Don't update the search index
-        #[clap(long)]
-        no_index: bool,
-
-        /// Don't refresh the catalog
-        #[clap(long)]
-        no_refresh: bool,
-
-        /// Packages to install
-        pkg_fmri_patterns: Vec<String>,
-    },
-
-    /// Remove packages
-    ///
-    /// The uninstall command removes installed packages from the system.
-    Uninstall {
-        /// Dry run, don't make actual changes
-        #[clap(short)]
-        dry_run: bool,
-
-        /// Verbose output
-        #[clap(short)]
-        verbose: bool,
-
-        /// Quiet mode, show less output
-        #[clap(short)]
-        quiet: bool,
-
-        /// Packages to remove
-        pkg_fmri_patterns: Vec<String>,
-    },
-
-    /// Update packages to newer versions
-    ///
-    /// The update command updates installed packages to the newest versions
-    /// available from the configured publishers.
-    Update {
-        /// Dry run, don't make actual changes
-        #[clap(short)]
-        dry_run: bool,
-
-        /// Verbose output
-        #[clap(short)]
-        verbose: bool,
-
-        /// Quiet mode, show less output
-        #[clap(short)]
-        quiet: bool,
-
-        /// Number of concurrent operations
-        #[clap(short = 'C')]
-        concurrency: Option<usize>,
-
-        /// Additional package repository to use
-        #[clap(short = 'g')]
-        repo: Vec<String>,
-
-        /// Accept all licenses
-        #[clap(long)]
-        accept: bool,
-
-        /// Show all licenses
-        #[clap(long)]
-        licenses: bool,
-
-        /// Don't update the search index
-        #[clap(long)]
-        no_index: bool,
-
-        /// Don't refresh the catalog
-        #[clap(long)]
-        no_refresh: bool,
-
-        /// Packages to update (default: all)
         pkg_fmri_patterns: Vec<String>,
     },
 
@@ -231,11 +125,11 @@ enum Commands {
     /// The list command displays information about installed packages.
     /// By default, it lists only installed packages. Use the -a flag to list all available packages.
     List {
-        /// Verbose output
+        /// Show full package FMRIs
         #[clap(short)]
         verbose: bool,
 
-        /// Quiet mode, show less output
+        /// Print nothing; report only through the exit status
         #[clap(short)]
         quiet: bool,
 
@@ -243,126 +137,11 @@ enum Commands {
         #[clap(short)]
         all: bool,
 
-        /// Output format (default: table)
-        #[clap(short = 'o')]
+        /// Output format (not implemented; fails with exit status 2)
+        #[clap(short = 'o', hide = true)]
         output_format: Option<String>,
 
-        /// Packages to list (default: all)
-        pkg_fmri_patterns: Vec<String>,
-    },
-
-    /// Display information about packages
-    ///
-    /// The info command displays detailed information about packages.
-    Info {
-        /// Verbose output
-        #[clap(short)]
-        verbose: bool,
-
-        /// Quiet mode, show less output
-        #[clap(short)]
-        quiet: bool,
-
-        /// Output format (default: table)
-        #[clap(short = 'o')]
-        output_format: Option<String>,
-
-        /// Packages to show information about
-        pkg_fmri_patterns: Vec<String>,
-    },
-
-    /// Search for packages
-    ///
-    /// The search command searches for packages matching the specified query.
-    Search {
-        /// Verbose output
-        #[clap(short)]
-        verbose: bool,
-
-        /// Quiet mode, show less output
-        #[clap(short)]
-        quiet: bool,
-
-        /// Output format (default: table)
-        #[clap(short = 'o')]
-        output_format: Option<String>,
-
-        /// Search query
-        query: String,
-    },
-
-    /// Verify installation of packages
-    ///
-    /// The verify command verifies that installed packages match their
-    /// manifest and that all files are present and have the correct
-    /// permissions and checksums.
-    Verify {
-        /// Verbose output
-        #[clap(short)]
-        verbose: bool,
-
-        /// Quiet mode, show less output
-        #[clap(short)]
-        quiet: bool,
-
-        /// Packages to verify (default: all)
-        pkg_fmri_patterns: Vec<String>,
-    },
-
-    /// Fix package installation problems
-    ///
-    /// The fix command repairs packages with missing or corrupt files.
-    Fix {
-        /// Dry run, don't make actual changes
-        #[clap(short)]
-        dry_run: bool,
-
-        /// Verbose output
-        #[clap(short)]
-        verbose: bool,
-
-        /// Quiet mode, show less output
-        #[clap(short)]
-        quiet: bool,
-
-        /// Packages to fix (default: all)
-        pkg_fmri_patterns: Vec<String>,
-    },
-
-    /// Show history of package operations
-    ///
-    /// The history command displays the history of package operations.
-    History {
-        /// Number of entries to show
-        #[clap(short = 'n')]
-        count: Option<usize>,
-
-        /// Show full details
-        #[clap(short)]
-        full: bool,
-
-        /// Output format (default: table)
-        #[clap(short = 'o')]
-        output_format: Option<String>,
-    },
-
-    /// List contents of packages
-    ///
-    /// The contents command lists the contents of packages.
-    Contents {
-        /// Verbose output
-        #[clap(short)]
-        verbose: bool,
-
-        /// Quiet mode, show less output
-        #[clap(short)]
-        quiet: bool,
-
-        /// Output format (default: table)
-        #[clap(short = 'o')]
-        output_format: Option<String>,
-
-        /// Packages to list contents of
+        /// Package to list (default: all; one pattern only)
         pkg_fmri_patterns: Vec<String>,
     },
 
@@ -429,6 +208,10 @@ enum Commands {
         image_type: String,
     },
 
+    /// pkg(1) subcommands that are recognised but not implemented yet
+    #[clap(flatten)]
+    NotImplemented(NotImplemented),
+
     /// Debug database commands (hidden)
     ///
     /// These commands are for debugging purposes only and are not part of the public API.
@@ -459,6 +242,90 @@ enum Commands {
     },
 }
 
+/// Arguments of a subcommand this release does not implement. Everything
+/// after the subcommand is taken verbatim, so any pkg(1) option reaches the
+/// "not implemented" error instead of a confusing parse error.
+#[derive(Args, Debug)]
+struct UnsupportedArgs {
+    #[clap(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+    _args: Vec<String>,
+}
+
+/// pkg(1) subcommands this release parses but does not implement. They are
+/// hidden from help and fail with [`error::EXIT_UNSUPPORTED`] before the
+/// image is opened, so they can never report success without doing anything.
+#[derive(Subcommand, Debug)]
+enum NotImplemented {
+    /// Not implemented in this release (fails with exit status 2)
+    #[clap(hide = true, disable_help_flag = true)]
+    ExactInstall(UnsupportedArgs),
+    /// Not implemented in this release (fails with exit status 2)
+    #[clap(hide = true, disable_help_flag = true)]
+    Uninstall(UnsupportedArgs),
+    /// Not implemented in this release (fails with exit status 2)
+    #[clap(hide = true, disable_help_flag = true)]
+    Update(UnsupportedArgs),
+    /// Not implemented in this release (fails with exit status 2)
+    #[clap(hide = true, disable_help_flag = true)]
+    Info(UnsupportedArgs),
+    /// Not implemented in this release (fails with exit status 2)
+    #[clap(hide = true, disable_help_flag = true)]
+    Search(UnsupportedArgs),
+    /// Not implemented in this release (fails with exit status 2)
+    #[clap(hide = true, disable_help_flag = true)]
+    Verify(UnsupportedArgs),
+    /// Not implemented in this release (fails with exit status 2)
+    #[clap(hide = true, disable_help_flag = true)]
+    Fix(UnsupportedArgs),
+    /// Not implemented in this release (fails with exit status 2)
+    #[clap(hide = true, disable_help_flag = true)]
+    History(UnsupportedArgs),
+    /// Not implemented in this release (fails with exit status 2)
+    #[clap(hide = true, disable_help_flag = true)]
+    Contents(UnsupportedArgs),
+}
+
+impl NotImplemented {
+    /// The pkg(1) subcommand name.
+    fn name(&self) -> &'static str {
+        match self {
+            NotImplemented::ExactInstall(_) => "exact-install",
+            NotImplemented::Uninstall(_) => "uninstall",
+            NotImplemented::Update(_) => "update",
+            NotImplemented::Info(_) => "info",
+            NotImplemented::Search(_) => "search",
+            NotImplemented::Verify(_) => "verify",
+            NotImplemented::Fix(_) => "fix",
+            NotImplemented::History(_) => "history",
+            NotImplemented::Contents(_) => "contents",
+        }
+    }
+}
+
+/// Licenses marked `must-accept=true` in the packages to be installed, as
+/// `<package>: <license>`.
+fn licenses_requiring_acceptance(pkgs: &[libips::solver::ResolvedPkg]) -> Vec<String> {
+    pkgs.iter()
+        .flat_map(|rp| {
+            rp.manifest
+                .licenses
+                .iter()
+                .filter(|lic| {
+                    lic.properties
+                        .get("must-accept")
+                        .is_some_and(|p| p.value.eq_ignore_ascii_case("true"))
+                })
+                .map(move |lic| {
+                    let name = lic
+                        .properties
+                        .get("license")
+                        .map_or(lic.payload.as_str(), |p| p.value.as_str());
+                    format!("{}: {}", rp.fmri, name)
+                })
+        })
+        .collect()
+}
+
 /// Determines the image path to use based on the provided argument and default rules
 ///
 /// If the image_path argument is provided, that path is used.
@@ -485,7 +352,20 @@ fn determine_image_path(image_path: Option<PathBuf>) -> PathBuf {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            let code = e.exit_code();
+            if !matches!(e, Pkg6Error::Quiet(_)) {
+                eprintln!("{:?}", miette::Report::new(e));
+            }
+            ExitCode::from(code)
+        }
+    }
+}
+
+fn run() -> Result<()> {
     // Initialize the tracing subscriber with the default log level as debug and no decorations
     // Parse the environment filter first, handling any errors with our custom error type
     let env_filter = EnvFilter::builder()
@@ -507,6 +387,10 @@ fn main() -> Result<()> {
     let cli = App::parse();
 
     match &cli.command {
+        // Before touching the image: an unimplemented command changes nothing.
+        Commands::NotImplemented(command) => {
+            Err(Pkg6Error::Unsupported(format!("pkg6 {}", command.name())))
+        }
         Commands::Refresh {
             full,
             quiet,
@@ -575,6 +459,20 @@ fn main() -> Result<()> {
             debug!("Show licenses: {}", licenses);
             debug!("No index update: {}", no_index);
             debug!("No refresh: {}", no_refresh);
+
+            // Options that would change the outcome but are not implemented
+            // yet; ignoring them would install something else than asked.
+            if concurrency.is_some() {
+                return Err(Pkg6Error::Unsupported("pkg6 install -C".to_string()));
+            }
+            if !repo.is_empty() {
+                return Err(Pkg6Error::Unsupported("pkg6 install -g".to_string()));
+            }
+            if *licenses {
+                return Err(Pkg6Error::Unsupported(
+                    "pkg6 install --licenses".to_string(),
+                ));
+            }
 
             // Determine the image path using the -R argument or default rules
             let image_path = determine_image_path(cli.image_path.clone());
@@ -717,6 +615,22 @@ fn main() -> Result<()> {
                 println!("Resolved {} package(s) to install", plan.add.len());
             }
 
+            // As pkg(1): a dry run shows the plan, a real install needs the
+            // licenses accepted before anything is changed.
+            let unaccepted = licenses_requiring_acceptance(&plan.add);
+            if !unaccepted.is_empty() && !*accept {
+                if *dry_run {
+                    if !quiet {
+                        eprintln!(
+                            "Installing requires --accept for: {}",
+                            unaccepted.join(", ")
+                        );
+                    }
+                } else {
+                    return Err(Pkg6Error::LicenseAcceptanceRequired(unaccepted));
+                }
+            }
+
             // Build and apply action plan
             if !quiet {
                 println!("Building action plan...");
@@ -792,75 +706,6 @@ fn main() -> Result<()> {
             info!("Installation completed successfully");
             Ok(())
         }
-        Commands::ExactInstall {
-            dry_run,
-            verbose,
-            quiet,
-            concurrency,
-            repo,
-            accept,
-            licenses,
-            no_index,
-            no_refresh,
-            pkg_fmri_patterns,
-        } => {
-            info!("Exact-installing packages: {:?}", pkg_fmri_patterns);
-            debug!("Dry run: {}", dry_run);
-            debug!("Verbose: {}", verbose);
-            debug!("Quiet: {}", quiet);
-            debug!("Concurrency: {:?}", concurrency);
-            debug!("Additional repos: {:?}", repo);
-            debug!("Accept licenses: {}", accept);
-            debug!("Show licenses: {}", licenses);
-            debug!("No index update: {}", no_index);
-            debug!("No refresh: {}", no_refresh);
-
-            // Stub implementation
-            info!("Exact-installation completed successfully");
-            Ok(())
-        }
-        Commands::Uninstall {
-            dry_run,
-            verbose,
-            quiet,
-            pkg_fmri_patterns,
-        } => {
-            info!("Uninstalling packages: {:?}", pkg_fmri_patterns);
-            debug!("Dry run: {}", dry_run);
-            debug!("Verbose: {}", verbose);
-            debug!("Quiet: {}", quiet);
-
-            // Stub implementation
-            info!("Uninstallation completed successfully");
-            Ok(())
-        }
-        Commands::Update {
-            dry_run,
-            verbose,
-            quiet,
-            concurrency,
-            repo,
-            accept,
-            licenses,
-            no_index,
-            no_refresh,
-            pkg_fmri_patterns,
-        } => {
-            info!("Updating packages: {:?}", pkg_fmri_patterns);
-            debug!("Dry run: {}", dry_run);
-            debug!("Verbose: {}", verbose);
-            debug!("Quiet: {}", quiet);
-            debug!("Concurrency: {:?}", concurrency);
-            debug!("Additional repos: {:?}", repo);
-            debug!("Accept licenses: {}", accept);
-            debug!("Show licenses: {}", licenses);
-            debug!("No index update: {}", no_index);
-            debug!("No refresh: {}", no_refresh);
-
-            // Stub implementation
-            info!("Update completed successfully");
-            Ok(())
-        }
         Commands::List {
             verbose,
             quiet,
@@ -873,6 +718,18 @@ fn main() -> Result<()> {
             debug!("Quiet: {}", quiet);
             debug!("All packages: {}", all);
             debug!("Output format: {:?}", output_format);
+
+            // Parts of the request that would otherwise be dropped silently:
+            // a script asking for JSON or several packages must not get a
+            // table of something else and a success status.
+            if output_format.is_some() {
+                return Err(Pkg6Error::Unsupported("pkg6 list -o".to_string()));
+            }
+            if pkg_fmri_patterns.len() > 1 {
+                return Err(Pkg6Error::Unsupported(
+                    "pkg6 list with several patterns".to_string(),
+                ));
+            }
 
             // Determine the image path using the -R argument or default rules
             let image_path = determine_image_path(cli.image_path.clone());
@@ -890,16 +747,10 @@ fn main() -> Result<()> {
                 }
             };
 
-            // Convert pkg_fmri_patterns to a single pattern if provided
-            let pattern = if pkg_fmri_patterns.is_empty() {
-                None
-            } else {
-                // For simplicity, we'll just use the first pattern
-                // In a more complete implementation, we would handle multiple patterns
-                Some(pkg_fmri_patterns[0].as_str())
-            };
+            let pattern = pkg_fmri_patterns.first().map(String::as_str);
 
-            if *all {
+            // (package, state) rows in catalog order.
+            let rows: Vec<(libips::fmri::Fmri, &str)> = if *all {
                 // List all available packages
                 info!("Listing all available packages");
 
@@ -911,28 +762,17 @@ fn main() -> Result<()> {
                 }
 
                 match image.query_catalog(pattern) {
-                    Ok(packages) => {
-                        println!(
-                            "PUBLISHER                                  NAME                                     VERSION                      STATE"
-                        );
-                        println!(
-                            "------------------------------------------------------------------------------------------------------------------------------------------------------"
-                        );
-                        for pkg in packages {
+                    Ok(packages) => packages
+                        .into_iter()
+                        .map(|pkg| {
                             let state = if image.is_package_installed(&pkg.fmri).unwrap_or(false) {
                                 "installed"
                             } else {
                                 "known"
                             };
-                            println!(
-                                "{:<40} {:<40} {:<30} {}",
-                                pkg.fmri.publisher.as_deref().unwrap_or("unknown"),
-                                pkg.fmri.name,
-                                pkg.fmri.version(),
-                                state
-                            );
-                        }
-                    }
+                            (pkg.fmri, state)
+                        })
+                        .collect(),
                     Err(e) => {
                         error!("Failed to query catalog: {}", e);
                         return Err(e.into());
@@ -942,118 +782,59 @@ fn main() -> Result<()> {
                 // List only installed packages
                 info!("Listing installed packages");
                 match image.query_installed_packages(pattern) {
-                    Ok(packages) => {
-                        println!(
-                            "PUBLISHER                                  NAME                                     VERSION                      STATE"
-                        );
-                        println!(
-                            "------------------------------------------------------------------------------------------------------------------------------------------------------"
-                        );
-                        for pkg in packages {
-                            println!(
-                                "{:<40} {:<40} {:<30} {}",
-                                pkg.fmri.publisher.as_deref().unwrap_or("unknown"),
-                                pkg.fmri.name,
-                                pkg.fmri.version(),
-                                "installed"
-                            );
-                        }
-                    }
+                    Ok(packages) => packages
+                        .into_iter()
+                        .map(|pkg| (pkg.fmri, "installed"))
+                        .collect(),
                     Err(e) => {
                         error!("Failed to query installed packages: {}", e);
                         return Err(e.into());
                     }
                 }
+            };
+
+            // pkg(1) exits 1 when nothing is listed.
+            if rows.is_empty() {
+                if *quiet {
+                    return Err(Pkg6Error::Quiet(1));
+                }
+                let what = match (pattern, *all) {
+                    (None, false) => "no packages installed".to_string(),
+                    (None, true) => "no packages known".to_string(),
+                    (Some(p), false) => format!("no packages matching '{p}' installed"),
+                    (Some(p), true) => format!("no packages matching '{p}' known"),
+                };
+                return Err(Pkg6Error::NoPackagesListed(what));
+            }
+
+            // -q: exit status only, as in pkg(1).
+            if !*quiet {
+                if *verbose {
+                    // -v: full FMRIs, as in pkg(1).
+                    println!("{:<90} STATE", "FMRI");
+                    for (fmri, state) in &rows {
+                        println!("{:<90} {}", fmri.to_string(), state);
+                    }
+                } else {
+                    println!(
+                        "PUBLISHER                                  NAME                                     VERSION                      STATE"
+                    );
+                    println!(
+                        "------------------------------------------------------------------------------------------------------------------------------------------------------"
+                    );
+                    for (fmri, state) in &rows {
+                        println!(
+                            "{:<40} {:<40} {:<30} {}",
+                            fmri.publisher.as_deref().unwrap_or("unknown"),
+                            fmri.name,
+                            fmri.version(),
+                            state
+                        );
+                    }
+                }
             }
 
             info!("List completed successfully");
-            Ok(())
-        }
-        Commands::Info {
-            verbose,
-            quiet,
-            output_format,
-            pkg_fmri_patterns,
-        } => {
-            info!("Showing info for packages: {:?}", pkg_fmri_patterns);
-            debug!("Verbose: {}", verbose);
-            debug!("Quiet: {}", quiet);
-            debug!("Output format: {:?}", output_format);
-
-            // Stub implementation
-            info!("Info completed successfully");
-            Ok(())
-        }
-        Commands::Search {
-            verbose,
-            quiet,
-            output_format,
-            query,
-        } => {
-            info!("Searching for packages matching: {}", query);
-            debug!("Verbose: {}", verbose);
-            debug!("Quiet: {}", quiet);
-            debug!("Output format: {:?}", output_format);
-
-            // Stub implementation
-            info!("Search completed successfully");
-            Ok(())
-        }
-        Commands::Verify {
-            verbose,
-            quiet,
-            pkg_fmri_patterns,
-        } => {
-            info!("Verifying packages: {:?}", pkg_fmri_patterns);
-            debug!("Verbose: {}", verbose);
-            debug!("Quiet: {}", quiet);
-
-            // Stub implementation
-            info!("Verification completed successfully");
-            Ok(())
-        }
-        Commands::Fix {
-            dry_run,
-            verbose,
-            quiet,
-            pkg_fmri_patterns,
-        } => {
-            info!("Fixing packages: {:?}", pkg_fmri_patterns);
-            debug!("Dry run: {}", dry_run);
-            debug!("Verbose: {}", verbose);
-            debug!("Quiet: {}", quiet);
-
-            // Stub implementation
-            info!("Fix completed successfully");
-            Ok(())
-        }
-        Commands::History {
-            count,
-            full,
-            output_format,
-        } => {
-            info!("Showing history");
-            debug!("Count: {:?}", count);
-            debug!("Full: {}", full);
-            debug!("Output format: {:?}", output_format);
-
-            // Stub implementation
-            info!("History completed successfully");
-            Ok(())
-        }
-        Commands::Contents {
-            verbose,
-            quiet,
-            output_format,
-            pkg_fmri_patterns,
-        } => {
-            info!("Showing contents for packages: {:?}", pkg_fmri_patterns);
-            debug!("Verbose: {}", verbose);
-            debug!("Quiet: {}", quiet);
-            debug!("Output format: {:?}", output_format);
-
-            // Stub implementation
-            info!("Contents completed successfully");
             Ok(())
         }
         Commands::SetPublisher {
@@ -1064,6 +845,14 @@ fn main() -> Result<()> {
             info!("Setting publisher: {}", publisher);
             debug!("Origin: {:?}", origin);
             debug!("Mirror: {:?}", mirror);
+
+            // Without -O the publisher is only made the default and keeps its
+            // existing mirrors; the mirrors asked for would be dropped.
+            if origin.is_none() && mirror.is_some() {
+                return Err(Pkg6Error::Unsupported(
+                    "pkg6 set-publisher -M without -O".to_string(),
+                ));
+            }
 
             // Determine the image path using the -R argument or default rules
             let image_path = determine_image_path(cli.image_path.clone());
@@ -1143,13 +932,14 @@ fn main() -> Result<()> {
             // Remove the publisher
             image.remove_publisher(&publisher)?;
 
-            // Refresh the catalog to reflect the current state of all available packages
-            if let Err(e) = image.download_catalogs() {
-                error!("Failed to refresh catalog after removing publisher: {}", e);
-                // Continue execution even if catalog refresh fails
-            } else {
-                info!("Catalog refreshed successfully");
-            }
+            // Drop its packages from the catalog; the configuration is
+            // already saved, so a failure here must say the removal happened.
+            image.purge_publisher_catalog(publisher).map_err(|source| {
+                Pkg6Error::CatalogRebuildFailed {
+                    publisher: publisher.clone(),
+                    source,
+                }
+            })?;
 
             info!("Publisher {} removed successfully", publisher);
             info!("Unset-publisher completed successfully");
@@ -1181,6 +971,16 @@ fn main() -> Result<()> {
             // Get all publishers
             let all_publishers = image.publishers();
 
+            // pkg(1) fails on a publisher it does not know.
+            let unknown: Vec<String> = publishers
+                .iter()
+                .filter(|name| !all_publishers.iter().any(|p| &p.name == *name))
+                .cloned()
+                .collect();
+            if !unknown.is_empty() {
+                return Err(Pkg6Error::UnknownPublishers(unknown));
+            }
+
             // Filter publishers if specified
             let filtered_publishers: Vec<_> = if publishers.is_empty() {
                 all_publishers.to_vec()
@@ -1192,13 +992,9 @@ fn main() -> Result<()> {
                     .collect()
             };
 
-            // Handle case where no publishers are found
+            // Only reachable without arguments: unknown names failed above.
             if filtered_publishers.is_empty() {
-                if publishers.is_empty() {
-                    println!("No publishers configured");
-                } else {
-                    println!("No matching publishers found");
-                }
+                println!("No publishers configured");
                 return Ok(());
             }
 
@@ -1466,6 +1262,129 @@ fn main() -> Result<()> {
 
             info!("Debug database command completed successfully");
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_is_consistent() {
+        App::command().debug_assert();
+    }
+
+    #[test]
+    fn not_implemented_commands_take_any_arguments() {
+        for (argv, name) in [
+            (
+                &["pkg6", "exact-install", "-nv", "web/server"][..],
+                "exact-install",
+            ),
+            (&["pkg6", "uninstall", "-n", "editor/vim"], "uninstall"),
+            (&["pkg6", "update", "--accept", "-C", "2"], "update"),
+            (&["pkg6", "info", "-r", "--license", "vim"], "info"),
+            (&["pkg6", "search", "-a", "-o", "pkg.name", "vim"], "search"),
+            (&["pkg6", "verify", "-v"], "verify"),
+            (&["pkg6", "fix", "--help"], "fix"),
+            (&["pkg6", "history", "-l"], "history"),
+            (&["pkg6", "contents", "-m", "vim"], "contents"),
+        ] {
+            let app = App::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            match app.command {
+                Commands::NotImplemented(cmd) => assert_eq!(cmd.name(), name),
+                other => panic!("{argv:?} parsed as {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_errors_have_a_stable_exit_code() {
+        let e = Pkg6Error::Unsupported("pkg6 verify".to_string());
+        assert_eq!(e.exit_code(), error::EXIT_UNSUPPORTED);
+        assert_eq!(
+            e.to_string(),
+            "pkg6 verify is not implemented in this release"
+        );
+        assert_eq!(Pkg6Error::Other("x".to_string()).exit_code(), 1);
+    }
+
+    #[test]
+    fn only_must_accept_licenses_need_accept() {
+        let pkg = |fmri: &str, manifest: &str| libips::solver::ResolvedPkg {
+            fmri: libips::fmri::Fmri::parse(fmri).unwrap(),
+            manifest: libips::actions::Manifest::parse_string(manifest.to_string()).unwrap(),
+            manifest_text: manifest.to_string(),
+        };
+        let plan = [
+            pkg(
+                "pkg://test/java@1.0",
+                "set name=pkg.fmri value=pkg://test/java@1.0\n\
+                 license 0123abcd license=Oracle.BCL must-accept=true\n\
+                 license 4567ef01 license=GPLv2\n",
+            ),
+            pkg(
+                "pkg://test/vim@9.0",
+                "set name=pkg.fmri value=pkg://test/vim@9.0\n\
+                 license 89ab license=Vim must-accept=false\n",
+            ),
+        ];
+        let unaccepted = licenses_requiring_acceptance(&plan);
+        assert_eq!(unaccepted.len(), 1, "{unaccepted:?}");
+        assert!(unaccepted[0].contains("java"), "{unaccepted:?}");
+        assert!(unaccepted[0].ends_with("Oracle.BCL"), "{unaccepted:?}");
+        assert!(licenses_requiring_acceptance(&plan[1..]).is_empty());
+    }
+
+    #[test]
+    fn license_and_quiet_errors_have_pkg_exit_codes() {
+        assert_eq!(
+            Pkg6Error::LicenseAcceptanceRequired(vec!["x".into()]).exit_code(),
+            error::EXIT_LICENSE
+        );
+        assert_eq!(Pkg6Error::Quiet(1).exit_code(), 1);
+        assert_eq!(
+            Pkg6Error::NoPackagesListed("no packages installed".into()).exit_code(),
+            1
+        );
+    }
+
+    #[test]
+    fn install_still_parses_its_options() {
+        let app = App::try_parse_from([
+            "pkg6",
+            "-R",
+            "/img",
+            "install",
+            "-n",
+            "-v",
+            "--accept",
+            "--no-refresh",
+            "vim",
+        ])
+        .unwrap();
+        assert_eq!(app.image_path, Some(PathBuf::from("/img")));
+        // -n is the pkg(1) dry-run option; -d is kept for earlier pkg6 users.
+        match app.command {
+            Commands::Install {
+                dry_run,
+                verbose,
+                pkg_fmri_patterns,
+                ..
+            } => {
+                assert!(dry_run && verbose);
+                assert_eq!(pkg_fmri_patterns, vec!["vim".to_string()]);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        match App::try_parse_from(["pkg6", "install", "-n", "vim"])
+            .unwrap()
+            .command
+        {
+            Commands::Install { dry_run, .. } => assert!(dry_run),
+            other => panic!("parsed as {other:?}"),
         }
     }
 }
