@@ -24,8 +24,9 @@ RELEASE_PLATFORMS="linux-x86_64 illumos-x86_64"
 # least that many tests, so deleting, renaming or filtering out a maintained
 # suite fails the release instead of quietly shrinking the gate. Raise the
 # minimums when suites grow; add new suites as they land. The atomic pkg5
-# importer is gated through its library, CLI and depot suites (ADR-007).
-RELEASE_REQUIRED_SUITES="pkg6repo::e2e_tests=5 pkg6depotd::config_fail_closed=9 pkg6depotd::packaged_config=1 pkg6depotd::integration_tests=5 pkg6depotd::auth_tests=5 pkg6depotd::read_only_http_tests=3 libips::atomic_pkg5_import=30 pkg6repo::import_pkg5_cli=3 pkg6depotd::atomic_import_http_tests=3"
+# importer is gated through its library, CLI and depot suites (ADR-007), OTLP
+# export through the depot's telemetry_otlp suite (ADR-006).
+RELEASE_REQUIRED_SUITES="pkg6repo::e2e_tests=5 pkg6depotd::config_fail_closed=11 pkg6depotd::packaged_config=2 pkg6depotd::telemetry_otlp=10 pkg6depotd::integration_tests=5 pkg6depotd::auth_tests=5 pkg6depotd::read_only_http_tests=3 libips::atomic_pkg5_import=30 pkg6repo::import_pkg5_cli=3 pkg6depotd::atomic_import_http_tests=3"
 
 # Tests allowed to be unselected by default, one "SUITE TEST" per line. Anything else
 # that nextest would not run (e.g. a new #[ignore]) fails the inventory.

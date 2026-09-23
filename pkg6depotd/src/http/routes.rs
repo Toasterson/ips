@@ -106,5 +106,6 @@ fn base_router(state: Arc<DepotRepo>) -> Router {
         // Embedded static assets
         .route("/ui/static/js/htmx.min.js", get(ui::static_htmx_js))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(crate::telemetry::http::track))
         .with_state(state)
 }

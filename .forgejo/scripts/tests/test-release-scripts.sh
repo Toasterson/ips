@@ -440,10 +440,11 @@ check_not "inventory: any other unselected test fails" release_check_test_invent
 printf '{}' > "${tmp}/inv-garbage.json"
 check_not "inventory: non-nextest JSON fails" release_check_test_inventory "${tmp}/inv-garbage.json"
 check "inventory requires the pkg6repo e2e suite" grep -q 'pkg6repo::e2e_tests=5' "${scripts}/release-lib.sh"
-for suite in libips::atomic_pkg5_import pkg6repo::import_pkg5_cli pkg6depotd::atomic_import_http_tests; do
-  check "inventory requires the pkg5 importer suite ${suite}" grep -qE "[\" ]${suite}=[1-9]" "${scripts}/release-lib.sh"
-  jq --arg s "${suite}" 'del(.["rust-suites"][$s])' "${tmp}/inv-ok.json" > "${tmp}/inv-no-import.json"
-  check_not "inventory: missing importer suite ${suite} fails" release_check_test_inventory "${tmp}/inv-no-import.json"
+for suite in libips::atomic_pkg5_import pkg6repo::import_pkg5_cli pkg6depotd::atomic_import_http_tests \
+  pkg6depotd::telemetry_otlp; do
+  check "inventory requires the suite ${suite}" grep -qE "[\" ]${suite}=[1-9]" "${scripts}/release-lib.sh"
+  jq --arg s "${suite}" 'del(.["rust-suites"][$s])' "${tmp}/inv-ok.json" > "${tmp}/inv-no-suite.json"
+  check_not "inventory: missing suite ${suite} fails" release_check_test_inventory "${tmp}/inv-no-suite.json"
 done
 
 # --- e2e tests are self-contained ------------------------------------------------

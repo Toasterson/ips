@@ -50,9 +50,188 @@ This is the default.
 Load and validate the configuration and print a summary: the file, the bind
 address and the repository root.
 Other settings are not printed, because they may hold credentials.
-Exits non-zero if the file is missing or invalid.
+Exits non-zero if the file is missing or invalid, including invalid
+.Sx TELEMETRY
+settings.
+Error messages give the line and column of a problem, not the offending text.
 The repository is not opened.
 .El
+.Pp
+On
+.Dv SIGTERM
+or
+.Dv SIGINT ,
+.Nm
+stops accepting connections, gives running requests up to 10 seconds to
+finish, then flushes telemetry within
+.Sy shutdown-timeout-ms
+and exits.
+.Sh TELEMETRY
+Local log output goes to standard output, which SMF writes to the service
+log.
+The
+.Sy telemetry
+block of the configuration file controls it and the optional export of
+traces, metrics and logs to an OpenTelemetry collector over OTLP/HTTP
+(protobuf):
+.Bd -literal -offset indent
+telemetry {
+    service-name "pkg6depotd"
+    log-format "json"
+    otlp {
+        enabled true
+        endpoint "http://127.0.0.1:4318"
+    }
+}
+.Ed
+.Bl -tag -width Ds
+.It Sy service-name
+The
+.Sy service.name
+resource attribute.
+Default
+.Sy pkg6depotd .
+.It Sy log-format
+.Sy text
+(default) or
+.Sy json
+for the local log output.
+.El
+.Pp
+Earlier configurations may carry a top-level
+.Sy otlp-endpoint
+key inside
+.Sy telemetry .
+It never enabled export and is now rejected at load time: move the URL to
+.Sy endpoint
+in the
+.Sy otlp
+block and set
+.Sy enabled
+as wanted.
+.Pp
+Keys of the
+.Sy otlp
+block:
+.Bl -tag -width Ds
+.It Sy enabled
+.Sy true
+or
+.Sy false .
+Defaults to
+.Sy true
+when the block is present.
+Other keys are validated even when export is disabled.
+.It Sy endpoint
+Base URL of the collector's OTLP/HTTP receiver, such as
+.Pa http://127.0.0.1:4318 .
+The paths
+.Pa /v1/traces ,
+.Pa /v1/metrics
+and
+.Pa /v1/logs
+are appended.
+Required when enabled.
+Only
+.Sy http
+and
+.Sy https
+URLs without user credentials, query or fragment are accepted; the URL is
+never repeated in error messages.
+To authenticate to a remote collector, run a local collector that adds the
+credentials.
+Export connects to this URL directly:
+.Ev HTTP_PROXY ,
+.Ev HTTPS_PROXY
+and
+.Ev ALL_PROXY
+in the service environment are ignored and redirects are not followed.
+.It Sy traces , metrics , logs
+Export the signal:
+.Sy true
+(default) or
+.Sy false .
+At least one must be enabled.
+.It Sy log-level
+Minimum level of exported log records:
+.Sy error , warn , info
+(default),
+.Sy debug
+or
+.Sy trace .
+The local output keeps using
+.Sy config/log_filter .
+.It Sy sample-ratio
+Fraction of requests traced, 0.0 to 1.0.
+Default 1.0.
+.It Sy timeout-ms
+Limit for one export attempt, 50 to 60000.
+Default 5000.
+.It Sy max-retries
+Retries of a failed export, with exponential backoff from 100 ms up to 5 s,
+0 to 10.
+Default 3.
+A batch that still fails is dropped.
+A 4xx answer other than 408 and 429 means the collector rejected the payload;
+it is dropped without retrying.
+.It Sy queue-size
+Trace spans and log records buffered per signal, 1 to 65536.
+Default 2048.
+When the queue is full the oldest record is dropped.
+.It Sy batch-size
+Records per export request, 1 to 8192 and at most
+.Sy queue-size .
+Default 512.
+.It Sy flush-interval-ms
+Longest time a span or log record waits before it is sent, 10 to 60000.
+Default 5000.
+.It Sy metrics-interval-ms
+Metrics export interval, 100 to 3600000.
+Default 60000.
+.It Sy shutdown-timeout-ms
+Time allowed to flush telemetry when the service stops, 100 to 30000.
+Default 5000.
+Records still queued afterwards are dropped.
+.El
+.Pp
+Export runs on its own threads and never delays requests.
+A slow, hung or unreachable collector costs at most
+.Sy queue-size
+queued records plus the one batch of up to
+.Sy batch-size
+records being sent, per signal, of memory; dropped records are counted by
+signal and by
+reason
+.Po
+.Sy overflow ,
+.Sy export_failed ,
+.Sy shutdown
+.Pc
+in the
+.Sy pkg6depotd.telemetry.dropped
+metric.
+.Pp
+Metrics:
+.Sy pkg6depotd.http.server.requests ,
+.Sy http.server.request.duration ,
+.Sy http.server.active_requests ,
+.Sy pkg6depotd.http.server.errors
+(5xx responses),
+.Sy pkg6depotd.operations ,
+.Sy pkg6depotd.operation.duration ,
+.Sy pkg6depotd.telemetry.dropped
+and
+.Sy pkg6depotd.telemetry.exported .
+The two operation metrics are reserved for repository imports, catalog
+rebuilds and retirements; this release does not record them yet.
+Each request produces one server span.
+Attributes are limited to the HTTP method, the route template (for example
+.Pa /{publisher}/file/1/{digest} ,
+or
+.Sy unmatched ) ,
+the status code, the operation and the result; request paths, package names
+and digests are never attributes.
+Exported log records carry the message text, which can name packages.
 .Sh SERVICE
 The service runs as the
 .Sy pkg6srv

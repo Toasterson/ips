@@ -35,7 +35,16 @@ pub fn load_config(path: Option<PathBuf>) -> Result<Config> {
         )
     })?;
     bind_addr(&config)?;
+    telemetry_settings(&config)?;
     Ok(config)
+}
+
+/// Validated telemetry settings. Invalid settings are an error, never a
+/// silent fallback to "no export"; messages do not repeat the endpoint.
+pub fn telemetry_settings(config: &Config) -> Result<telemetry::TelemetrySettings> {
+    telemetry::TelemetrySettings::from_config(config.telemetry.as_ref()).map_err(|e| {
+        miette::Report::new(e).wrap_err("cannot load configuration: invalid telemetry settings")
+    })
 }
 
 /// The single socket address the depot listens on.
@@ -71,37 +80,27 @@ pub async fn run() -> Result<()> {
     let args = Cli::parse();
 
     let config = load_config(args.config.clone())?;
-
-    // Init telemetry
-    telemetry::init(&config);
+    let settings = telemetry_settings(&config)?;
 
     match args.command.unwrap_or(Commands::Start) {
         Commands::Start => {
-            let repo = DepotRepo::new(&config).map_err(|e| miette::miette!(e))?;
-            let state = Arc::new(repo);
-
             if !args.no_daemon {
                 daemon::daemonize().map_err(|e| miette::miette!(e))?;
             }
+            // After daemonizing: OTLP export runs on its own threads.
+            let telemetry = telemetry::init(&settings)?;
 
-            // Initialize OIDC auth if configured
-            let auth_state = http::middleware::AuthState::from_config(&config.oauth2)
-                .await
-                .map(Arc::new);
-
-            let router = http::routes::app_router_with_auth(state, auth_state);
-            let addr = bind_addr(&config)?;
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(crate::errors::DepotError::Io)?;
-
-            tracing::info!("Starting pkg6depotd on {}", addr);
-
-            http::server::run(router, listener)
-                .await
-                .map_err(|e| miette::miette!(e))?;
+            let served = serve(&config).await;
+            match &served {
+                Ok(()) => tracing::info!("pkg6depotd stopped"),
+                Err(e) => tracing::error!("pkg6depotd failed: {e}"),
+            }
+            // Flush after the last request and the final log line.
+            let _ = tokio::task::spawn_blocking(move || telemetry.shutdown()).await;
+            served?;
         }
         Commands::ConfigTest => {
+            let _telemetry = telemetry::init(&settings.local_only())?;
             // Validates the file only; the repository may not exist yet.
             // Print a fixed summary, never the whole configuration: it can
             // hold credentials (OTLP endpoints, OAuth settings, later TLS
@@ -123,4 +122,27 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Open the repository and serve it until SIGTERM/SIGINT.
+async fn serve(config: &Config) -> Result<()> {
+    let repo = DepotRepo::new(config).map_err(|e| miette::miette!(e))?;
+    let state = Arc::new(repo);
+
+    // Initialize OIDC auth if configured
+    let auth_state = http::middleware::AuthState::from_config(&config.oauth2)
+        .await
+        .map(Arc::new);
+
+    let router = http::routes::app_router_with_auth(state, auth_state);
+    let addr = bind_addr(config)?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(crate::errors::DepotError::Io)?;
+
+    tracing::info!("Starting pkg6depotd on {}", addr);
+
+    http::server::run_until(router, listener, http::server::shutdown_signal())
+        .await
+        .map_err(|e| miette::miette!(e))
 }
