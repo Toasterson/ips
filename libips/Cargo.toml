@@ -45,6 +45,8 @@ reqwest = { version = "0.12", features = ["blocking", "json", "gzip", "deflate"]
 resolvo = "0.10"
 rayon = "1.11"
 zip = { version = "2", features = ["zstd"] }
+# Validating .p5p unpacking (no external tar(1), no link entries)
+tar = { version = "0.4", default-features = false }
 
 [features]
 default = ["bundled-sqlite"]

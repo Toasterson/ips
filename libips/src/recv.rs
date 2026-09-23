@@ -52,6 +52,10 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
         fmris: &[Fmri],
         recursive: bool,
     ) -> Result<()> {
+        // Refuse before adding a publisher or storing payloads: packages are
+        // received one transaction at a time, which a generation-managed
+        // repository cannot publish atomically.
+        self.dest.reject_if_managed("receiving packages")?;
         let mut processed = HashSet::new();
         let mut queue: Vec<Fmri> = fmris.to_vec();
         let mut updated_publishers = HashSet::new();
@@ -191,6 +195,7 @@ impl<'a, S: ReadableRepository + Sync> PackageReceiver<'a, S> {
 
     /// Receive a single package
     pub fn receive_one(&mut self, publisher: &str, fmri: &Fmri) -> Result<Manifest> {
+        self.dest.reject_if_managed("receiving packages")?;
         let progress = self.progress.unwrap_or(&NoopProgressReporter);
 
         let manifest_text = self.source.fetch_manifest_text(publisher, fmri)?;

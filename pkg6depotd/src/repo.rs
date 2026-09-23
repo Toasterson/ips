@@ -1,14 +1,83 @@
 use crate::config::Config;
 use crate::errors::{DepotError, Result};
 use libips::fmri::Fmri;
-use libips::repository::{FileBackend, IndexEntry, PackageInfo, ReadableRepository};
-use std::path::PathBuf;
-use std::sync::Mutex;
+use libips::repository::generation::is_valid_publisher_name;
+use libips::repository::{
+    FileBackend, IndexEntry, PackageInfo, REPOSITORY_CONFIG_FILENAME, ReadableRepository,
+    RepositoryError,
+};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+use std::time::SystemTime;
 
 pub struct DepotRepo {
     pub backend: Mutex<FileBackend>,
     pub root: PathBuf,
     pub cache_max_age: u64,
+    /// Identity of the published generation and configuration file the
+    /// backend was loaded from.
+    config_stamp: Mutex<Option<ConfigStamp>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigStamp {
+    /// Target of `generations/current`. On a generation-managed repository
+    /// the publisher list and default publisher come from that generation,
+    /// so they change with the same rename as its catalogs.
+    generation: Option<PathBuf>,
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl ConfigStamp {
+    fn read(root: &Path) -> Option<Self> {
+        let generation = std::fs::read_link(
+            root.join(libips::repository::generation::GENERATIONS_DIR)
+                .join(libips::repository::generation::CURRENT_LINK),
+        )
+        .ok();
+        let meta = std::fs::metadata(root.join(REPOSITORY_CONFIG_FILENAME)).ok()?;
+        Some(Self {
+            generation,
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            #[cfg(unix)]
+            ino: std::os::unix::fs::MetadataExt::ino(&meta),
+        })
+    }
+}
+
+fn not_found(what: String) -> DepotError {
+    DepotError::Repo(RepositoryError::NotFound(what))
+}
+
+/// Request path segments name repository paths; reject anything that is not
+/// a publisher prefix so they cannot escape the repository.
+fn check_publisher(publisher: &str) -> Result<()> {
+    if is_valid_publisher_name(publisher) {
+        Ok(())
+    } else {
+        Err(DepotError::Repo(RepositoryError::PublisherNotFound(
+            publisher.to_string(),
+        )))
+    }
+}
+
+fn is_hex_digest(digest: &str) -> bool {
+    digest.len() >= 2 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// FMRI components become single path components; `.`/`..` would not.
+fn check_fmri_components(fmri: &Fmri) -> Result<()> {
+    let version = fmri.version();
+    for c in [fmri.stem(), version.as_str()] {
+        if c == "." || c == ".." {
+            return Err(not_found(format!("manifest for {}", fmri)));
+        }
+    }
+    Ok(())
 }
 
 impl DepotRepo {
@@ -18,9 +87,38 @@ impl DepotRepo {
         let cache_max_age = config.server.cache_max_age.unwrap_or(3600);
         Ok(Self {
             backend: Mutex::new(backend),
+            config_stamp: Mutex::new(ConfigStamp::read(&root)),
             root,
             cache_max_age,
         })
+    }
+
+    /// The backend, reloaded when a new generation was published or the
+    /// configuration was replaced. Publisher discovery, the default
+    /// publisher and unscoped search therefore follow the generation switch
+    /// itself (not the configuration write that follows it) without a depot
+    /// restart.
+    fn backend(&self) -> Result<MutexGuard<'_, FileBackend>> {
+        let mut backend = self
+            .backend
+            .lock()
+            .map_err(|e| DepotError::Server(format!("Lock poisoned: {}", e)))?;
+        let mut stamp = self
+            .config_stamp
+            .lock()
+            .map_err(|e| DepotError::Server(format!("Lock poisoned: {}", e)))?;
+        let now = ConfigStamp::read(&self.root);
+        if now != *stamp {
+            match FileBackend::open(&self.root) {
+                Ok(fresh) => {
+                    *backend = fresh;
+                    *stamp = now;
+                }
+                // Keep serving the last good configuration.
+                Err(e) => tracing::warn!("failed to reload repository configuration: {}", e),
+            }
+        }
+        Ok(backend)
     }
 
     pub fn search(
@@ -29,20 +127,24 @@ impl DepotRepo {
         query: &str,
         case_sensitive: bool,
     ) -> Result<Vec<IndexEntry>> {
-        let backend = self
-            .backend
-            .lock()
-            .map_err(|e| DepotError::Server(format!("Lock poisoned: {}", e)))?;
+        if let Some(p) = publisher {
+            check_publisher(p)?;
+        }
+        let backend = self.backend()?;
         backend
             .search_detailed(query, publisher, None, case_sensitive)
             .map_err(DepotError::Repo)
     }
 
-    pub fn get_catalog_path(&self, publisher: &str) -> PathBuf {
-        FileBackend::construct_catalog_path(&self.root, publisher)
+    pub fn get_catalog_path(&self, publisher: &str) -> Result<PathBuf> {
+        check_publisher(publisher)?;
+        Ok(FileBackend::construct_catalog_path(&self.root, publisher))
     }
 
     pub fn get_file_path(&self, publisher: &str, hash: &str) -> Option<PathBuf> {
+        if !is_valid_publisher_name(publisher) || !is_hex_digest(hash) {
+            return None;
+        }
         let cand_pub = FileBackend::construct_file_path_with_publisher(&self.root, publisher, hash);
         if cand_pub.exists() {
             return Some(cand_pub);
@@ -57,16 +159,18 @@ impl DepotRepo {
     }
 
     pub fn get_manifest_text(&self, publisher: &str, fmri: &Fmri) -> Result<String> {
-        let backend = self
-            .backend
-            .lock()
-            .map_err(|e| DepotError::Server(format!("Lock poisoned: {}", e)))?;
+        check_publisher(publisher)?;
+        check_fmri_components(fmri)?;
+        let backend = self.backend()?;
         backend
             .fetch_manifest_text(publisher, fmri)
             .map_err(DepotError::Repo)
     }
 
     pub fn get_manifest_path(&self, publisher: &str, fmri: &Fmri) -> Option<PathBuf> {
+        if !is_valid_publisher_name(publisher) || check_fmri_components(fmri).is_err() {
+            return None;
+        }
         let version = fmri.version();
         if version.is_empty() {
             return None;
@@ -104,15 +208,17 @@ impl DepotRepo {
         self.cache_max_age
     }
 
-    pub fn shard_dir(&self, publisher: &str) -> PathBuf {
-        self.root.join("publisher").join(publisher).join("catalog2")
+    pub fn shard_dir(&self, publisher: &str) -> Result<PathBuf> {
+        check_publisher(publisher)?;
+        Ok(self.root.join("publisher").join(publisher).join("catalog2"))
     }
 
     pub fn get_catalog_file_path(&self, publisher: &str, filename: &str) -> Result<PathBuf> {
-        let backend = self
-            .backend
-            .lock()
-            .map_err(|e| DepotError::Server(format!("Lock poisoned: {}", e)))?;
+        check_publisher(publisher)?;
+        if filename.is_empty() || filename.starts_with('.') {
+            return Err(not_found(filename.to_string()));
+        }
+        let backend = self.backend()?;
         backend
             .get_catalog_file_path(publisher, filename)
             .map_err(DepotError::Repo)
@@ -123,20 +229,14 @@ impl DepotRepo {
         publisher: Option<&str>,
         pattern: Option<&str>,
     ) -> Result<Vec<PackageInfo>> {
-        let backend = self
-            .backend
-            .lock()
-            .map_err(|e| DepotError::Server(format!("Lock poisoned: {}", e)))?;
+        let backend = self.backend()?;
         backend
             .list_packages(publisher, pattern)
             .map_err(DepotError::Repo)
     }
 
     pub fn get_info(&self) -> Result<libips::repository::RepositoryInfo> {
-        let backend = self
-            .backend
-            .lock()
-            .map_err(|e| DepotError::Server(format!("Lock poisoned: {}", e)))?;
+        let backend = self.backend()?;
         backend.get_info().map_err(DepotError::Repo)
     }
 }

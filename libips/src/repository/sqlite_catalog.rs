@@ -221,6 +221,35 @@ pub fn build_shards(
         // large publishers. Instead, stream the JSON and emit SQL inserts per
         // version entry, holding only one stem's versions at a time.
         let part_names: Vec<String> = catalog_manager.attrs().parts.keys().cloned().collect();
+
+        // pkg5 records pkg.obsolete in the dependency part only (older pkg6
+        // catalogs used the summary part), while the base part lists every
+        // version without actions. Find obsolete versions first, so no part
+        // makes them installable (active.db) or searchable (fts.db).
+        let mut obsolete_versions: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for part_name in &part_names {
+            let mut collect = |pkg_name: &str,
+                               version_entry: &crate::repository::catalog::PackageVersionEntry|
+             -> std::result::Result<(), rusqlite::Error> {
+                let obsolete = version_entry.actions.iter().flatten().any(|a| {
+                    matches!(
+                        a.trim_end(),
+                        "set name=pkg.obsolete value=true" | "set name=pkg.obsolete value=\"true\""
+                    )
+                });
+                if obsolete {
+                    obsolete_versions.insert((pkg_name.to_string(), version_entry.version.clone()));
+                }
+                Ok(())
+            };
+            stream_catalog_part_for_publisher(
+                &catalog_parts_dir.join(part_name),
+                publisher,
+                &mut collect,
+            )?;
+        }
+
         for part_name in part_names {
             let part_path = catalog_parts_dir.join(&part_name);
 
@@ -276,7 +305,8 @@ pub fn build_shards(
                     }
                 }
 
-                let is_obsolete = crate::image::catalog::is_package_obsolete(&manifest);
+                let is_obsolete = crate::image::catalog::is_package_obsolete(&manifest)
+                    || obsolete_versions.contains(&(pkg_name.to_string(), pkg_version.clone()));
                 package_version_count += 1;
 
                 if is_obsolete {
@@ -303,7 +333,7 @@ pub fn build_shards(
                     }
                 }
 
-                if fts_seen.insert(pkg_name.to_string()) {
+                if !is_obsolete && fts_seen.insert(pkg_name.to_string()) {
                     let summary = manifest
                         .attributes
                         .iter()

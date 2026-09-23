@@ -113,7 +113,19 @@ pub struct Transaction {
 
 impl Transaction {
     /// Create a new transaction
+    ///
+    /// Fails on a generation-managed repository: a transaction writes its
+    /// manifest into the live generation, which would be neither atomic nor
+    /// serialised with imports.
     pub fn new(repo_path: PathBuf) -> Result<Self> {
+        if super::generation::GenerationStore::is_managed(&repo_path) {
+            return Err(super::generation::GenerationError::ManagedRepository {
+                path: repo_path,
+                operation: "publishing a package transaction".to_string(),
+            }
+            .into());
+        }
+
         // Generate a unique ID based on timestamp
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -315,6 +327,11 @@ impl Transaction {
 
     /// Commit the transaction
     pub fn commit(self) -> Result<()> {
+        // Serialise with imports, rebuilds and adoption; refuse if the
+        // repository became generation-managed after the transaction began.
+        let _lock =
+            super::generation::lock_unmanaged(&self.repo, "publishing a package transaction")?;
+
         // Save the JSON manifest to the transaction directory
         let manifest_json_path = self.path.join("manifest.json");
         let manifest_json = serde_json::to_string_pretty(&self.manifest)?;
@@ -634,6 +651,8 @@ impl ReadableRepository for FileBackend {
                 config5_path.display()
             )));
         };
+        let mut config = config;
+        Self::apply_generation_view(path, &mut config)?;
 
         Ok(FileBackend {
             path: path.to_path_buf(),
@@ -755,16 +774,28 @@ impl ReadableRepository for FileBackend {
         for pub_name in publishers {
             let active_path = self.shard_dir(&pub_name).join("active.db");
             if active_path.exists() {
-                // Catalog shard is the cheap source of truth — one query
-                // returns every (stem, version, publisher) that the rebuild
-                // already filtered for obsolescence.
+                // Catalog shards are the cheap source of truth. Like pkg5's
+                // `pkgrepo list`, the listing includes obsolete versions,
+                // which the shard builder keeps out of active.db (installable
+                // and searchable packages) and records in obsolete.db.
                 let before = packages.len();
                 self.list_packages_from_catalog(
                     &active_path,
+                    "SELECT stem, version FROM packages",
                     &pub_name,
                     regex.as_deref(),
                     &mut packages,
                 )?;
+                let obsolete_path = self.shard_dir(&pub_name).join("obsolete.db");
+                if obsolete_path.exists() {
+                    self.list_packages_from_catalog(
+                        &obsolete_path,
+                        "SELECT stem, version FROM obsolete_packages",
+                        &pub_name,
+                        regex.as_deref(),
+                        &mut packages,
+                    )?;
+                }
                 debug!(
                     "Listed {} packages for publisher {} from catalog",
                     packages.len() - before,
@@ -1563,10 +1594,11 @@ impl WritableRepository for FileBackend {
 
     /// Save the repository configuration
     fn save_config(&self) -> Result<()> {
-        // Save the modern JSON format
+        // Save the modern JSON format. Write-then-rename so a crash never
+        // leaves a truncated configuration behind.
         let config_path = self.path.join(REPOSITORY_CONFIG_FILENAME);
         let config_data = serde_json::to_string_pretty(&self.config)?;
-        fs::write(config_path, config_data)?;
+        write_file_atomically(&config_path, config_data.as_bytes())?;
 
         // Save the legacy INI format for backward compatibility
         self.save_legacy_config()?;
@@ -1576,6 +1608,16 @@ impl WritableRepository for FileBackend {
 
     /// Add a publisher to the repository
     fn add_publisher(&mut self, publisher: &str) -> Result<()> {
+        let _lock = match self.lock_or_managed("adding a publisher")? {
+            Some(lock) => lock,
+            None => {
+                let mut store = super::generation::GenerationStore::open(&self.path)?;
+                store.add_publisher(publisher)?;
+                drop(store);
+                return self.reload_config();
+            }
+        };
+        self.reload_config()?;
         if !self.config.publishers.contains(&publisher.to_string()) {
             self.config.publishers.push(publisher.to_string());
 
@@ -1604,6 +1646,21 @@ impl WritableRepository for FileBackend {
 
     /// Remove a publisher from the repository
     fn remove_publisher(&mut self, publisher: &str, dry_run: bool) -> Result<()> {
+        if dry_run {
+            return Ok(());
+        }
+        let _lock = match self.lock_or_managed("removing a publisher")? {
+            Some(lock) => lock,
+            None => {
+                // The publisher disappears from catalogs, manifests and the
+                // configuration in one generation switch.
+                let mut store = super::generation::GenerationStore::open(&self.path)?;
+                store.remove_publisher(publisher)?;
+                drop(store);
+                return self.reload_config();
+            }
+        };
+        self.reload_config()?;
         if let Some(pos) = self.config.publishers.iter().position(|p| p == publisher) {
             if !dry_run {
                 self.config.publishers.remove(pos);
@@ -1636,11 +1693,12 @@ impl WritableRepository for FileBackend {
 
     /// Set a repository property
     fn set_property(&mut self, property: &str, value: &str) -> Result<()> {
-        self.config
-            .properties
-            .insert(property.to_string(), value.to_string());
-        self.save_config()?;
-        Ok(())
+        self.update_config(|config| {
+            config
+                .properties
+                .insert(property.to_string(), value.to_string());
+            Ok(())
+        })
     }
 
     /// Set a publisher property
@@ -1650,21 +1708,16 @@ impl WritableRepository for FileBackend {
         property: &str,
         value: &str,
     ) -> Result<()> {
-        // Check if the publisher exists
-        if !self.config.publishers.contains(&publisher.to_string()) {
-            return Err(RepositoryError::PublisherNotFound(publisher.to_string()));
-        }
-
-        // Create the property key in the format "publisher/property"
-        let key = format!("{}/{}", publisher, property);
-
-        // Set the property
-        self.config.properties.insert(key, value.to_string());
-
-        // Save the updated configuration
-        self.save_config()?;
-
-        Ok(())
+        self.update_config(|config| {
+            if !config.publishers.contains(&publisher.to_string()) {
+                return Err(RepositoryError::PublisherNotFound(publisher.to_string()));
+            }
+            // The property key has the format "publisher/property"
+            config
+                .properties
+                .insert(format!("{}/{}", publisher, property), value.to_string());
+            Ok(())
+        })
     }
 
     /// Rebuild repository metadata
@@ -1673,6 +1726,11 @@ impl WritableRepository for FileBackend {
             "rebuild called with publisher: {:?}, no_catalog: {}, no_index: {}",
             publisher, no_catalog, no_index
         );
+
+        let _lock = match self.rebuild_managed(publisher, no_catalog)? {
+            Some(lock) => lock,
+            None => return Ok(()),
+        };
 
         // Filter publishers if specified
         let publishers = if let Some(pub_name) = publisher {
@@ -1720,6 +1778,11 @@ impl WritableRepository for FileBackend {
 
     /// Refresh repository metadata
     fn refresh(&self, publisher: Option<&str>, no_catalog: bool, _no_index: bool) -> Result<()> {
+        let _lock = match self.rebuild_managed(publisher, no_catalog)? {
+            Some(lock) => lock,
+            None => return Ok(()),
+        };
+
         // Filter publishers if specified
         let publishers = if let Some(pub_name) = publisher {
             if !self.config.publishers.contains(&pub_name.to_string()) {
@@ -1761,22 +1824,142 @@ impl WritableRepository for FileBackend {
 
     /// Set the default publisher for the repository
     fn set_default_publisher(&mut self, publisher: &str) -> Result<()> {
-        // Check if the publisher exists
-        if !self.config.publishers.contains(&publisher.to_string()) {
-            return Err(RepositoryError::PublisherNotFound(publisher.to_string()));
-        }
-
-        // Set the default publisher
-        self.config.default_publisher = Some(publisher.to_string());
-
-        // Save the updated configuration
-        self.save_config()?;
-
-        Ok(())
+        self.update_config(|config| {
+            if !config.publishers.contains(&publisher.to_string()) {
+                return Err(RepositoryError::PublisherNotFound(publisher.to_string()));
+            }
+            config.default_publisher = Some(publisher.to_string());
+            Ok(())
+        })
     }
 }
 
 impl FileBackend {
+    /// Backend view of a staged generation directory, which mirrors the
+    /// repository layout. Used to build catalogs before publication.
+    pub(crate) fn for_generation_root(path: &Path, publishers: Vec<String>) -> Self {
+        FileBackend {
+            path: path.to_path_buf(),
+            config: RepositoryConfig {
+                publishers,
+                ..Default::default()
+            },
+            catalog_manager: None,
+            obsoleted_manager: None,
+        }
+    }
+
+    /// On a generation-managed repository, rebuild catalogs in a new
+    /// generation and publish it atomically, so readers keep the previous
+    /// complete catalog until the switch, and return `None`. On an unmanaged
+    /// repository return the writer lock to hold during the in-place rebuild.
+    fn rebuild_managed(
+        &self,
+        publisher: Option<&str>,
+        no_catalog: bool,
+    ) -> Result<Option<super::generation::WriterLock>> {
+        if let Some(lock) = self.lock_or_managed("rebuilding catalogs in place")? {
+            return Ok(Some(lock));
+        }
+        if no_catalog {
+            // Search data lives in the catalog shards; there is nothing else
+            // to rebuild.
+            return Ok(None);
+        }
+        let mut store = super::generation::GenerationStore::open(&self.path)?;
+        let published = store.current().publishers.clone();
+        let publishers = match publisher {
+            Some(p) if !published.iter().any(|c| c == p) => {
+                return Err(RepositoryError::PublisherNotFound(p.to_string()));
+            }
+            Some(p) => vec![p.to_string()],
+            None => published,
+        };
+        let generation = store.rebuild(&publishers)?;
+        info!(
+            "Rebuilt catalogs for {:?} in generation {}",
+            publishers, generation.id
+        );
+        Ok(None)
+    }
+
+    /// The writer lock for an in-place write of an unmanaged repository, or
+    /// `None` if the repository publishes through generations.
+    fn lock_or_managed(&self, operation: &str) -> Result<Option<super::generation::WriterLock>> {
+        match super::generation::lock_unmanaged(&self.path, operation) {
+            Ok(lock) => Ok(Some(lock)),
+            Err(super::generation::GenerationError::ManagedRepository { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Re-read the configuration another writer may have changed.
+    fn reload_config(&mut self) -> Result<()> {
+        if self.path.join(REPOSITORY_CONFIG_FILENAME).exists() {
+            self.config = Self::read_config_file(&self.path)?;
+            Self::apply_generation_view(&self.path, &mut self.config)?;
+        }
+        Ok(())
+    }
+
+    /// `pkg6.repository` exactly as written.
+    pub(crate) fn read_config_file(repo: &Path) -> Result<RepositoryConfig> {
+        let path = repo.join(REPOSITORY_CONFIG_FILENAME);
+        let data = fs::read_to_string(&path)
+            .map_err(|e| RepositoryError::ConfigReadError(format!("{}: {}", path.display(), e)))?;
+        Ok(serde_json::from_str(&data)?)
+    }
+
+    /// On a generation-managed repository, take the publisher list and
+    /// default publisher from the published generation. They then change
+    /// with the same `rename(2)` as the catalogs, not with the later
+    /// configuration write, so readers never see new catalogs with an old
+    /// publisher list or the reverse.
+    fn apply_generation_view(repo: &Path, config: &mut RepositoryConfig) -> Result<()> {
+        if let Some(info) = super::generation::published_generation(repo)? {
+            let (publishers, default) =
+                info.publisher_view(&config.publishers, config.default_publisher.as_deref());
+            config.publishers = publishers;
+            config.default_publisher = default;
+        }
+        Ok(())
+    }
+
+    /// Apply `change` to the on-disk configuration under the writer lock.
+    fn update_config(
+        &mut self,
+        change: impl FnOnce(&mut RepositoryConfig) -> Result<()>,
+    ) -> Result<()> {
+        let _lock = super::generation::WriterLock::acquire(&self.path, true)?;
+        self.reload_config()?;
+        change(&mut self.config)?;
+        self.save_config()
+    }
+
+    /// Writer lock for in-place catalog writes; fails on a managed repository.
+    fn lock_catalog_write(&self, operation: &str) -> Result<super::generation::WriterLock> {
+        Ok(super::generation::lock_unmanaged(&self.path, operation)?)
+    }
+
+    /// Fail if the repository publishes through generations. For callers
+    /// that must refuse before their first mutation (for example receivers
+    /// that add a publisher before opening a transaction).
+    pub fn reject_if_managed(&self, operation: &str) -> Result<()> {
+        if super::generation::GenerationStore::is_managed(&self.path) {
+            return Err(super::generation::GenerationError::ManagedRepository {
+                path: self.path.clone(),
+                operation: operation.to_string(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Write `publisher/<name>/pub.p5i`.
+    pub(crate) fn write_pub_p5i(&self, publisher: &str) -> Result<()> {
+        self.create_pub_p5i_file(publisher)
+    }
+
     /// Read packages for a publisher from active.db. Used by the public
     /// list_packages path when a catalog shard exists. Stays internal so
     /// rebuild_catalog_batched (which *produces* the shard) keeps walking
@@ -1784,6 +1967,7 @@ impl FileBackend {
     fn list_packages_from_catalog(
         &self,
         active_path: &Path,
+        query: &str,
         publisher: &str,
         regex: Option<&str>,
         packages: &mut Vec<PackageInfo>,
@@ -1792,8 +1976,10 @@ impl FileBackend {
         let conn = Connection::open_with_flags(active_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| {
                 RepositoryError::Other(format!(
-                    "Failed to open active.db for publisher {}: {}",
-                    publisher, e
+                    "Failed to open {} for publisher {}: {}",
+                    active_path.display(),
+                    publisher,
+                    e
                 ))
             })?;
         let compiled = match regex {
@@ -1807,7 +1993,7 @@ impl FileBackend {
             None => None,
         };
         let mut stmt = conn
-            .prepare("SELECT stem, version FROM packages")
+            .prepare(query)
             .map_err(|e| RepositoryError::Other(format!("Prepare failed: {}", e)))?;
         let rows = stmt
             .query_map([], |row| {
@@ -1878,6 +2064,7 @@ impl FileBackend {
         publisher: &str,
         attrs: &mut crate::repository::catalog::CatalogAttrs,
     ) -> Result<String> {
+        let _lock = self.lock_catalog_write("writing catalog.attrs")?;
         let catalog_dir = Self::construct_catalog_path(&self.path, publisher);
         std::fs::create_dir_all(&catalog_dir)?;
         let attrs_path = catalog_dir.join("catalog.attrs");
@@ -1891,6 +2078,7 @@ impl FileBackend {
         part_name: &str,
         part: &mut crate::repository::catalog::CatalogPart,
     ) -> Result<String> {
+        let _lock = self.lock_catalog_write("writing a catalog part")?;
         if part_name.contains('/') || part_name.contains('\\') {
             return Err(RepositoryError::PathPrefixError(part_name.to_string()));
         }
@@ -1914,6 +2102,7 @@ impl FileBackend {
         >,
         signature_sha1: Option<String>,
     ) -> Result<()> {
+        let _lock = self.lock_catalog_write("appending a catalog update log")?;
         let catalog_dir = Self::construct_catalog_path(&self.path, publisher);
         std::fs::create_dir_all(&catalog_dir)?;
 
@@ -1964,6 +2153,7 @@ impl FileBackend {
         locale: &str,
         timestamp_basic: Option<String>,
     ) -> Result<PathBuf> {
+        let _lock = self.lock_catalog_write("rotating a catalog update log")?;
         let catalog_dir = Self::construct_catalog_path(&self.path, publisher);
         std::fs::create_dir_all(&catalog_dir)?;
         let ts_basic = match timestamp_basic {
@@ -2021,7 +2211,9 @@ impl FileBackend {
         conf.with_section(Some("CONFIGURATION")).set("version", "4");
 
         // Write the INI file
-        conf.write_to_file(legacy_config_path)?;
+        let mut ini_data = Vec::new();
+        conf.write_to(&mut ini_data)?;
+        write_file_atomically(&legacy_config_path, &ini_data)?;
 
         Ok(())
     }
@@ -2765,6 +2957,7 @@ impl FileBackend {
         log_filename: &str,
         log: &crate::repository::catalog::UpdateLog,
     ) -> Result<()> {
+        let _lock = self.lock_catalog_write("writing a catalog update log")?;
         if log_filename.contains('/') || log_filename.contains('\\') {
             return Err(RepositoryError::PathPrefixError(log_filename.to_string()));
         }
@@ -2827,6 +3020,14 @@ impl FileBackend {
         &mut self,
         publisher: &str,
     ) -> Result<std::sync::MutexGuard<'_, crate::repository::catalog::CatalogManager>> {
+        if super::generation::GenerationStore::is_managed(&self.path) {
+            // The manager writes into the live catalog directory.
+            return Err(super::generation::GenerationError::ManagedRepository {
+                path: self.path.clone(),
+                operation: "editing the catalog in place".to_string(),
+            }
+            .into());
+        }
         if self.catalog_manager.is_none() {
             let publisher_dir = self.path.join("publisher");
             let manager =
@@ -3204,6 +3405,33 @@ impl FileBackend {
 /// grouping (src/modules/catalog.py): legacy clients read `pkg.obsolete` and
 /// `pkg.renamed` only from the dependency part (`pkg_solver.__fmri_loadstate`,
 /// `Image` package state), so placing them elsewhere hides the flags.
+/// Write `path` via a synced temporary file and rename(2), so readers and
+/// crash recovery see either the old or the new content.
+fn write_file_atomically(path: &Path, content: &[u8]) -> Result<()> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{}.tmp", name));
+    {
+        let mut f = File::create(&tmp).map_err(|e| RepositoryError::FileWriteError {
+            path: tmp.clone(),
+            source: e,
+        })?;
+        f.write_all(content)
+            .and_then(|_| f.sync_all())
+            .map_err(|e| RepositoryError::FileWriteError {
+                path: tmp.clone(),
+                source: e,
+            })?;
+    }
+    fs::rename(&tmp, path).map_err(|e| RepositoryError::FileRenameError {
+        from: tmp,
+        to: path.to_path_buf(),
+        source: e,
+    })
+}
+
 fn is_dependency_part_attr(key: &str) -> bool {
     key.starts_with("variant")
         || key.starts_with("facet")

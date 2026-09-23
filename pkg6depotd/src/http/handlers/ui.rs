@@ -106,7 +106,7 @@ fn parse_version_parts(version_full: &str) -> VersionParts {
 // Helper: read last-modified from catalog.attrs for a publisher
 // ---------------------------------------------------------------------------
 fn read_catalog_last_modified(repo: &DepotRepo, publisher: &str) -> Option<String> {
-    let attrs_path = repo.shard_dir(publisher).join("catalog.attrs");
+    let attrs_path = repo.shard_dir(publisher).ok()?.join("catalog.attrs");
     let content = std::fs::read_to_string(&attrs_path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
     let last_modified = json.get("last-modified")?.as_str()?;

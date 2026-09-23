@@ -222,6 +222,19 @@ pub enum RepositoryError {
         help("Check that the archive is valid and accessible")
     )]
     ArchiveError(String),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Generation(Box<generation::GenerationError>),
+}
+
+impl From<generation::GenerationError> for RepositoryError {
+    fn from(err: generation::GenerationError) -> Self {
+        match err {
+            generation::GenerationError::Repository(inner) => *inner,
+            other => RepositoryError::Generation(Box::new(other)),
+        }
+    }
 }
 
 // Implement From for common error types
@@ -263,7 +276,9 @@ pub mod archive_writer;
 pub mod catalog;
 mod catalog_writer;
 pub(crate) mod file_backend;
+pub mod generation;
 mod obsoleted;
+pub mod pkg5_import;
 pub mod progress;
 mod rest_backend;
 pub mod shard_sync;
@@ -279,7 +294,13 @@ pub use catalog::{
     CatalogAttrs, CatalogError, CatalogManager, CatalogOperationType, CatalogPart, UpdateLog,
 };
 pub use file_backend::{FileBackend, IndexEntry};
+pub use generation::{
+    FailPoint, GenerationError, GenerationInfo, GenerationReason, GenerationStore, ImportReceipt,
+};
 pub use obsoleted::{ObsoletedPackageManager, ObsoletedPackageMetadata};
+pub use pkg5_import::{
+    DEFAULT_MAX_ARCHIVE_ENTRIES, Pkg5ImportError, Pkg5ImportOptions, Pkg5ImportOutcome, import_pkg5,
+};
 pub use progress::{NoopProgressReporter, ProgressInfo, ProgressReporter};
 pub use rest_backend::RestBackend;
 

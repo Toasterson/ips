@@ -38,7 +38,7 @@ pub async fn get_shard_index(
     State(repo): State<Arc<DepotRepo>>,
     Path(publisher): Path<String>,
 ) -> Result<Response, DepotError> {
-    let shard_dir = repo.shard_dir(&publisher);
+    let shard_dir = repo.shard_dir(&publisher)?;
     let index_path = shard_dir.join("catalog.attrs");
 
     if !index_path.exists() {
@@ -61,7 +61,7 @@ pub async fn get_shard_blob(
     Path((publisher, sha256)): Path<(String, String)>,
     req: Request,
 ) -> Result<Response, DepotError> {
-    let shard_dir = repo.shard_dir(&publisher);
+    let shard_dir = repo.shard_dir(&publisher)?;
     let index_path = shard_dir.join("catalog.attrs");
 
     if !index_path.exists() {

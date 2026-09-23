@@ -90,8 +90,8 @@ We carry the original pkg5 reference documentation in `doc/pkg5_docs/` to guide 
 | Feature | Our doc | Implementation |
 |---------|---------|----------------|
 | **p5i publisher files** | `doc/pub_p5i_implementation.md` | `FileBackend` generates `pub.p5i` JSON files per publisher for backward compat with `pkg set-publisher -p` |
-| **Obsoleted packages** | `doc/obsoleted_packages.md` | Detects `pkg.obsolete=true` during pkg5 import; stores in `<repo>/obsoleted/` with structured metadata |
-| **pkg5 import** | `pkg6repo/src/pkg5_import.rs` | Reads `pkg5.repository`, two-level hash dirs, gzip payloads, URL-encoded versions; converts to pkg6 format |
+| **Obsoleted packages** | `doc/obsoleted_packages.md` | pkg5 `pkg.obsolete=true` packages stay in the main catalog; `<repo>/obsoleted/` is a legacy inspection store |
+| **pkg5 import** | `libips/src/repository/pkg5_import.rs`, ADR-005 | Atomic import of a multi-publisher `.p5p`: validate everything, stage an immutable generation, publish with one `rename(2)`; byte-exact manifests and pkg5-named gzip payloads |
 | **Depot REST API** | `pkg6depotd/src/http/` | Serves same HTTP paths as pkg5 depot (`/file/0/`, `/manifest/0/`, `/catalog/0/`, `/publisher/0/`) |
 | **libips integration** | `doc/forge_docs/ips_integration.md` | Typed API replacing pkg5 CLI tools (`pkgsend`, `pkgmogrify`, `pkgdepend`, `pkglint`, `pkgrepo`) |
 | **Error handling** | `doc/rust_docs/error_handling.md` | miette + thiserror patterns with `ips::module::variant` codes |

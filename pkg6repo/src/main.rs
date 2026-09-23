@@ -357,7 +357,12 @@ enum Commands {
         publisher: Option<String>,
     },
 
-    /// Import a pkg5 repository
+    /// Import a pkg5 repository or .p5p archive as one atomic batch
+    ///
+    /// All packages of all selected publishers become visible in a single
+    /// repository generation switch, or none do. Re-importing an archive that
+    /// was already committed succeeds without changes. A package whose exact
+    /// FMRI is already published with a different manifest rejects the batch.
     ImportPkg5 {
         /// Path to the pkg5 repository (directory or p5p archive)
         #[clap(short = 's', long)]
@@ -367,9 +372,26 @@ enum Commands {
         #[clap(short = 'd', long)]
         destination: PathBuf,
 
-        /// Publisher to import (defaults to the first publisher found)
+        /// Publisher to import; repeat for several (defaults to all publishers
+        /// in the source)
         #[clap(short = 'p', long)]
-        publisher: Option<String>,
+        publisher: Vec<String>,
+
+        /// Convert an existing repository that holds packages in the
+        /// pre-generation layout. Each of its pkg/, catalog/ and catalog2/
+        /// paths is briefly absent while it is replaced by a link, so run this
+        /// once while readers are stopped or can retry.
+        #[clap(long)]
+        adopt_existing: bool,
+
+        /// Most files and directories the archive may unpack
+        #[clap(long, default_value_t = libips::repository::DEFAULT_MAX_ARCHIVE_ENTRIES)]
+        max_archive_entries: u64,
+
+        /// Most file bytes the archive may unpack (default: the archive's
+        /// own size, which unpacking never exceeds)
+        #[clap(long)]
+        max_extract_bytes: Option<u64>,
     },
 
     /// List obsoleted packages in a repository
@@ -1370,6 +1392,9 @@ fn main() -> Result<()> {
             source,
             destination,
             publisher,
+            adopt_existing,
+            max_archive_entries,
+            max_extract_bytes,
         } => {
             info!(
                 "Importing pkg5 repository from {} to {}",
@@ -1377,13 +1402,14 @@ fn main() -> Result<()> {
                 destination.display()
             );
 
-            // Create a new Pkg5Importer
-            let mut importer = Pkg5Importer::new(source, destination)?;
-
-            // Import the repository
-            importer.import(publisher.as_deref())?;
-
-            info!("Repository imported successfully");
+            let importer = Pkg5Importer::new(source, destination)?;
+            importer.import(libips::repository::Pkg5ImportOptions {
+                publishers: (!publisher.is_empty()).then(|| publisher.clone()),
+                adopt_existing: *adopt_existing,
+                max_archive_entries: *max_archive_entries,
+                max_extract_bytes: *max_extract_bytes,
+                ..Default::default()
+            })?;
             Ok(())
         }
 
@@ -1736,15 +1762,18 @@ fn main() -> Result<()> {
 
             // Open the repository
             let mut repo = FileBackend::open(repo_uri_or_path)?;
+            // Restoring publishes through a transaction; refuse before the
+            // side-store record is removed.
+            repo.reject_if_managed("restoring an obsoleted package")?;
 
-            // Get the manifest content and remove the obsoleted package
-            let manifest_content = {
-                // Get the obsoleted package manager
-                let obsoleted_manager = repo.get_obsoleted_manager()?;
-
-                // Get the manifest content and remove the obsoleted package
-                obsoleted_manager.get_and_remove_obsoleted_package(publisher, &parsed_fmri)?
-            }; // obsoleted_manager is dropped here, releasing the mutable borrow on repo
+            // Read the manifest; the side-store record is removed only after
+            // the package is published again.
+            let manifest_content = repo
+                .get_obsoleted_manager()?
+                .get_obsoleted_package_manifest(publisher, &parsed_fmri)?
+                .ok_or_else(|| {
+                    Pkg6RepoError::from(format!("Obsoleted package not found: {}", parsed_fmri))
+                })?;
 
             // Parse the manifest
             let manifest = libips::actions::Manifest::parse_string(manifest_content)?;
@@ -1760,6 +1789,9 @@ fn main() -> Result<()> {
 
             // Commit the transaction
             transaction.commit()?;
+
+            repo.get_obsoleted_manager()?
+                .remove_obsoleted_package(publisher, &parsed_fmri)?;
 
             // Rebuild the catalog if not disabled
             if !no_rebuild {

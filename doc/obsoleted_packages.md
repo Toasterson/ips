@@ -20,16 +20,17 @@ This document describes the handling of obsoleted packages in the Image Packagin
 > The former `pkg6repo obsolete-package` command, which moved a manifest from
 > the active repository into this store, has been removed. The `*-obsoleted`
 > commands below inspect or maintain the store only. The pkg5 importer
-> (`import-pkg5`) still diverts `pkg.obsolete=true` packages into the store
-> instead of the catalog; that hides them from clients and is tracked for the
-> importer rework (#38).
+> (`import-pkg5`) no longer writes to the store: `pkg.obsolete=true` packages
+> are published in the main repository and catalog, as in pkg5 (#38, ADR-005).
+> Entries earlier importer versions diverted here stay until they are
+> re-imported or reviewed under #39/#40.
 
 ## Overview
 
 The obsoleted store keeps a record of package versions outside the active
 repository: a metadata JSON document per version (status, date, optional
 deprecation message and replacements) and optionally the original manifest.
-It exists today because the pkg5 importer places `pkg.obsolete=true`
+It exists because earlier importer versions placed `pkg.obsolete=true`
 packages there and because earlier pkg6 builds provided `obsolete-package`.
 
 ## Directory Structure
@@ -250,7 +251,12 @@ pkg6repo import-obsoleted -s /path/to/repo -i /path/to/export.json -p new-publis
 
 ## Importing Obsoleted Packages
 
-When importing packages from a pkg5 repository, packages with the `pkg.obsolete` attribute are currently stored in the obsoleted directory instead of the main repository. This departs from pkg5, where such packages stay in the catalog so clients can act on them (for example, to remove an obsolete package on update). Correcting it is part of the importer rework (#38).
+`import-pkg5` publishes packages with `pkg.obsolete=true` (and `pkg.renamed=true`)
+like any other package: the manifest is stored byte-for-byte in the main
+repository and the flag reaches clients through `catalog.dependency.C`, as in
+pkg5. Clients need this to remove an obsolete package on update. Earlier
+importer versions stored such packages in the obsoleted directory instead;
+re-importing the source archive publishes them properly.
 
 ## API
 
