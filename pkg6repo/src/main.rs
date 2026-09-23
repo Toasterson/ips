@@ -1,5 +1,6 @@
 mod error;
 mod pkg5_import;
+mod retire;
 use error::{Pkg6RepoError, Result};
 use pkg5_import::Pkg5Importer;
 
@@ -375,6 +376,19 @@ enum Commands {
         /// own size, which unpacking never exceeds)
         #[clap(long)]
         max_extract_bytes: Option<u64>,
+
+        /// Policy whose `import { exclude ... }` and `keep` rules apply
+        /// (default: <destination>/policy.kdl if present)
+        #[clap(long)]
+        policy: Option<PathBuf>,
+    },
+
+    /// Hide superseded package versions from catalogs and search (exact
+    /// manifest and payload requests keep working), restore them, and
+    /// inspect retirement state. Nothing is deleted.
+    Retire {
+        #[clap(subcommand)]
+        command: retire::RetireCommand,
     },
 
     /// List entries of the legacy obsoleted store
@@ -582,8 +596,10 @@ fn obsoleted_store_in_use(repo: &FileBackend) -> bool {
         .unwrap_or(false)
 }
 
+/// Render errors as miette diagnostics (message, code and help), so
+/// operators see blockers and the suggested fixes rather than a `Debug` dump.
 fn main() -> miette::Result<()> {
-    Ok(run()?)
+    run().map_err(miette::Report::new)
 }
 
 fn run() -> Result<()> {
@@ -985,6 +1001,7 @@ fn run() -> Result<()> {
             adopt_existing,
             max_archive_entries,
             max_extract_bytes,
+            policy,
         } => {
             info!(
                 "Importing pkg5 repository from {} to {}",
@@ -992,16 +1009,20 @@ fn run() -> Result<()> {
                 destination.display()
             );
 
+            let policy = retire::load_policy(Some(destination), policy.as_deref(), &[])?;
             let importer = Pkg5Importer::new(source, destination)?;
             importer.import(libips::repository::Pkg5ImportOptions {
                 publishers: (!publisher.is_empty()).then(|| publisher.clone()),
                 adopt_existing: *adopt_existing,
                 max_archive_entries: *max_archive_entries,
                 max_extract_bytes: *max_extract_bytes,
+                policy: Some(policy),
                 ..Default::default()
             })?;
             Ok(())
         }
+
+        Commands::Retire { command } => retire::run(command),
 
         Commands::ListObsoleted {
             repo,

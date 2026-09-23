@@ -33,6 +33,9 @@
 //!
 //! All writers serialise on an exclusive `flock(2)` of `<repo>/.pkg6-writer.lock`.
 
+use super::retention::state::{
+    AUDIT_DIR, AuditRecord, RETIREMENT_DIR, RetirementState, STATE_FILE,
+};
 use super::{
     FileBackend, ReadableRepository, RepositoryConfig, RepositoryError, WritableRepository,
 };
@@ -239,6 +242,10 @@ pub enum GenerationReason {
     AddPublisher { publisher: String },
     /// A publisher was removed.
     RemovePublisher { publisher: String },
+    /// Package versions were hidden from catalogs and search (retirement).
+    Retire { fmris: usize },
+    /// Hidden package versions were restored to catalogs and search.
+    Restore { fmris: usize },
 }
 
 /// Contents of `generation.json`.
@@ -327,6 +334,10 @@ pub struct ImportReceipt {
     pub added: Vec<String>,
     /// FMRIs already present with identical manifests.
     pub skipped: Vec<String>,
+    /// FMRIs the import policy left out (never imported, listed so an
+    /// exclusion is never silent).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<String>,
 }
 
 impl ImportReceipt {
@@ -539,6 +550,16 @@ impl GenerationStore {
         }
     }
 
+    /// Every import receipt of the published generation.
+    pub fn receipts(&self) -> Result<Vec<ImportReceipt>> {
+        read_receipts(&self.current_dir())
+    }
+
+    /// Hidden versions of the published generation.
+    pub fn retirement_state(&self) -> Result<RetirementState> {
+        read_retirement_state(&self.current_dir())
+    }
+
     /// A scratch directory on the repository filesystem, removed by the
     /// next writer if the caller crashes before cleaning it up.
     pub fn scratch_dir(&self) -> Result<PathBuf> {
@@ -595,6 +616,7 @@ impl GenerationStore {
                 staged.info.publishers.push(publisher.clone());
             }
             clone_files(&cur.join(RECEIPTS_DIR), &staged.dir.join(RECEIPTS_DIR))?;
+            clone_tree(&cur.join(RETIREMENT_DIR), &staged.dir.join(RETIREMENT_DIR))?;
         }
         for publisher in rebuild {
             staged.ensure_publisher(publisher)?;
@@ -610,6 +632,20 @@ impl GenerationStore {
         staged: StagedGeneration,
         fail_point: Option<FailPoint>,
     ) -> Result<GenerationInfo> {
+        self.commit_gated(staged, fail_point, || Ok::<(), GenerationError>(()))
+    }
+
+    /// [`GenerationStore::commit`] with a final `gate`, run once the catalogs
+    /// are built and the generation is durable, immediately before the
+    /// switch. What the gate returns (a lock, say) is held until the switch
+    /// is done. If the gate fails, nothing is published and the unpublished
+    /// generation is removed.
+    pub fn commit_gated<G, E: From<GenerationError>>(
+        &mut self,
+        staged: StagedGeneration,
+        fail_point: Option<FailPoint>,
+        gate: impl FnOnce() -> std::result::Result<G, E>,
+    ) -> std::result::Result<GenerationInfo, E> {
         let mut staged = staged;
         let previous: HashSet<String> = self.current.publishers.iter().cloned().collect();
         staged.info.added_publishers = staged
@@ -638,16 +674,27 @@ impl GenerationStore {
             ensure_publisher_links(&self.repo, publisher, false)?;
         }
 
+        let guard = match gate() {
+            Ok(g) => g,
+            Err(e) => {
+                if let Err(cleanup) = remove_path(&self.repo.join(GENERATIONS_DIR).join(&info.id)) {
+                    warn!(generation = %info.id, error = %cleanup, "cannot remove unpublished generation; the next writer removes it");
+                }
+                return Err(e);
+            }
+        };
+
         if fail_point == Some(FailPoint::BeforeSwitch) {
-            return Err(GenerationError::InjectedFailure(FailPoint::BeforeSwitch));
+            return Err(GenerationError::InjectedFailure(FailPoint::BeforeSwitch).into());
         }
 
         switch_current(&self.repo.join(GENERATIONS_DIR), &info.id)?;
+        drop(guard);
         info!(generation = %info.id, "published repository generation");
         self.current = info.clone();
 
         if fail_point == Some(FailPoint::AfterSwitch) {
-            return Err(GenerationError::InjectedFailure(FailPoint::AfterSwitch));
+            return Err(GenerationError::InjectedFailure(FailPoint::AfterSwitch).into());
         }
 
         self.reconcile()?;
@@ -910,7 +957,59 @@ impl StagedGeneration {
         }
         self.info.publishers.retain(|p| p != publisher);
         self.rebuild.remove(publisher);
+        let mut state = self.retirement_state()?;
+        let before = state.hidden.len();
+        state.hidden.retain(|_, e| e.publisher != publisher);
+        if state.hidden.len() != before {
+            self.put_retirement_state(&state)?;
+        }
         self.drop_publisher_from_receipts(publisher)
+    }
+
+    /// Rebuild the catalogs of `publisher` on commit.
+    pub fn mark_rebuild(&mut self, publisher: &str) -> Result<()> {
+        if !self.has_publisher(publisher) {
+            return Err(RepositoryError::PublisherNotFound(publisher.to_string()).into());
+        }
+        self.rebuild.insert(publisher.to_string());
+        Ok(())
+    }
+
+    /// Hidden versions of this generation (inherited from its parent until
+    /// replaced).
+    pub fn retirement_state(&self) -> Result<RetirementState> {
+        read_retirement_state(&self.dir)
+    }
+
+    /// Replace the hidden-version state. Catalogs of publishers whose hidden
+    /// set changes must be rebuilt ([`StagedGeneration::mark_rebuild`]).
+    pub fn put_retirement_state(&mut self, state: &RetirementState) -> Result<()> {
+        let dir = self.dir.join(RETIREMENT_DIR);
+        fs::create_dir_all(&dir).at(&dir)?;
+        let path = dir.join(STATE_FILE);
+        // Hard-linked from the parent: replace, never rewrite in place.
+        if fs::symlink_metadata(&path).is_ok() {
+            fs::remove_file(&path).at(&path)?;
+            self.new_files.retain(|f| f != &path);
+        }
+        let json = serde_json::to_vec_pretty(state).map_err(|e| {
+            GenerationError::Corrupt(format!("serialising retirement state: {}", e))
+        })?;
+        write_new_file(&path, &json)?;
+        self.new_files.push(path);
+        Ok(())
+    }
+
+    /// Record an audit record of a retirement change.
+    pub fn put_audit(&mut self, record: &AuditRecord) -> Result<()> {
+        let dir = self.dir.join(RETIREMENT_DIR).join(AUDIT_DIR);
+        fs::create_dir_all(&dir).at(&dir)?;
+        let path = dir.join(format!("{}.json", record.operation));
+        let json = serde_json::to_vec_pretty(record)
+            .map_err(|e| GenerationError::Corrupt(format!("serialising audit record: {}", e)))?;
+        write_new_file(&path, &json)?;
+        self.new_files.push(path);
+        Ok(())
     }
 
     /// A receipt says its publishers' packages are published. After removing
@@ -986,7 +1085,14 @@ impl StagedGeneration {
         if self.rebuild.is_empty() {
             return Ok(());
         }
-        let backend = FileBackend::for_generation_root(&self.dir, self.info.publishers.clone());
+        // Retired versions stay in pkg/ for exact fetches but are left out of
+        // every catalog (and so of the search shards built from it).
+        let hidden = self.retirement_state()?.hidden.into_keys().collect();
+        let backend = FileBackend::for_generation_root_hiding(
+            &self.dir,
+            self.info.publishers.clone(),
+            hidden,
+        );
         for publisher in &self.rebuild {
             info!(publisher, generation = %self.info.id, "building catalogs");
             let pdir = self.dir.join("publisher").join(publisher);
@@ -1099,6 +1205,59 @@ fn read_current(repo: &Path) -> Result<Option<GenerationInfo>> {
         )));
     }
     Ok(Some(info))
+}
+
+/// Hidden versions recorded in the generation directory `dir`.
+pub fn read_retirement_state(dir: &Path) -> Result<RetirementState> {
+    let path = dir.join(RETIREMENT_DIR).join(STATE_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| GenerationError::Corrupt(format!("{}: {}", path.display(), e))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(RetirementState::default()),
+        Err(e) => Err(e).at(&path),
+    }
+}
+
+/// Retirement audit records of the generation directory `dir`, oldest first.
+pub fn read_audit_records(dir: &Path) -> Result<Vec<AuditRecord>> {
+    let adir = dir.join(RETIREMENT_DIR).join(AUDIT_DIR);
+    let entries = match fs::read_dir(&adir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).at(&adir),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry.at(&adir)?.path();
+        let bytes = fs::read(&path).at(&path)?;
+        out.push(
+            serde_json::from_slice::<AuditRecord>(&bytes)
+                .map_err(|e| GenerationError::Corrupt(format!("{}: {}", path.display(), e)))?,
+        );
+    }
+    out.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.operation.cmp(&b.operation)));
+    Ok(out)
+}
+
+/// Import receipts of the generation directory `dir`.
+pub fn read_receipts(dir: &Path) -> Result<Vec<ImportReceipt>> {
+    let rdir = dir.join(RECEIPTS_DIR);
+    let entries = match fs::read_dir(&rdir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).at(&rdir),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry.at(&rdir)?.path();
+        let bytes = fs::read(&path).at(&path)?;
+        out.push(
+            serde_json::from_slice::<ImportReceipt>(&bytes).map_err(|e| {
+                GenerationError::Corrupt(format!("receipt {}: {}", path.display(), e))
+            })?,
+        );
+    }
+    Ok(out)
 }
 
 fn read_info(dir: &Path) -> Result<GenerationInfo> {

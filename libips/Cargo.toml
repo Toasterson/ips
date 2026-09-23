@@ -47,7 +47,15 @@ rayon = "1.11"
 zip = { version = "2", features = ["zstd"] }
 # Validating .p5p unpacking (no external tar(1), no link entries)
 tar = { version = "0.4", default-features = false }
+# Repository policy files (retirement, keep rules, snapshots, import exclusions)
+knuffel = "3.2.0"
 
 [features]
 default = ["bundled-sqlite"]
 bundled-sqlite = ["rusqlite/bundled"]
+# Test-only: lets integration tests pin the retention clock. Never enabled by
+# the binaries (pkg6repo, pkg6depotd).
+test-clock = []
+
+[dev-dependencies]
+libips = { path = ".", features = ["test-clock"] }

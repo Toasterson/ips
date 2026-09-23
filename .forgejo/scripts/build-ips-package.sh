@@ -63,6 +63,9 @@ stage "${root}/packaging/ips/pkg6depotd.kdl" etc/pkg6depotd/pkg6depotd.kdl
 stage "${root}/packaging/ips/pkg6depotd.xml" lib/svc/manifest/application/pkg/pkg6depotd.xml
 stage "${root}/packaging/ips/svc-pkg6depotd" lib/svc/method/svc-pkg6depotd
 stage "${root}/packaging/ips/pkg6depotd.8" usr/share/man/man8/pkg6depotd.8
+stage "${root}/pkg6repo/pkg6repo.1" usr/share/man/man1/pkg6repo.1
+stage "${root}/man/man5/pkg6-policy.5" usr/share/man/man5/pkg6-policy.5
+stage "${root}/man/man8/pkg6repo-retire.8" usr/share/man/man8/pkg6repo-retire.8
 
 # 1. Expand the template.
 pkgmogrify \

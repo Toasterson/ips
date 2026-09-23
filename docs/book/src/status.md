@@ -13,25 +13,22 @@ has been cut.
 | Local import of historical pkg5 content | [Historical imports](historical-imports.md) |
 | Direct TLS: certificate files, ACME http-01 and dns-01 (Cloudflare, Gandi) | [TLS and ACME](tls.md) |
 | OTLP/HTTP traces, metrics and logs through bounded queues | [OpenTelemetry](telemetry.md) |
+| Retirement, protected snapshots, import exclusions, depot access recording | [Retention](retention.md) |
 | Tag-only release pipeline with provenance and immutable assets | [Release process](release.md) |
 
 ## Pending
 
-- **Retirement, snapshots, import exclusions, access recording.** These
-  are unmerged work in progress, not on the integration line and not
-  packaged. See
-  [Retention](retention.md).
 - **Purge.** The second retirement stage is not implemented anywhere.
 - **Operation telemetry.** `pkg6depotd.operations` and
   `pkg6depotd.operation.duration` are defined but not recorded.
-- **Ingest into managed repositories.** `pkg6recv`,
-  `pkg6repo import-archive`, `restore-obsoleted` and transaction
-  publishing are refused on generation-managed repositories. A
+- **Ingest into managed repositories.** `pkg6recv`, `restore-obsoleted`
+  and transaction publishing are refused on generation-managed repositories. A
   generation-backed batch writer is post-v1.
 - **Remote publication and OIDC/RBAC.** Deferred past v1. HTTP is
   read-only.
-- **Manual pages.** Only `pkg6depotd(8)` is packaged. There are no packaged
-  pages for `pkg6repo`, `pkg6recv` or `pkgtree`.
+- **Manual pages.** `pkg6depotd(8)`, `pkg6repo(1)`, `pkg6repo-retire(8)`
+  and `pkg6-policy(5)` are packaged. There are no pages for `pkg6recv` or
+  `pkgtree`.
 - **Packaging identity.** UID/GID 94 registration and publisher
   confirmation are needed before GA.
 

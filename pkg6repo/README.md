@@ -132,7 +132,23 @@ in the source) become visible in one generation switch, or none do. A missing
 destination is created. Re-importing a committed archive changes nothing. An
 exact FMRI already published with a different manifest rejects the batch.
 Packages with `pkg.obsolete=true` are published in the catalog like any other,
-as in pkg5. See ADR-007.
+as in pkg5. See ADR-007. `--policy` (default: `<destination>/policy.kdl`
+if present) leaves out packages matching the policy's
+`import { exclude ... }` rules; see pkg6-policy(5).
+
+### Retire Superseded Versions
+
+```bash
+pkg6repo retire plan -s /path/to/repository -o plan.json
+pkg6repo retire apply -s /path/to/repository plan.json
+pkg6repo retire status -s /path/to/repository
+```
+
+Retirement hides superseded versions from catalogs and search; exact
+manifest and payload requests keep working and nothing is deleted.
+`restore`, `check-policy` and `close-depot` complete the command set. Run
+these as the user the depot runs as (`pkg6srv`). See pkg6repo-retire(8) and
+ADR-010.
 
 ### Obsolete Packages
 

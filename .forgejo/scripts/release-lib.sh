@@ -36,8 +36,14 @@ RELEASE_PLATFORMS="linux-x86_64 illumos-x86_64"
 # export through the depot's telemetry_otlp suite (ADR-006), direct TLS and
 # ACME through tls_config, tls_acme and tls_depot_e2e (ADR-008). The
 # pkg6depotd library suite holds the telemetry queue/settings and TLS
-# DER/key/plan/ACME unit tests.
-RELEASE_REQUIRED_SUITES="pkg6repo::e2e_tests=5 pkg6depotd::config_fail_closed=11 pkg6depotd::packaged_config=3 pkg6depotd=35 pkg6depotd::tls_config=7 pkg6depotd::tls_acme=19 pkg6depotd::tls_depot_e2e=3 pkg6depotd::telemetry_otlp=10 pkg6depotd::integration_tests=5 pkg6depotd::auth_tests=5 pkg6depotd::read_only_http_tests=3 libips::atomic_pkg5_import=30 pkg6repo::import_pkg5_cli=3 pkg6depotd::atomic_import_http_tests=3"
+# DER/key/plan/ACME unit tests. The pkg6repo command surface (ADR-009) is
+# gated through cli_surface, the pkg6repo binary's unit tests and
+# manpages (packaged pages match the built CLI), the depot's through its
+# cli_surface. Retirement, snapshots and import exclusions (ADR-010) are
+# gated through libips::retirement, the libips library suite (retention
+# policy, access recorder and fence unit tests), retire_cli and the depot's
+# retirement_http_tests.
+RELEASE_REQUIRED_SUITES="pkg6repo::e2e_tests=5 pkg6depotd::config_fail_closed=11 pkg6depotd::packaged_config=3 pkg6depotd=35 pkg6depotd::tls_config=7 pkg6depotd::tls_acme=19 pkg6depotd::tls_depot_e2e=3 pkg6depotd::telemetry_otlp=10 pkg6depotd::integration_tests=5 pkg6depotd::auth_tests=5 pkg6depotd::read_only_http_tests=3 libips::atomic_pkg5_import=30 pkg6repo::import_pkg5_cli=3 pkg6depotd::atomic_import_http_tests=3 pkg6repo::cli_surface=9 pkg6repo::bin/pkg6repo=11 pkg6repo::manpages=3 pkg6depotd::cli_surface=5 libips=141 libips::retirement=31 pkg6repo::retire_cli=5 pkg6depotd::retirement_http_tests=5"
 
 # Tests allowed to be unselected by default, one "SUITE TEST" per line. Anything else
 # that nextest would not run (e.g. a new #[ignore]) fails the inventory.

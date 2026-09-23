@@ -66,14 +66,14 @@ $ pkg list -afv -g https://pkg.example.org 'entire'
   LZ4-compressed, or otherwise not as a single gzip member, cannot be
   served to pkg5 clients as-is. The import rejects the batch rather than
   replace them.
-- **Other ingest tools.** `pkg6recv` and `pkg6repo import-archive` refuse a
-  generation-managed repository. Use them only against a separate,
+- **Other ingest tools.** `pkg6recv` refuses a generation-managed
+  repository. Use them only against a separate,
   unmanaged staging repository.
-- **Catalog visibility.** Every imported version stays in the catalog. It
-  is solver-visible, and pkg5 clients download a bigger catalog.
-  Retirement, which would hide superseded versions, is **pending**. So is
-  snapshot protection, which would keep selected historical sets
-  installable once retirement exists. See
+- **Catalog visibility.** Every imported version stays in the catalog
+  until it is retired. It is solver-visible, and pkg5 clients download a
+  bigger catalog. `pkg6repo retire` hides superseded versions, snapshot
+  protection keeps selected historical sets installable, and
+  `import { exclude ... }` leaves packages out of an import. See
   [Retention, snapshots and exclusions](retention.md).
 - **Not verified:** install and update with real 2020-era OpenIndiana
   clients against imported history.

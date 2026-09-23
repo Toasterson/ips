@@ -73,6 +73,11 @@
 .Op Fl -adopt-existing
 .Op Fl -max-archive-entries Ar n
 .Op Fl -max-extract-bytes Ar n
+.Op Fl -policy Ar file
+.Nm
+.Cm retire
+.Cm plan | apply | restore | status | close-depot | check-policy
+.Ar ...
 .Nm
 .Cm list-obsoleted | search-obsoleted | show-obsoleted |
 .Cm restore-obsoleted | export-obsoleted
@@ -205,12 +210,32 @@ the whole import.
 .Fl -adopt-existing
 converts a repository in the older layout; run it while readers are
 stopped.
+New packages matching an
+.Sy import { exclude ... }
+rule of the policy, by default
+.Pa policy.kdl
+in
+.Ar repo
+if present, are not imported and are listed in the output; see
+.Xr pkg6-policy 5 .
+.It Cm retire Ar subcommand
+Hide superseded package versions from catalogs and search, restore them,
+and inspect retirement state; exact manifest and payload requests keep
+working and nothing is deleted.
+See
+.Xr pkg6repo-retire 8 .
 .It Cm list-obsoleted , search-obsoleted Fl q Ar regex , show-obsoleted Fl f Ar fmri
 Inspect the legacy obsoleted store, which earlier pkg6 builds filled with
 package versions moved out of the catalog.
 These subcommands do not change the catalog or packages; opening a
 non-empty store may rewrite its own index under
 .Pa obsoleted/ .
+.Cm list-obsoleted
+prints
+.Fl -page-size Ar n
+entries (default 100, 0 for all) of page
+.Fl -page Ar n
+(default 1).
 .It Cm restore-obsoleted Fl s Ar repo Fl p Ar publisher Fl f Ar fmri Op Fl -no-rebuild
 Publish a store entry's manifest into the repository and then remove the
 entry.
@@ -246,13 +271,16 @@ Create a repository for the depot and add a publisher:
 # pkg6repo add-publisher -s /var/pkg6depotd/repo openindiana.org
 .Ed
 .Pp
-Import a pkg5 archive:
+Import a pkg5 archive into the depot's repository as the service user:
 .Bd -literal -offset indent
-# pkg6repo import-pkg5 -s userland.p5p -d /var/pkg6depotd/repo
+# su pkg6srv -c '/usr/bin/pkg6repo import-pkg5 \e
+      -s /var/tmp/userland.p5p -d /var/pkg6depotd/repo'
 .Ed
 .Sh SEE ALSO
 .Xr pkg 1 ,
-.Xr pkg6depotd 8
+.Xr pkg6-policy 5 ,
+.Xr pkg6depotd 8 ,
+.Xr pkg6repo-retire 8
 .Sh NOTES
 The pkg5 subcommands and options that
 .Nm

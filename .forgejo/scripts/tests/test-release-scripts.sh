@@ -379,13 +379,43 @@ tools=$(sed -n 's/^for b in \(.*\); do$/\1/p' "${build}")
 eq "build stages the operator tools" "${tools}" "pkg6repo pkg6recv pkgtree"
 for f in usr/lib/pkg6depotd usr/bin/pkg6repo usr/bin/pkg6recv usr/bin/pkgtree \
   lib/svc/method/svc-pkg6depotd lib/svc/manifest/application/pkg/pkg6depotd.xml \
-  etc/pkg6depotd/pkg6depotd.kdl usr/share/man/man8/pkg6depotd.8; do
+  etc/pkg6depotd/pkg6depotd.kdl usr/share/man/man8/pkg6depotd.8 \
+  usr/share/man/man1/pkg6repo.1 usr/share/man/man5/pkg6-policy.5 \
+  usr/share/man/man8/pkg6repo-retire.8; do
   check "p5m delivers ${f}" has_action "^file path=${f}( |\$)"
   case "${f}" in
     usr/bin/*) ;;
     *) check "build stages ${f}" grep -Eq " ${f}\$" "${build}" ;;
   esac
 done
+# Manual pages: the p5m and the build agree on the set, every staged source
+# exists, and each page's .Dt names the file it is installed as.
+p5m_man=$(p5m_actions | sed -n 's/^file path=\(usr\/share\/man\/[^ ]*\) .*/\1/p' | sort)
+build_man=$(sed -n 's/^stage "\([^"]*\)" \(usr\/share\/man\/[^ ]*\)$/\2/p' "${build}" | sort)
+eq "p5m and build deliver the same manual pages" "${p5m_man}" "${build_man}"
+check "four manual pages are packaged" test "$(printf '%s\n' ${p5m_man} | wc -l | tr -d ' ')" = 4
+while read -r src dest; do
+  src=$(eval "printf '%s' ${src}")
+  if [ ! -f "${src}" ]; then bad "staged manual page source missing: ${src}"; continue; fi
+  name=$(basename "${dest}")
+  sect="${name##*.}"
+  name="${name%.*}"
+  want=".Dt $(printf '%s' "${name}" | tr '[:lower:]' '[:upper:]') ${sect}"
+  check "${dest} is installed in its own section" test "$(dirname "${dest}")" = "usr/share/man/man${sect}"
+  check "$(basename "${src}") .Dt matches ${dest}" grep -qx -- "${want}" "${src}"
+  if command -v mandoc >/dev/null 2>&1; then
+    check "$(basename "${src}") passes mandoc -Tlint" mandoc -Tlint -W warning "${src}"
+  fi
+done <<EOF_MAN
+$(sed -n 's/^stage \("[^"]*"\) \(usr\/share\/man\/[^ ]*\)$/\1 \2/p' "${build}")
+EOF_MAN
+# Mutable repository data is operator data: nothing the depot or pkg6repo
+# writes inside a repository (generations, policy, retirement state, access
+# records) may be delivered, or uninstall would salvage it.
+check_not "no repository policy delivered" has_action 'path=[^ ]*policy\.kdl'
+check_not "no retention access records delivered" has_action 'path=[^ ]*retention'
+check_not "no generations delivered" has_action 'path=[^ ]*generations'
+check_not "nothing delivered under var/" has_action '^(file|dir|link|hardlink) path=var/'
 check "method is valid sh" sh -n "${method}"
 if command -v xmllint >/dev/null 2>&1; then
   check "SMF manifest is well-formed" xmllint --noout "${xml}"
@@ -474,7 +504,9 @@ check_not "inventory: non-nextest JSON fails" release_check_test_inventory "${tm
 check "inventory requires the pkg6repo e2e suite" grep -q 'pkg6repo::e2e_tests=5' "${scripts}/release-lib.sh"
 for suite in libips::atomic_pkg5_import pkg6repo::import_pkg5_cli pkg6depotd::atomic_import_http_tests \
   pkg6depotd::telemetry_otlp pkg6depotd::tls_config pkg6depotd::tls_acme pkg6depotd::tls_depot_e2e \
-  pkg6depotd::packaged_config pkg6depotd; do
+  pkg6depotd::packaged_config pkg6depotd libips libips::retirement pkg6repo::retire_cli \
+  pkg6depotd::retirement_http_tests pkg6repo::cli_surface pkg6repo::manpages "pkg6repo::bin/pkg6repo" \
+  pkg6depotd::cli_surface; do
   check "inventory requires the suite ${suite}" grep -qE "[\" ]${suite}=[1-9]" "${scripts}/release-lib.sh"
   jq --arg s "${suite}" 'del(.["rust-suites"][$s])' "${tmp}/inv-ok.json" > "${tmp}/inv-no-suite.json"
   check_not "inventory: missing suite ${suite} fails" release_check_test_inventory "${tmp}/inv-no-suite.json"

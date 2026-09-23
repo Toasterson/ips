@@ -7,7 +7,7 @@
 - [Serving pkg5 clients](serving.md)
 - [Atomic p5p imports](importing.md)
 - [Importing historical content locally](historical-imports.md)
-- [Retention, snapshots and exclusions (pending)](retention.md)
+- [Retention, snapshots and exclusions](retention.md)
 - [TLS and ACME](tls.md)
 - [OpenTelemetry](telemetry.md)
 - [Release process](release.md)

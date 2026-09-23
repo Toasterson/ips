@@ -37,7 +37,9 @@ Any other `v*` tag fails the pipeline.
       than the opt-in OpenIndiana network test would not run. The required
       suites (`RELEASE_REQUIRED_SUITES` in `.forgejo/scripts/release-lib.sh`)
       include the atomic pkg5 importer (ADR-007), OTLP telemetry
-      (ADR-006) and direct TLS/ACME (ADR-008) suites.
+      (ADR-006), direct TLS/ACME (ADR-008), the pkg6repo and depot command
+      surfaces with the manual page sync test (ADR-009), and retirement,
+      snapshots and access recording (ADR-010) suites.
    4. Packages the build. The illumos job also builds the IPS package and
       installs, upgrades and removes it on its throwaway VM.
    5. Uploads its own assets.

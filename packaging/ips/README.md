@@ -12,6 +12,9 @@ package. The release process is described in
 | `svc-pkg6depotd` | `/lib/svc/method/svc-pkg6depotd` | start method; foreground daemon, `duration=child` |
 | `pkg6depotd.kdl` | `/etc/pkg6depotd/pkg6depotd.kdl` | `root:pkg6srv 0640`, `preserve=renamenew` |
 | `pkg6depotd.8` | `/usr/share/man/man8/pkg6depotd.8` | mdoc; check with `mandoc -T lint` |
+| `../../pkg6repo/pkg6repo.1` | `/usr/share/man/man1/pkg6repo.1` | mdoc; repository commands |
+| `../../man/man8/pkg6repo-retire.8` | `/usr/share/man/man8/pkg6repo-retire.8` | mdoc; retirement commands |
+| `../../man/man5/pkg6-policy.5` | `/usr/share/man/man5/pkg6-policy.5` | mdoc; repository `policy.kdl` |
 | `pkglintrc` | (build only) | pkglint gate: errors fail the build |
 
 Binaries: `/usr/lib/pkg6depotd`, `/usr/bin/pkg6repo`, `/usr/bin/pkg6recv`,
@@ -23,6 +26,15 @@ moves unpackaged content of a directory it removes into
 repository with it. The operator creates `/var/pkg6depotd`, ideally as its
 own ZFS dataset, and uninstalling the package leaves it untouched.
 
+The same holds for everything written inside a repository: generations,
+`policy.kdl`, retirement state and the depot's access records in
+`<repo>/retention/access/`. The depot runs as `pkg6srv` and creates that
+directory itself, so the repository must be owned by `pkg6srv`, and
+`pkg6repo` commands against it (`import-pkg5`, `retire`) run as `pkg6srv`
+too. A root-run `pkg6repo retire apply` can leave a root-owned
+`retention/access/fence.lock` that stops the depot from recording
+accesses; see pkg6repo-retire(8).
+
 ## Operator workflow
 
 ```sh
@@ -31,6 +43,7 @@ zfs create -o mountpoint=/var/pkg6depotd rpool/pkg6depotd   # or mkdir
 chown pkg6srv:pkg6srv /var/pkg6depotd && chmod 0750 /var/pkg6depotd
 su pkg6srv -c '/usr/bin/pkg6repo create /var/pkg6depotd/repo'
 su pkg6srv -c '/usr/bin/pkg6repo add-publisher -s /var/pkg6depotd/repo openindiana.org'
+su pkg6srv -c '/usr/bin/pkg6repo import-pkg5 -s /var/tmp/userland.p5p -d /var/pkg6depotd/repo'
 vi /etc/pkg6depotd/pkg6depotd.kdl     # bind address, repository root
 /usr/lib/pkg6depotd --config /etc/pkg6depotd/pkg6depotd.kdl config-test
 svcadm enable pkg6depotd
@@ -112,7 +125,14 @@ before removing it.
 
 - Offline, on any platform: `.forgejo/scripts/tests/test-release-scripts.sh`.
   It checks that the manifest, SMF manifest, method and build script agree
-  with each other.
+  with each other, that the manifest and the build stage the same manual
+  pages under the section their `.Dt` names (and that they pass
+  `mandoc -Tlint` where mandoc is installed), and that no repository data
+  (`var/`, `policy.kdl`, generations, `retention/`) is delivered.
+- Offline: `cargo nextest run -p pkg6repo --test manpages`. Checks that
+  `pkg6repo(1)` and `pkg6repo-retire(8)` document every subcommand and
+  option of the built `pkg6repo`, and that cross references between the
+  packaged pages resolve.
 - Offline: `cargo nextest run -p pkg6depotd --test packaged_config --test config_fail_closed`.
   These check that the default configuration and its commented TLS examples
   parse with the daemon's schema, and that a missing or invalid configuration

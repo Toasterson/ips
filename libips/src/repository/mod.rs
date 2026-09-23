@@ -281,6 +281,7 @@ mod obsoleted;
 pub mod pkg5_import;
 pub mod progress;
 mod rest_backend;
+pub mod retention;
 pub mod shard_sync;
 pub mod sqlite_catalog;
 #[cfg(test)]
@@ -303,6 +304,7 @@ pub use pkg5_import::{
 };
 pub use progress::{NoopProgressReporter, ProgressInfo, ProgressReporter};
 pub use rest_backend::RestBackend;
+pub use retention::RetentionError;
 
 /// Repository configuration filename
 pub const REPOSITORY_CONFIG_FILENAME: &str = "pkg6.repository";

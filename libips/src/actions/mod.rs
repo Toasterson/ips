@@ -1203,7 +1203,7 @@ impl Manifest {
 /// Parse `key=value` properties out of an action's argument string,
 /// honoring pkg5's quoting rules (double or single quotes with `\`-escaped
 /// inner characters). Bare values run until whitespace.
-fn parse_action_properties(input: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_action_properties(input: &str) -> Vec<(String, String)> {
     let bytes = input.as_bytes();
     let mut out: Vec<(String, String)> = Vec::new();
     let mut i = 0;

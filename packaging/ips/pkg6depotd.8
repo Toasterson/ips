@@ -281,6 +281,18 @@ create the repository as the service user and review the configuration file:
 # svcadm enable pkg6depotd
 .Ed
 .Pp
+While it serves a repository managed through generations, the depot
+records package accesses for retirement in
+.Pa retention/access/
+below the repository, which it creates itself.
+Run
+.Xr pkg6repo 1
+and
+.Xr pkg6repo-retire 8
+commands against the repository as
+.Sy pkg6srv
+too, so that every file there stays writable by the depot.
+.Pp
 The service is configured with the following properties:
 .Bl -tag -width Ds
 .It Sy config/file
@@ -588,6 +600,9 @@ Invalid command line, including an unknown command.
 .Sy Uncommitted
 .Sh SEE ALSO
 .Xr pkg 1 ,
+.Xr pkg6repo 1 ,
+.Xr pkg6-policy 5 ,
 .Xr smf 7 ,
+.Xr pkg6repo-retire 8 ,
 .Xr svcadm 8 ,
 .Xr svccfg 8

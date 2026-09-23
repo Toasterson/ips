@@ -1678,6 +1678,8 @@ dependencies = [
  "diff-struct",
  "flate2",
  "goblin",
+ "knuffel",
+ "libips",
  "lz4",
  "maplit",
  "miette 7.6.0",
@@ -2448,6 +2450,7 @@ dependencies = [
 name = "pkg6repo"
 version = "0.5.3"
 dependencies = [
+ "chrono",
  "clap",
  "flate2",
  "libips",

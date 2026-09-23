@@ -90,6 +90,9 @@ pub struct FileBackend {
     catalog_manager: Option<Mutex<crate::repository::catalog::CatalogManager>>,
     /// Manager for obsoleted packages
     obsoleted_manager: Option<Mutex<crate::repository::obsoleted::ObsoletedPackageManager>>,
+    /// Canonical FMRIs a catalog build leaves out: versions hidden by
+    /// retirement. Their manifests stay in `pkg/` for exact fetches.
+    catalog_hidden: std::collections::HashSet<String>,
 }
 
 /// Transaction for publishing packages
@@ -549,6 +552,7 @@ impl Transaction {
                     config,
                     catalog_manager: None,
                     obsoleted_manager: None,
+                    catalog_hidden: Default::default(),
                 };
 
                 repo.create_pub_p5i_file(&publisher)?;
@@ -659,6 +663,7 @@ impl ReadableRepository for FileBackend {
             config,
             catalog_manager: None,
             obsoleted_manager: None,
+            catalog_hidden: Default::default(),
         })
     }
 
@@ -1581,6 +1586,7 @@ impl WritableRepository for FileBackend {
             config,
             catalog_manager: None,
             obsoleted_manager: None,
+            catalog_hidden: Default::default(),
         };
 
         // Create the repository directories
@@ -1837,6 +1843,18 @@ impl WritableRepository for FileBackend {
 impl FileBackend {
     /// Backend view of a staged generation directory, which mirrors the
     /// repository layout. Used to build catalogs before publication.
+    /// A backend over a generation tree whose catalog builds leave out the
+    /// `hidden` (retired) versions.
+    pub(crate) fn for_generation_root_hiding(
+        path: &Path,
+        publishers: Vec<String>,
+        hidden: std::collections::HashSet<String>,
+    ) -> Self {
+        let mut backend = Self::for_generation_root(path, publishers);
+        backend.catalog_hidden = hidden;
+        backend
+    }
+
     pub(crate) fn for_generation_root(path: &Path, publishers: Vec<String>) -> Self {
         FileBackend {
             path: path.to_path_buf(),
@@ -1846,6 +1864,7 @@ impl FileBackend {
             },
             catalog_manager: None,
             obsoleted_manager: None,
+            catalog_hidden: Default::default(),
         }
     }
 
@@ -2493,7 +2512,10 @@ impl FileBackend {
         // Collect package data via the on-disk walker — this is the rebuild
         // path that *produces* the catalog, so the catalog-first list_packages
         // would either miss new manifests or chicken-and-egg an empty result.
-        let packages = self.list_packages_from_disk(Some(publisher), None)?;
+        let mut packages = self.list_packages_from_disk(Some(publisher), None)?;
+        if !self.catalog_hidden.is_empty() {
+            packages.retain(|p| !self.catalog_hidden.contains(&p.fmri.to_string()));
+        }
 
         // Stream catalog parts straight to disk to avoid accumulating
         // every package's entries in memory. On a 200k-package publisher
@@ -2548,7 +2570,6 @@ impl FileBackend {
         // Process each package in deterministic order (by FMRI string).
         // FMRI-string sort clusters all versions of a stem consecutively,
         // which is what the per-stem flush below relies on.
-        let mut packages = packages;
         packages.sort_by(|a, b| a.fmri.to_string().cmp(&b.fmri.to_string()));
 
         let mut processed_in_batch = 0usize;

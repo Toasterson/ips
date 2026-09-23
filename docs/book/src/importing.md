@@ -103,7 +103,7 @@ On a generation-managed repository:
 - `add-publisher`/`remove-publisher` publish a new generation. Removal
   keeps the publisher's payload store.
 - In-place writers fail with `ips::generation::managed_repository` before
-  changing anything: `pkg6recv`, `pkg6repo import-archive`,
+  changing anything: `pkg6recv`,
   `restore-obsoleted` and transaction-based publishing. Receive into a
   separate unmanaged repository, archive it to `.p5p` and import that.
 

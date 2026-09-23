@@ -55,11 +55,21 @@ file path=usr/lib/pkg6depotd owner=root group=bin mode=0555 \
 file path=usr/bin/pkg6recv owner=root group=bin mode=0555
 file path=usr/bin/pkg6repo owner=root group=bin mode=0555
 file path=usr/bin/pkgtree owner=root group=bin mode=0555
+#
+# Manual pages. pkg6repo-retire(8) and pkg6-policy(5) document retirement
+# and the repository policy file; the policy itself lives in the operator's
+# repository and is not delivered.
+file path=usr/share/man/man1/pkg6repo.1 owner=root group=bin mode=0444
+file path=usr/share/man/man5/pkg6-policy.5 owner=root group=bin mode=0444
 file path=usr/share/man/man8/pkg6depotd.8 owner=root group=bin mode=0444
+file path=usr/share/man/man8/pkg6repo-retire.8 owner=root group=bin mode=0444
 #
 # Repositories are operator data and are deliberately NOT delivered: pkg(1)
 # salvages unpackaged content of a removed directory into /var/pkg/lost+found,
 # which would move a repository away on uninstall. The operator creates
-# /var/pkg6depotd (ideally its own ZFS dataset); see pkg6depotd(8).
+# /var/pkg6depotd (ideally its own ZFS dataset) owned by pkg6srv; see
+# pkg6depotd(8). The same holds for everything the tools write inside a
+# repository: generations, policy.kdl, and the access records the depot
+# writes to retention/access/ as pkg6srv.
 #
 license LICENSE license=MPL-2.0

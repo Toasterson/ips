@@ -137,7 +137,19 @@ async fn serve(config: &Config) -> Result<()> {
         .await
         .map(Arc::new);
 
-    let router = http::routes::app_router_with_auth(state, auth_state);
+    // Retirement reads the heartbeat as proof that this depot records every
+    // access and answers apply's fence; start it before any request is served.
+    state
+        .start_access_heartbeat()
+        .map_err(|e| miette::miette!(e))?;
+    let router = http::routes::app_router_with_auth(state.clone(), auth_state);
+    let served = listen(config, router, hangup).await;
+    // A clean stop is not a gap in the access history.
+    state.shutdown_access();
+    served
+}
+
+async fn listen(config: &Config, router: axum::Router, hangup: tls::HangupTarget) -> Result<()> {
     let addr = bind_addr(config)?;
     match tls::plan(config)? {
         None => {
