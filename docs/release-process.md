@@ -30,7 +30,10 @@ Any other `v*` tag fails the pipeline.
       --release` with no filters. The run includes the pkg6repo e2e tests,
       which drive the release `pkg6repo` binary. The inventory check fails
       the job if a required suite is missing or shrinks, or if any test other
-      than the opt-in OpenIndiana network test would not run.
+      than the opt-in OpenIndiana network test would not run. The required
+      suites (`RELEASE_REQUIRED_SUITES` in `.forgejo/scripts/release-lib.sh`)
+      include the atomic pkg5 importer (ADR-007) and OTLP telemetry
+      (ADR-006) suites.
    4. Packages the build. The illumos job also builds the IPS package and
       installs, upgrades and removes it on its throwaway VM.
    5. Uploads its own assets.

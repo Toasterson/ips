@@ -21,7 +21,7 @@ This document describes the handling of obsoleted packages in the Image Packagin
 > the active repository into this store, has been removed. The `*-obsoleted`
 > commands below inspect or maintain the store only. The pkg5 importer
 > (`import-pkg5`) no longer writes to the store: `pkg.obsolete=true` packages
-> are published in the main repository and catalog, as in pkg5 (#38, ADR-005).
+> are published in the main repository and catalog, as in pkg5 (#38, ADR-007).
 > Entries earlier importer versions diverted here stay until they are
 > re-imported or reviewed under #39/#40.
 

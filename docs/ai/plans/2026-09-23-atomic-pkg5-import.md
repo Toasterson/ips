@@ -3,7 +3,7 @@
 **Date:** 2026-09-23
 **Status:** Active
 **Issue:** [#38](https://code.aopc.cloud/OpenIndiana/ips/issues/38) (part of #24, transaction model #26)
-**Decision:** [ADR-005](../decisions/005-atomic-pkg5-import-via-repository-generations.md)
+**Decision:** [ADR-007](../decisions/007-atomic-pkg5-import-via-repository-generations.md)
 
 ## Goal
 

@@ -1,4 +1,4 @@
-# ADR-005: Atomic pkg5 Import via Immutable Repository Generations
+# ADR-007: Atomic pkg5 Import via Immutable Repository Generations
 
 **Date:** 2026-09-23
 **Status:** Accepted
