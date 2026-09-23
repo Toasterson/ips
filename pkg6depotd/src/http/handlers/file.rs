@@ -40,8 +40,12 @@ async fn get_file_impl(
         ))
     })?;
 
+    let is_get = req.method() == axum::http::Method::GET;
     let service = ServeFile::new(path);
     let result = service.oneshot(req).await;
+    if is_get && result.as_ref().is_ok_and(|r| r.status().is_success()) {
+        repo.record_payload_access(&publisher, &digest);
+    }
 
     match result {
         Ok(mut res) => {

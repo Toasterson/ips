@@ -14,8 +14,12 @@ This document describes the handling of obsoleted packages in the Image Packagin
 > - **The obsoleted store (`<repository>/obsoleted/`).** A pkg6-only side
 >   store, described in the rest of this document. Entries in it are *not* in
 >   the catalog, so legacy clients never see them, and the store gives them
->   no `pkg.obsolete` semantics. It is not repository retirement either
->   (retirement is designed separately in #39).
+>   no `pkg.obsolete` semantics. It is not repository retirement either.
+> - **Retirement (#39, ADR-006).** `pkg6repo retire` hides superseded versions
+>   from catalogs and search while their manifests and payloads stay served
+>   for exact requests. It never uses this store, never deletes anything and
+>   never retires the newest version of a package, so an obsoletion marker
+>   stays visible. See `pkg6repo-retire(8)` and `pkg6-policy(5)`.
 >
 > The former `pkg6repo obsolete-package` command, which moved a manifest from
 > the active repository into this store, has been removed. The `*-obsoleted`

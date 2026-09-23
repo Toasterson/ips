@@ -56,4 +56,13 @@ fn log_receipt(receipt: &ImportReceipt) {
     info!("  Publishers: {}", receipt.publishers.join(", "));
     info!("  Packages added: {}", receipt.added.len());
     info!("  Identical packages skipped: {}", receipt.skipped.len());
+    if !receipt.excluded.is_empty() {
+        info!(
+            "  Excluded by the import policy: {}",
+            receipt.excluded.len()
+        );
+        for f in &receipt.excluded {
+            info!("    {}", f);
+        }
+    }
 }

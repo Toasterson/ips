@@ -61,7 +61,10 @@ pub async fn run() -> Result<()> {
                 .await
                 .map(Arc::new);
 
-            let router = http::routes::app_router_with_auth(state, auth_state);
+            state
+                .start_access_heartbeat()
+                .map_err(|e| miette::miette!(e))?;
+            let router = http::routes::app_router_with_auth(state.clone(), auth_state);
             let bind_str = config
                 .server
                 .bind
@@ -77,9 +80,11 @@ pub async fn run() -> Result<()> {
 
             tracing::info!("Starting pkg6depotd on {}", bind_str);
 
-            http::server::run(router, listener)
-                .await
-                .map_err(|e| miette::miette!(e))?;
+            let served =
+                http::server::run_until(router, listener, http::server::shutdown_signal()).await;
+            // A clean stop is not a gap in the access history.
+            state.shutdown_access();
+            served.map_err(|e| miette::miette!(e))?;
         }
         Commands::ConfigTest => {
             println!("Configuration loaded successfully: {:?}", config);

@@ -32,6 +32,10 @@ pub enum Pkg6RepoError {
     #[diagnostic(transparent)]
     Pkg5ImportError(#[from] repository::Pkg5ImportError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    RetentionError(#[from] repository::RetentionError),
+
     #[error("I/O error: {0}")]
     #[diagnostic(
         code(pkg6repo::io_error),

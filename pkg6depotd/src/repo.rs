@@ -2,12 +2,13 @@ use crate::config::Config;
 use crate::errors::{DepotError, Result};
 use libips::fmri::Fmri;
 use libips::repository::generation::is_valid_publisher_name;
+use libips::repository::retention::{AccessKind, AccessRecorder};
 use libips::repository::{
     FileBackend, IndexEntry, PackageInfo, REPOSITORY_CONFIG_FILENAME, ReadableRepository,
     RepositoryError,
 };
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 pub struct DepotRepo {
@@ -17,6 +18,9 @@ pub struct DepotRepo {
     /// Identity of the published generation and configuration file the
     /// backend was loaded from.
     config_stamp: Mutex<Option<ConfigStamp>>,
+    /// Durable accounting of qualifying (manifest and payload) requests,
+    /// which drives retirement. Never fails or delays a request.
+    access: Arc<AccessRecorder>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +69,24 @@ fn check_publisher(publisher: &str) -> Result<()> {
     }
 }
 
+/// Name of this depot's access recorder: stable across restarts (so a
+/// restart closes the previous run) and distinct between depots serving the
+/// same repository (host and listen address).
+fn recorder_name(config: &Config) -> String {
+    let host = nix::unistd::gethostname()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "localhost".to_string());
+    let bind = config
+        .server
+        .bind
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "-".to_string());
+    format!("{}/{}", host, bind)
+}
+
 fn is_hex_digest(digest: &str) -> bool {
     digest.len() >= 2 && digest.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -88,6 +110,7 @@ impl DepotRepo {
         Ok(Self {
             backend: Mutex::new(backend),
             config_stamp: Mutex::new(ConfigStamp::read(&root)),
+            access: Arc::new(AccessRecorder::new(&root, &recorder_name(config))),
             root,
             cache_max_age,
         })
@@ -165,6 +188,33 @@ impl DepotRepo {
         backend
             .fetch_manifest_text(publisher, fmri)
             .map_err(DepotError::Repo)
+    }
+
+    /// Record a served manifest of an exact package version, including a
+    /// hidden (retired) one. The version stays hidden.
+    pub fn record_manifest_access(&self, publisher: &str, fmri: &Fmri) {
+        let exact = Fmri::with_publisher(publisher, fmri.stem(), fmri.version.clone());
+        self.access
+            .record(AccessKind::Manifest, publisher, &exact.to_string());
+    }
+
+    /// Record a served payload.
+    pub fn record_payload_access(&self, publisher: &str, digest: &str) {
+        self.access.record(AccessKind::Payload, publisher, digest);
+    }
+
+    /// Start the access heartbeat, which proves to retirement that this
+    /// depot records every access and answers apply's fence. Call once the
+    /// depot serves (after daemonising: threads do not survive a fork).
+    pub fn start_access_heartbeat(&self) -> Result<()> {
+        self.access.spawn_heartbeat().map_err(DepotError::Io)?;
+        Ok(())
+    }
+
+    /// End access recording cleanly on shutdown, so the stop is not taken
+    /// for a crash (which would restart every retirement clock).
+    pub fn shutdown_access(&self) {
+        self.access.shutdown();
     }
 
     pub fn get_manifest_path(&self, publisher: &str, fmri: &Fmri) -> Option<PathBuf> {

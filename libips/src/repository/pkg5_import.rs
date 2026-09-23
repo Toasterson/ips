@@ -28,6 +28,8 @@
 use super::generation::{
     FailPoint, GenerationError, GenerationReason, GenerationStore, ImportReceipt,
 };
+use super::retention::universe::{Universe, check_hiding, scan_manifest, snapshot_closure};
+use super::retention::{Policy, RetentionError};
 use super::{FileBackend, RepositoryError, RepositoryVersion, WritableRepository};
 use crate::actions::Manifest;
 use crate::digest::{DigestAlgorithm, DigestSource};
@@ -111,6 +113,27 @@ pub enum Pkg5ImportError {
     )]
     Conflicts { conflicts: Vec<String> },
 
+    #[error(
+        "import exclusions would leave out packages that are needed or cannot be checked ({} problem(s)); nothing was imported:\n{}\n\nSuggested keep entries (add to the policy after review):\n{}",
+        .conflicts.len(),
+        format_list(.conflicts),
+        .suggested_keeps.iter().map(|k| format!("  keep \"{}\"", k)).collect::<Vec<_>>().join("\n")
+    )]
+    #[diagnostic(
+        code(ips::pkg5_import::exclusion_conflict),
+        help(
+            "Import exclusions never silently drop a package something needs. Add the suggested exact keep entries to the policy (keep overrides exclude), or narrow the exclusion, and retry"
+        )
+    )]
+    ExclusionConflict {
+        conflicts: Vec<String>,
+        suggested_keeps: Vec<String>,
+    },
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Retention(#[from] RetentionError),
+
     #[error(transparent)]
     #[diagnostic(transparent)]
     Generation(#[from] GenerationError),
@@ -165,6 +188,11 @@ pub struct Pkg5ImportOptions {
     /// file data than the archive holds, so `None` bounds it by the archive
     /// size; set a limit to keep scratch space below the free space.
     pub max_extract_bytes: Option<u64>,
+    /// Import policy: `import { exclude ... }` rules leave matching new
+    /// packages out (unless a `keep` rule matches), after checking that no
+    /// protected snapshot and no imported package needs them. `None`
+    /// excludes nothing.
+    pub policy: Option<Policy>,
 }
 
 /// Default for [`Pkg5ImportOptions::max_archive_entries`]: far above a full
@@ -181,6 +209,7 @@ impl Default for Pkg5ImportOptions {
             fail_point: None,
             max_archive_entries: DEFAULT_MAX_ARCHIVE_ENTRIES,
             max_extract_bytes: None,
+            policy: None,
         }
     }
 }
@@ -226,6 +255,12 @@ pub fn import_pkg5(
     if let Some(sha) = &archive_sha256
         && let Some(receipt) = store.find_receipt(sha)?
         && receipt.covers(options.publishers.as_deref())
+        && receipt.excluded.iter().all(|f| {
+            options
+                .policy
+                .as_ref()
+                .is_some_and(|p| p.import_excludes(f))
+        })
     {
         info!(archive = %sha, generation = %receipt.generation, "archive already imported");
         return Ok(Pkg5ImportOutcome::AlreadyImported(receipt));
@@ -352,6 +387,22 @@ fn import_locked(
         return Err(Pkg5ImportError::Conflicts { conflicts });
     }
 
+    // Import exclusions: leave out new packages the policy excludes, but
+    // only if nothing protected or imported needs them.
+    let mut excluded: Vec<SourcePackage> = Vec::new();
+    if let Some(policy) = &options.policy
+        && !policy.import_exclude.is_empty()
+    {
+        let (out, keep): (Vec<SourcePackage>, Vec<SourcePackage>) = to_add
+            .into_iter()
+            .partition(|p| policy.import_excludes(&p.fmri.to_string()));
+        to_add = keep;
+        excluded = out;
+        if !excluded.is_empty() {
+            check_exclusions(store, policy, &to_add, &excluded)?;
+        }
+    }
+
     // Phase 3: every payload a new manifest references must be servable to
     // pkg5 clients, from a verified copy already in the repository or from
     // the source.
@@ -457,6 +508,17 @@ fn import_locked(
             .into_iter()
             .collect()
     };
+    let mut excluded: Vec<String> = excluded.iter().map(|p| p.fmri.to_string()).collect();
+    if let Some(prev) = &previous {
+        excluded.extend(
+            prev.excluded
+                .iter()
+                .filter(|f| !added.contains(f) && !skipped.contains(f))
+                .cloned(),
+        );
+    }
+    excluded.sort();
+    excluded.dedup();
     let (publishers, added, skipped) = match &previous {
         Some(prev) => (
             union(&prev.publishers, selected.clone()),
@@ -474,6 +536,7 @@ fn import_locked(
         publishers,
         added,
         skipped,
+        excluded,
     };
     staged.put_receipt(&receipt)?;
     store.commit(staged, options.fail_point)?;
@@ -484,6 +547,82 @@ fn import_locked(
         "pkg5 import committed"
     );
     Ok(Pkg5ImportOutcome::Committed(receipt))
+}
+
+/// Fail if an excluded package is needed: by the closure of a protected
+/// snapshot, or as the only satisfier of a hard dependency of a visible
+/// package, whether this import publishes it or it is already published.
+/// The check runs over the published generation plus every package of the
+/// batch. Content whose dependencies cannot be interpreted (in the batch or
+/// the repository) blocks excluding what it may need, and an excluded
+/// package whose own version cannot be interpreted is never excluded
+/// silently.
+fn check_exclusions(
+    store: &GenerationStore,
+    policy: &Policy,
+    imported: &[SourcePackage],
+    excluded: &[SourcePackage],
+) -> Result<()> {
+    let info = store.current();
+    let root = store.current_dir();
+    let (mut universe, _) = if info.id.is_empty() {
+        (Universe::default(), Default::default())
+    } else {
+        Universe::load(&root, &info.publishers, &Default::default(), &|_, _| false)?
+    };
+    let hidden_fmris = if info.id.is_empty() {
+        Default::default()
+    } else {
+        store.retirement_state()?.hidden
+    };
+    let mut add = |pkg: &SourcePackage| -> Option<usize> {
+        let scan = scan_manifest(&String::from_utf8_lossy(&pkg.manifest));
+        universe.add_scanned(&pkg.fmri, &pkg.publisher, scan, None)
+    };
+    // Imported packages whose version cannot be read are kept as
+    // unverifiable content by the universe.
+    for pkg in imported {
+        add(pkg);
+    }
+    let mut conflicts = Vec::new();
+    let mut unreadable = Vec::new();
+    let mut hide = std::collections::HashSet::new();
+    for pkg in excluded {
+        match add(pkg) {
+            Some(i) => {
+                hide.insert(i);
+            }
+            None => {
+                conflicts.push(format!(
+                    "{}: excluded, but its version is not a pkg5 version, so whether anything needs it cannot be checked",
+                    pkg.fmri
+                ));
+                unreadable.push(pkg.fmri.to_string());
+            }
+        }
+    }
+    universe.finish();
+    let hidden: std::collections::HashSet<usize> = hidden_fmris
+        .keys()
+        .filter_map(|f| universe.get(f))
+        .collect();
+    let closures: Vec<_> = policy
+        .snapshots
+        .iter()
+        .map(|s| snapshot_closure(&universe, s))
+        .collect();
+    let b = check_hiding(&universe, &hidden, &hide, &closures, &|_| true, false);
+    conflicts.extend(b.blockers);
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    let mut suggested_keeps: Vec<String> = b.keeps.into_iter().chain(unreadable).collect();
+    suggested_keeps.sort();
+    suggested_keeps.dedup();
+    Err(Pkg5ImportError::ExclusionConflict {
+        conflicts,
+        suggested_keeps,
+    })
 }
 
 fn ensure_repository(repo: &Path) -> Result<()> {
