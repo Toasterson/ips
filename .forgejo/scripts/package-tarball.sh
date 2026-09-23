@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Pack the release binaries into a reproducible tarball: sorted entries,
-# numeric root ownership, mtimes pinned to the tagged commit, gzip without a
-# timestamp. Rebuilding the same commit with the same toolchain gives the same
-# bytes, so a re-run can match assets that were already uploaded.
+# Pack the release binaries (RELEASE_BINARIES) into a reproducible tarball:
+# sorted entries, numeric root ownership, mtimes pinned to the tagged commit,
+# gzip without a timestamp. Rebuilding the same commit with the same
+# toolchain gives the same bytes, so a re-run can match assets that were
+# already uploaded.
 #
 # Usage: package-tarball.sh PLATFORM OUTDIR
 set -euo pipefail
@@ -28,7 +29,7 @@ name="ips-${RELEASE_VERSION}-${platform}"
 staging=$(mktemp -d)
 trap 'rm -rf "${staging}"' EXIT
 mkdir -p "${staging}/${name}/bin"
-for b in ${RELEASE_CRATES}; do
+for b in ${RELEASE_BINARIES}; do
   cp "${bindir}/${b}" "${staging}/${name}/bin/${b}"
   chmod 0755 "${staging}/${name}/bin/${b}"
 done

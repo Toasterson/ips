@@ -96,6 +96,38 @@ export IPS_PUBLISHER=openindiana.org
 eq "fmri" "$(release_ips_fmri 20260923T101500Z)" \
   "pkg://openindiana.org/package/pkg6/depotd@1.2.3,5.11-0.3.1:20260923T101500Z"
 
+# --- released binaries vs version-checked crates -----------------------------
+# v1 ships the depot and operator tools only; pkg6 stays version-checked.
+eq "version-checked crates" "${RELEASE_CRATES}" "pkg6 pkg6repo pkg6recv pkg6depotd pkgtree"
+eq "released binaries" "${RELEASE_BINARIES}" "pkg6depotd pkg6repo pkg6recv pkgtree"
+for b in ${RELEASE_BINARIES}; do
+  case " ${RELEASE_CRATES} " in *" ${b} "*) ok ;; *) bad "released binary ${b} is not version-checked" ;; esac
+done
+check "tarball packs RELEASE_BINARIES" grep -q '^for b in \${RELEASE_BINARIES}; do$' "${scripts}/package-tarball.sh"
+check_not "tarball does not pack RELEASE_CRATES" grep -q 'RELEASE_CRATES' "${scripts}/package-tarball.sh"
+eq "IPS package delivers the released binaries" \
+  "$(printf '%s\n' pkg6depotd $(sed -n 's/^for b in \(.*\); do$/\1/p' "${scripts}/build-ips-package.sh") | sort | tr '\n' ' ')" \
+  "$(printf '%s\n' ${RELEASE_BINARIES} | sort | tr '\n' ' ')"
+if command -v gtar >/dev/null 2>&1; then tar_cmd=gtar; else tar_cmd=tar; fi
+if "${tar_cmd}" --version 2>/dev/null | grep -q 'GNU tar'; then
+  # End to end: fake binaries for every crate, pkg6 included; only the released
+  # ones may end up in the tarball.
+  tb="${tmp}/tarball"
+  git init -q "${tb}"
+  mkdir -p "${tb}/target/release" "${tb}/out"
+  for b in ${RELEASE_CRATES}; do echo "${b}" > "${tb}/target/release/${b}"; done
+  echo l > "${tb}/LICENSE" && echo r > "${tb}/README.md"
+  (cd "${tb}" && git add LICENSE README.md && GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid \
+    GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid git commit -qm a)
+  (cd "${tb}" && GITHUB_REF=refs/tags/v1.2.3 CARGO_TARGET_DIR="${tb}/target" \
+    "${scripts}/package-tarball.sh" linux-x86_64 "${tb}/out" >/dev/null)
+  eq "tarball contents" \
+    "$("${tar_cmd}" -tzf "${tb}/out/$(release_classify v1.2.3 && release_tarball_name linux-x86_64)" | tr '\n' ' ')" \
+    "ips-1.2.3-linux-x86_64/ ips-1.2.3-linux-x86_64/LICENSE ips-1.2.3-linux-x86_64/README.md ips-1.2.3-linux-x86_64/bin/ ips-1.2.3-linux-x86_64/bin/pkg6depotd ips-1.2.3-linux-x86_64/bin/pkg6recv ips-1.2.3-linux-x86_64/bin/pkg6repo ips-1.2.3-linux-x86_64/bin/pkgtree "
+else
+  echo "skip: GNU tar not found, tarball contents not built" >&2
+fi
+
 # --- exact tag -> commit provenance -----------------------------------------
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
 export GIT_AUTHOR_DATE="2026-09-23T10:15:00Z" GIT_COMMITTER_DATE="2026-09-23T10:15:00Z"

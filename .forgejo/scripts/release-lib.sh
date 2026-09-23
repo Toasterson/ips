@@ -12,8 +12,16 @@
 # Numeric parts have no leading zeros so they map 1:1 onto IPS dot sequences.
 RELEASE_TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$'
 
-# Crates whose binaries are released; their Cargo version must equal the tag.
+# Workspace binary crates whose Cargo version must equal the tag, so one tag
+# names one workspace version. This is the version check only; it does not
+# decide what ships.
 RELEASE_CRATES="pkg6 pkg6repo pkg6recv pkg6depotd pkgtree"
+
+# Binaries shipped in the v1 platform tarballs: the depot server and the
+# operator tools, the same set the IPS package delivers. The pkg6 client is
+# version-checked and built and tested in CI, but not released: its
+# multi-publisher image catalog behaviour is not release ready.
+RELEASE_BINARIES="pkg6depotd pkg6repo pkg6recv pkgtree"
 
 # Platforms that each build and upload their own asset set. A pre-release is
 # only taken out of draft once every platform's assets are present.
@@ -165,8 +173,9 @@ release_verify_commit() {
   export RELEASE_COMMIT RELEASE_TAG_OBJECT RELEASE_TAG_TYPE
 }
 
-# release_verify_cargo_version: every released crate must carry the tag's
-# version, so `--version` output and the package metadata agree.
+# release_verify_cargo_version: every version-checked crate (RELEASE_CRATES,
+# including pkg6, which is not packaged) must carry the tag's version, so
+# `--version` output and the package metadata agree.
 release_verify_cargo_version() {
   local meta crate v bad=0
   meta=$(cargo metadata --no-deps --format-version 1 --locked) \

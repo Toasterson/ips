@@ -53,12 +53,18 @@ fails verification. Never move a published tag.
 
 | Asset | Contents |
 |-------|----------|
-| `ips-<version>-linux-x86_64.tar.gz` | Reproducible tarball of `pkg6`, `pkg6repo`, `pkg6recv`, `pkg6depotd`, `pkgtree`, `LICENSE`, `README.md` |
+| `ips-<version>-linux-x86_64.tar.gz` | Reproducible tarball of `bin/pkg6depotd`, `bin/pkg6repo`, `bin/pkg6recv`, `bin/pkgtree`, `LICENSE`, `README.md` |
 | `ips-<version>-illumos-x86_64.tar.gz` | The same, built on OpenIndiana |
 | `pkg6depotd-<version>-illumos-x86_64.p5p` | Installable IPS archive |
 | `pkg6depotd-<version>-illumos-x86_64.p5m` | Published, dependency-resolved manifest |
 | `SHA256SUMS-<platform>` | Checksums |
 | `provenance-<platform>.json` | Tag, commit, tree, `Cargo.lock` hash, toolchain, artifact hashes |
+
+The tarballs hold the depot server and the operator tools, the same
+binaries the IPS package delivers. The `pkg6` client is not part of v1:
+its multi-publisher image catalog behaviour is not release ready. Its
+version is still checked against the tag, and CI still builds and tests
+it, but no release asset contains it.
 
 ```sh
 $ sha256sum -c --ignore-missing SHA256SUMS-illumos-x86_64

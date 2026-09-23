@@ -55,12 +55,19 @@ release stays a draft with that platform's assets missing.
 
 | Asset | Contents |
 |-------|----------|
-| `ips-<version>-linux-x86_64.tar.gz` | Reproducible tarball of `pkg6`, `pkg6repo`, `pkg6recv`, `pkg6depotd`, `pkgtree`, `LICENSE` and `README.md` |
+| `ips-<version>-linux-x86_64.tar.gz` | Reproducible tarball of `bin/pkg6depotd`, `bin/pkg6repo`, `bin/pkg6recv`, `bin/pkgtree`, `LICENSE` and `README.md` |
 | `ips-<version>-illumos-x86_64.tar.gz` | The same, built on OpenIndiana |
 | `pkg6depotd-<version>-illumos-x86_64.p5p` | Installable IPS archive |
 | `pkg6depotd-<version>-illumos-x86_64.p5m` | The published, dependency-resolved manifest |
 | `SHA256SUMS-<platform>` | Checksums of that platform's payloads |
 | `provenance-<platform>.json` | Canonical public repository URL (never the runner's remote, which may carry credentials), tag, tag object, commit, tree, `Cargo.lock` hash, OS, toolchain, artifact hashes |
+
+The tarballs carry the v1 release set, `RELEASE_BINARIES` in
+`.forgejo/scripts/release-lib.sh`: the depot server and the operator tools,
+the same binaries the IPS package delivers. The `pkg6` client is not
+released in v1; its multi-publisher image catalog behaviour is not release
+ready. It stays in `RELEASE_CRATES`, so its Cargo version must still equal
+the tag, and CI still builds and tests it.
 
 Verify a download:
 
