@@ -221,6 +221,17 @@ jobs:
       - name: Build IPS package
         run: .forgejo/scripts/build-ips-package.sh dist
 
+      - name: Install man and col for the live package test
+        # test-ips-package.sh renders the installed manual pages with
+        # `man | col -b`. The Solstice VM ships neither; install them here
+        # rather than making the package depend on them. pkg exits 4 when
+        # there is nothing to do.
+        run: |
+          set -euo pipefail
+          sudo pkg install -v system/man system/extended-system-utilities || [ $? -eq 4 ]
+          command -v man
+          command -v col
+
       - name: Test IPS package on this throwaway VM
         # Installs into the VM's live image, exercises SMF and upgrades.
         # Safe only because every Solstice job gets a fresh, discarded VM.
