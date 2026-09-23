@@ -710,7 +710,7 @@ check "smoke re-imports the same archive (idempotent retry)" has_line '/usr/bin/
 check "re-import must report the archive as already imported" has_line "grep -qF 'archive already imported'"
 check "re-import snapshots the repository before and after" \
   test "$(grep -c '^tree_[a-z]*=$(repo_tree) || fail' "${tip}")" = 2
-check "re-import rejects an empty snapshot" has_line "echo \"\${tree_before}\" | grep -q '^f '"
+check "re-import rejects an empty snapshot" has_line "grep -q '^f ' <<<\"\${tree_before}\""
 check "re-import must leave the repository unchanged" has_line '[ "${tree_after}" = "${tree_before}" ]'
 reimport=$(line_of '|| fail "re-importing the same archive failed')
 check "snapshots bracket the re-import" test -n "${reimport}" \

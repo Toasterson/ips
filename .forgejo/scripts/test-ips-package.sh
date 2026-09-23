@@ -145,7 +145,9 @@ for m in ${man_pages}; do
   n=$(basename "${m}")
   out=$(man -M /usr/share/man -s "${n##*.}" "${n%.*}" 2>&1 | col -b) \
     || fail "man -s ${n##*.} ${n%.*} failed: ${out}"
-  echo "${out}" | grep -q '^NAME' || fail "man -s ${n##*.} ${n%.*} rendered no NAME section: ${out}"
+  # Here-strings, not `echo | grep -q`: grep -q exits on the first match and a
+  # long page would SIGPIPE echo, which pipefail reports as a failed check.
+  grep -q '^NAME' <<<"${out}" || fail "man -s ${n##*.} ${n%.*} rendered no NAME section: ${out}"
 done
 
 echo "=== SMF"
@@ -298,11 +300,11 @@ done
 # Re-importing the same archive is a no-op: it must succeed, say so, and leave
 # every path and byte of the repository as it was.
 tree_before=$(repo_tree) || fail "cannot snapshot ${smoke}/depot/repo"
-echo "${tree_before}" | grep -q '^f ' || fail "scratch repository holds no files after the import: ${tree_before}"
+grep -q '^f ' <<<"${tree_before}" || fail "scratch repository holds no files after the import: ${tree_before}"
 reimport_log=$(sudo su pkg6srv -c "RUST_LOG=info /usr/bin/pkg6repo import-pkg5 -s ${smoke}/src/release.p5p -d ${smoke}/depot/repo 2>&1") \
   || fail "re-importing the same archive failed: ${reimport_log}"
 echo "${reimport_log}"
-echo "${reimport_log}" | grep -qF 'archive already imported' \
+grep -qF 'archive already imported' <<<"${reimport_log}" \
   || fail "re-import did not report the archive as already imported"
 tree_after=$(repo_tree) || fail "cannot snapshot ${smoke}/depot/repo"
 [ "${tree_after}" = "${tree_before}" ] \
