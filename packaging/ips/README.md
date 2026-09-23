@@ -37,6 +37,55 @@ svcadm enable pkg6depotd
 svcs -l pkg6depotd; tail "$(svcs -L pkg6depotd)"
 ```
 
+## TLS
+
+The default configuration serves plain HTTP on loopback for a reverse proxy
+that terminates TLS, as in the oirepo deployment. To serve HTTPS directly,
+bind the public address (`0.0.0.0:443`) and enable one of the commented
+`tls` examples in `pkg6depotd.kdl`. The details are in pkg6depotd(8), under
+TLS.
+
+- **Certificate files:** put them in `/etc/pkg6depotd/tls/` with owner
+  `root:pkg6srv` and mode `0640`; a key file other users can read is
+  refused. After replacing them, run `svcadm refresh pkg6depotd`, which
+  sends SIGHUP. New connections get the new certificate. If the new files
+  are invalid, expired or not valid yet, an error is logged and the old
+  certificate stays in service.
+- **ACME:** start with `staging true`.
+  - The state directory (for example `/var/pkg6depotd/acme`) is not
+    delivered by the package, like the repository. Create it before the
+    first start, owned by `pkg6srv` with mode 0700 (the daemon can also
+    create it if `/var/pkg6depotd` is writable by `pkg6srv`). The daemon
+    refuses a directory that other users can access or that another user
+    owns. Keep it across upgrades and include it in backups: it holds the
+    account key, the certificate key, and `challenges.json`. Never delete
+    `challenges.json` without first removing the records it lists at the
+    provider; a damaged one stops the depot rather than being overwritten.
+  - For dns-01, write the provider token to a file with owner `root:pkg6srv`
+    and mode `0640`. Name that file in `api-token-file`; the token itself
+    never goes into the configuration.
+  - The service already holds `net_privaddr`, so it can bind 443 and the
+    http-01 listener on 80.
+
+```sh
+mkdir -m 0700 /var/pkg6depotd/acme && chown pkg6srv:pkg6srv /var/pkg6depotd/acme
+(umask 077; printf '%s\n' "$CF_TOKEN" > /etc/pkg6depotd/dns-api-token)
+chown root:pkg6srv /etc/pkg6depotd/dns-api-token && chmod 0640 /etc/pkg6depotd/dns-api-token
+/usr/lib/pkg6depotd --config /etc/pkg6depotd/pkg6depotd.kdl config-test
+svcadm restart pkg6depotd
+```
+
+If there is no certificate yet, the depot makes three issuance attempts and
+exits. Failures are counted in `backoff.json` in the state directory, so
+after SMF restarts it the depot waits 5 minutes, then 10, 20 and so on up to
+six hours before contacting the CA again; the service looks online but does
+not listen meanwhile. Delete `backoff.json` to retry at once. It never serves
+plain HTTP instead. `config-test` makes no ACME requests.
+
+dns-01 records that may still exist are listed in `challenges.json` before
+they are created. If the depot stops during an issuance, they are removed at
+its next start.
+
 ## Upgrades
 
 The configuration file uses `preserve=renamenew`. After `pkg update`:
@@ -65,9 +114,13 @@ before removing it.
   It checks that the manifest, SMF manifest, method and build script agree
   with each other.
 - Offline: `cargo nextest run -p pkg6depotd --test packaged_config --test config_fail_closed`.
-  These check that the default configuration parses with the daemon's schema,
-  and that a missing or invalid configuration makes both `start` and
-  `config-test` fail.
+  These check that the default configuration and its commented TLS examples
+  parse with the daemon's schema, and that a missing or invalid configuration
+  makes both `start` and `config-test` fail.
+- Offline: `cargo nextest run -p pkg6depotd --test tls_config --test tls_acme --test tls_depot_e2e`.
+  These check that TLS configuration errors stop the service, and run ACME
+  issuance, renewal and reload against a mock CA and mock Cloudflare and
+  Gandi APIs. They never contact a real CA.
 - On illumos, the SMF manifest validates against the illumos DTD
   (`svccfg validate`). CI runs the build and then `test-ips-package.sh` on a
   throwaway VM:

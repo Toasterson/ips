@@ -1,6 +1,10 @@
 use crate::errors::Result;
+use crate::tls::{CertStore, TlsListener};
 use axum::Router;
+use axum::serve::Listener;
+use std::fmt::Debug;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
@@ -21,7 +25,51 @@ where
 {
     let addr = listener.local_addr()?;
     tracing::info!("Listening on {}", addr);
+    serve_until(router, listener, shutdown).await
+}
 
+/// Serve `router` over TLS with certificates from `store` until `shutdown`
+/// resolves, draining like [`run_until`].
+pub async fn run_tls_until<F>(
+    router: Router,
+    listener: TcpListener,
+    store: Arc<CertStore>,
+    handshake_timeout: Duration,
+    shutdown: F,
+) -> Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let addr = listener.local_addr()?;
+    let config = store.server_config()?;
+    let listener = TlsListener::new(listener, config, handshake_timeout)?;
+    tracing::info!("Listening on {} (HTTPS)", addr);
+    serve_until(router, listener, shutdown).await
+}
+
+/// Serve `router` over TLS with certificates from `store`.
+pub async fn run_tls(
+    router: Router,
+    listener: TcpListener,
+    store: Arc<CertStore>,
+    handshake_timeout: Duration,
+) -> Result<()> {
+    run_tls_until(
+        router,
+        listener,
+        store,
+        handshake_timeout,
+        std::future::pending(),
+    )
+    .await
+}
+
+async fn serve_until<L, F>(router: Router, listener: L, shutdown: F) -> Result<()>
+where
+    L: Listener,
+    L::Addr: Debug,
+    F: Future<Output = ()> + Send + 'static,
+{
     let (stopping_tx, stopping_rx) = tokio::sync::oneshot::channel::<()>();
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
         shutdown.await;

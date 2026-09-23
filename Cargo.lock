@@ -2378,10 +2378,12 @@ dependencies = [
 name = "pkg6depotd"
 version = "0.5.3"
 dependencies = [
+ "arc-swap",
  "askama",
  "assert_cmd",
  "axum",
  "axum-server",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "clap",
@@ -2404,6 +2406,7 @@ dependencies = [
  "predicates",
  "prost",
  "reqwest",
+ "ring",
  "rusqlite",
  "rustls",
  "serde",

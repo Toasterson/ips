@@ -309,6 +309,7 @@ fn depot_config(repo: &Path) -> Config {
         publishers: None,
         admin: None,
         oauth2: None,
+        tls: None,
     }
 }
 

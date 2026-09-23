@@ -26,6 +26,10 @@ pub enum DepotError {
     #[error("Repository error: {0}")]
     #[diagnostic(code(ips::depot_error::repo))]
     Repo(#[from] libips::repository::RepositoryError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Tls(#[from] crate::tls::TlsError),
 }
 
 impl IntoResponse for DepotError {

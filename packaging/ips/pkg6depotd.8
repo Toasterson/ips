@@ -26,6 +26,12 @@ service
 .Sy svc:/application/pkg/pkg6depotd
 and not invoked directly.
 .Pp
+By default the depot speaks plain HTTP and is meant to run behind a reverse
+proxy that terminates TLS.
+It can also serve HTTPS itself, with a certificate from files or one
+obtained and renewed through ACME; see
+.Sx TLS .
+.Pp
 The public HTTP interface is read-only.
 Repositories are created and changed with the local
 .Nm pkg6repo
@@ -48,13 +54,18 @@ Serve the repository.
 This is the default.
 .It Cm config-test
 Load and validate the configuration and print a summary: the file, the bind
-address and the repository root.
+address, the repository root and the TLS mode.
+With certificate files, the certificate and key are loaded and checked;
+with ACME, the permissions of the DNS API token file and of the state
+directory are checked.
 Other settings are not printed, because they may hold credentials.
 Exits non-zero if the file is missing or invalid, including invalid
 .Sx TELEMETRY
+or
+.Sx TLS
 settings.
 Error messages give the line and column of a problem, not the offending text.
-The repository is not opened.
+The repository is not opened and no ACME request is made.
 .El
 .Pp
 On
@@ -299,6 +310,10 @@ property group of its own.
 .Pp
 Configuration file changes take effect on
 .Nm svcadm restart .
+.Nm svcadm refresh
+sends
+.Dv SIGHUP ,
+which only re-reads the TLS certificate and key.
 Diagnostic output goes to the SMF log shown by
 .Nm svcs Fl L Sy pkg6depotd .
 .Pp
@@ -314,6 +329,196 @@ property group, which overrides the service value for that instance only:
 # svcadm refresh pkg6depotd:second
 # svcadm enable pkg6depotd:second
 .Ed
+.Sh TLS
+Without a
+.Ic tls
+block the depot serves plain HTTP on
+.Ic server.bind .
+Keep that address private to the reverse proxy.
+.Pp
+With a
+.Ic tls
+block the depot serves HTTPS only.
+TLS 1.2 and 1.3 are offered, with HTTP/1.1.
+The configuration is checked strictly: a
+.Ic tls
+block that names no certificate source, names both sources, or is
+otherwise inconsistent is an error, and so is the obsolete
+.Ic server.tls-cert
+setting.
+The depot never falls back to plain HTTP, and it opens the HTTPS port only
+after it holds a valid certificate.
+.Ss Certificate files
+.Bd -literal -offset indent
+tls {
+    certificate "/etc/pkg6depotd/tls/fullchain.pem"
+    key "/etc/pkg6depotd/tls/key.pem"
+}
+.Ed
+.Pp
+.Ic certificate
+holds the PEM certificate chain, leaf first;
+.Ic key
+holds the matching PEM private key.
+Both are read by
+.Sy pkg6srv ;
+the key file must not be readable by other users, so use owner
+.Sy root ,
+group
+.Sy pkg6srv
+and mode 0640.
+The service does not start if either is unreadable, if the key file is
+accessible to other users, if the key does not match the certificate, or
+if the certificate has expired or is not valid yet.
+.Cm config-test
+applies the same checks.
+After installing a renewed pair, run
+.Nm svcadm refresh Sy pkg6depotd .
+New connections then use the new certificate.
+If the new files fail any of these checks, an error is logged and the old
+certificate stays in service.
+.Ss ACME
+.Bd -literal -offset indent
+tls {
+    acme {
+        domains "pkg.example.org"
+        contact "mailto:hostmaster@example.org"
+        terms-agreed true
+        staging true
+        state-dir "/var/pkg6depotd/acme"
+        challenge "http-01"
+        http01-bind "0.0.0.0:80"
+    }
+}
+.Ed
+.Pp
+The following settings are supported in the
+.Ic acme
+block:
+.Bl -tag -width Ds
+.It Ic domains Ar name ...
+The DNS names of the certificate, at most 100.
+Wildcards such as
+.Sy *.example.org
+require dns-01.
+.It Ic contact Ar mailto:address ...
+Addresses the CA may use for expiry and policy notices.
+Optional.
+.It Ic terms-agreed Sy true
+Required.
+States that the operator accepts the CA's subscriber agreement.
+.It Ic staging Sy true
+Use the Let's Encrypt staging CA.
+Its certificates are not trusted by clients, but its rate limits allow
+testing.
+Remove it once issuance works.
+.It Ic directory-url Ar url
+The ACME directory of another CA.
+It must be an https URL.
+Every URL the CA returns must be https as well, and orders and
+authorizations must be for exactly the configured
+.Ic domains ;
+anything else is refused before a challenge is answered.
+The default is the Let's Encrypt production CA.
+.It Ic state-dir Ar dir
+Required.
+Holds the account key, an order in progress and the certificate.
+The depot creates the directory with mode 0700 if its parent is writable
+by
+.Sy pkg6srv ;
+it refuses to start if the directory is accessible to other users or
+owned by another user.
+.It Ic renew-before-days Ar days
+Renew this many days before expiry, 1 to 60, default 30.
+Certificates are renewed at the latest when a third of their lifetime
+is left.
+.It Ic challenge Sy http-01 | Sy dns-01
+Required.
+With
+.Sy http-01 ,
+the CA fetches a token from
+.Pa http://domain/.well-known/acme-challenge/ ;
+.Ic http01-bind
+names the plain HTTP listener that answers it, usually
+.Sy 0.0.0.0:80 .
+Port 80 of every domain must reach that listener.
+It answers only challenge tokens and redirects other requests for the
+configured domains to HTTPS on the port of
+.Ic server.bind .
+With
+.Sy dns-01 ,
+the depot creates
+.Sy _acme-challenge
+TXT records through the provider's API, as configured in a
+.Ic dns01
+block.
+.El
+.Pp
+The
+.Ic dns01
+block takes:
+.Bl -tag -width Ds
+.It Ic provider Sy cloudflare | Sy gandi
+The DNS provider.
+Cloudflare needs an API token with Zone.DNS edit rights on the zone.
+Challenge records carry the comment
+.Qq pkg6depotd ACME dns-01 challenge
+and are only deleted when name, value and comment all match.
+Gandi needs a personal access token with LiveDNS rights.
+The depot adds and removes only its own values in the
+.Sy _acme-challenge
+TXT record set and never replaces or deletes the whole set, so other TXT
+values at that name are kept.
+.It Ic api-token-file Ar file
+A file holding only the token.
+It must not be readable by other users; use owner
+.Sy root ,
+group
+.Sy pkg6srv
+and mode 0640.
+The token itself never appears in the configuration, in
+.Cm config-test
+output or in log messages.
+.It Ic zone Ar name
+The DNS zone that contains all
+.Ic domains .
+.It Ic zone-id Ar id
+Cloudflare only: the zone identifier, which skips a lookup by name.
+.It Ic propagation-seconds Ar seconds
+How long to wait after creating the records before the CA checks them,
+0 to 3600, default 60.
+.It Ic ttl Ar seconds
+TTL of the TXT records: 60 to 86400 for Cloudflare, default 120;
+300 to 2592000 for Gandi, default 300.
+.El
+.Pp
+At startup the depot uses the stored certificate if it is currently valid.
+Otherwise it makes up to three attempts to obtain one, 10 seconds apart,
+and exits with an error if they all fail.
+Failed attempts are counted in the state directory, so a restarted depot
+does not start over: it waits 5 minutes before its next attempt, then 10,
+20 and so on, up to six hours, without opening the HTTPS port meanwhile.
+The service therefore stays online but does not serve until issuance
+succeeds; check the log.
+Remove
+.Pa backoff.json
+from the state directory to retry at once; changing
+.Ic domains
+or the CA also starts afresh.
+While running, the depot renews the certificate in the background and
+installs the new one without a restart.
+A failed renewal is logged and retried on the same schedule, while the
+current certificate stays in service.
+Every request to the CA and to the DNS provider has a timeout, and polling
+is bounded.
+Challenge tokens and DNS records are removed after every attempt.
+DNS records are listed in
+.Pa challenges.json
+before they are created.
+If the depot is stopped or crashes while records exist, they are removed
+at its next start, or before its next issuance; until then they stay at
+the provider.
+http-01 tokens are only held in memory and end with the process.
 .Sh FILES
 .Bl -tag -width Ds
 .It Pa /etc/pkg6depotd/pkg6depotd.kdl
@@ -326,6 +531,30 @@ Package upgrades keep an edited copy and install the new default as
 .It Pa /var/pkg6depotd
 Default location of repositories.
 Created by the administrator, not by the package.
+.It Pa /var/pkg6depotd/acme
+Suggested ACME state directory.
+Not delivered by the package; create it owned by
+.Sy pkg6srv
+with mode 0700:
+.Bd -literal -offset indent
+# mkdir -m 0700 /var/pkg6depotd/acme
+# chown pkg6srv:pkg6srv /var/pkg6depotd/acme
+.Ed
+.Pp
+Keep it across upgrades and in backups.
+.Pa certificate.pem
+holds the private key and certificate chain and is replaced atomically;
+.Pa account-*.json
+holds one account key per ACME directory;
+.Pa order.json
+exists only while an order is in progress;
+.Pa challenges.json
+lists dns-01 records that may still exist at the provider;
+if it is damaged the depot refuses to issue and does not overwrite it:
+remove the listed records at the provider, then delete the file;
+.Pa backoff.json
+counts failed issuance attempts.
+All files are mode 0600.
 .It Pa /lib/svc/manifest/application/pkg/pkg6depotd.xml
 SMF service manifest.
 .It Pa /lib/svc/method/svc-pkg6depotd

@@ -112,6 +112,7 @@ async fn serve(repo_path: &Path) -> String {
         publishers: None,
         admin: None,
         oauth2: None,
+        tls: None,
     };
     let state = Arc::new(DepotRepo::new(&config).unwrap());
     let router = http::routes::app_router(state);
