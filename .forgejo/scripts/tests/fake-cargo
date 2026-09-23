@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Stand-in for `cargo clippy --message-format=json` for test-clippy-report.sh.
+# FAKE_CARGO_MODE picks the scenario:
+#   warnings  N lint warnings (each twice, as for lib + test targets), exit 0
+#   error     one warning plus one compile error, exit 101
+#   locked    no diagnostics, a cargo-level error on stderr, exit 101
+# FAKE_CARGO_WARNINGS sets N (default 3). FAKE_CARGO_SLEEP delays the exit.
+set -euo pipefail
+[ "$1" = clippy ] || { echo "fake-cargo: unexpected command $1" >&2; exit 2; }
+case " $* " in *" --message-format=json "*) ;; *) echo "fake-cargo: missing --message-format=json" >&2; exit 2 ;; esac
+
+warn() { # warn N
+  printf '{"reason":"compiler-message","message":{"level":"warning","code":{"code":"clippy::collapsible_if"},"message":"this `if` can be collapsed","rendered":"warning: this `if` can be collapsed %s\\n","spans":[{"file_name":"libips/src/f%s.rs","line_start":%s,"is_primary":true}]}}\n' "$1" "$1" "$1"
+}
+echo "   Checking libips v0.1.0" >&2
+echo "not json: build script chatter"
+sleep "${FAKE_CARGO_SLEEP:-0}"
+case "${FAKE_CARGO_MODE:-warnings}" in
+  warnings)
+    i=1
+    while [ "${i}" -le "${FAKE_CARGO_WARNINGS:-3}" ]; do warn "${i}"; warn "${i}"; i=$((i + 1)); done
+    echo '{"reason":"compiler-message","message":{"level":"warning","code":null,"message":"3 warnings emitted","rendered":"warning: 3 warnings emitted\n","spans":[]}}'
+    echo '{"reason":"build-finished","success":true}'
+    echo "    Finished dev profile" >&2
+    ;;
+  error)
+    warn 1
+    echo '{"reason":"compiler-message","message":{"level":"error","code":{"code":"E0308"},"message":"mismatched types","rendered":"error[E0308]: mismatched types\n --> libips/src/lib.rs:7:5\nFULL-ERROR-BODY\n","spans":[{"file_name":"libips/src/lib.rs","line_start":7,"is_primary":true}]}}'
+    echo '{"reason":"build-finished","success":false}'
+    echo "error: could not compile \`libips\` (lib) due to 1 previous error" >&2
+    exit 101
+    ;;
+  locked)
+    echo "error: the lock file Cargo.lock needs to be updated but --locked was passed" >&2
+    exit 101
+    ;;
+esac

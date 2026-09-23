@@ -58,7 +58,14 @@ jobs:
         # result_large_err and collapsible_if), so warnings are not denied yet.
         # Tracked in the "Make the workspace clippy-clean" ticket; flip to
         # `-- -D warnings` once that lands.
-        run: cargo clippy --workspace --all-targets --all-features --locked
+        # clippy-report.sh keeps the log bounded: diagnostics go to JSON and
+        # the step prints per-lint counts, one line per warning (capped),
+        # every error in full and cargo's stderr tail on failure. The exit
+        # status is clippy's own.
+        run: |
+          set -euo pipefail
+          .forgejo/scripts/tests/test-clippy-report.sh
+          .forgejo/scripts/clippy-report.sh --workspace --all-targets --all-features --locked
 
       - name: Build
         run: cargo build --workspace --all-targets --locked
