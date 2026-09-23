@@ -4,6 +4,7 @@
 **Status:** Accepted
 **Issues:** #38 (implementation), #26 (local batch transaction model), #24
 **Related:** [ADR-004](004-v1-read-only-public-http-and-obsoletion.md)
+**Amended by:** [ADR-009](009-v1-pkg6repo-command-surface.md) — `pkg6repo import-archive` is removed; mentions of it below are historical and `pkg6recv` is the remaining receive path
 
 ## Context
 

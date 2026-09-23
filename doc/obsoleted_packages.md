@@ -18,8 +18,11 @@ This document describes the handling of obsoleted packages in the Image Packagin
 >   (retirement is designed separately in #39).
 >
 > The former `pkg6repo obsolete-package` command, which moved a manifest from
-> the active repository into this store, has been removed. The `*-obsoleted`
-> commands below inspect or maintain the store only. The pkg5 importer
+> the active repository into this store, has been removed (ADR-004), and so
+> have `cleanup-obsoleted` (unchecked permanent deletion) and
+> `import-obsoleted` (created new store entries) (ADR-009). The remaining
+> `*-obsoleted` commands inspect the store, export it, or publish an entry
+> back into the repository. Nothing in v1 adds entries to the store. The pkg5 importer
 > (`import-pkg5`) no longer writes to the store: `pkg.obsolete=true` packages
 > are published in the main repository and catalog, as in pkg5 (#38, ADR-007).
 > Entries earlier importer versions diverted here stay until they are
@@ -118,7 +121,10 @@ This contains just enough information for clients to know that the package is ob
 
 ## CLI Commands
 
-The following CLI commands are available for managing the obsoleted package store:
+The following CLI commands work on the obsoleted package store. The
+list, show, search and export commands do not change the repository; on a
+repository whose store is empty they report no entries without creating
+the store index.
 
 ### List Obsoleted Packages
 
@@ -158,7 +164,10 @@ pkg6repo list-obsoleted -s /path/to/repo -p openindiana.org --page-size 0
 pkg6repo search-obsoleted -s <repository> -p <publisher> -q <pattern> [-F <format>] [-H] [-n <limit>]
 ```
 
-This command searches for obsoleted packages that match a pattern. The pattern can be a simple substring or a regular expression.
+This command searches for obsoleted packages that match a pattern. The
+pattern is a regular expression matched against the FMRI and the package
+name (a plain substring is a valid expression). A pattern of only digits
+and dots matches versions that contain it.
 
 **Example:**
 ```bash
@@ -198,15 +207,20 @@ pkg6repo restore-obsoleted -s <repository> -p <publisher> -f <fmri> [--no-rebuil
 ```
 
 This command restores an obsoleted package to the main repository:
-1. Retrieves the manifest from the store and removes the store entry
+1. Reads the manifest from the store
 2. Publishes the manifest to the main repository in a transaction
-3. Rebuilds the catalog (unless `--no-rebuild` is specified)
+3. Removes the store entry, only after the transaction committed
+4. Rebuilds the catalog (unless `--no-rebuild` is specified)
 
-The store entry is removed *before* the transaction commits, so a failed
-commit loses the stored manifest. Export the entry first
-(`export-obsoleted -q <pattern>`) if it matters. For entries imported from
-pkg5 with a null hash, the restored manifest is the minimal one described
-under "Null Hash for Obsoleted Packages".
+A failed publication keeps the store entry. The manifest is published as
+stored. For entries imported from pkg5 with a null hash, that is the minimal
+manifest described under "Null Hash for Obsoleted Packages", which carries
+`pkg.obsolete=true`: restoring such an entry turns it into a proper pkg5
+obsolete package that clients see. This is the migration path for entries
+earlier importer versions diverted into the store.
+
+Restoring is refused on repositories managed by `import-pkg5`, which
+publish only through generations; re-import the source archive there.
 
 **Example:**
 ```bash
@@ -221,7 +235,12 @@ pkg6repo restore-obsoleted -s /path/to/repo -p openindiana.org \
 pkg6repo export-obsoleted -s <repository> -p <publisher> -o <output-file> [-q <pattern>]
 ```
 
-This command exports obsoleted packages to a JSON file that can be imported into another repository.
+This command writes the store entries, with their manifests, to a JSON file
+for review or backup. It fails, writing nothing, if the output file already
+exists or no entry matches. The file is written under a temporary name in the
+same directory and linked into place only if the output path is still free,
+so an existing file is never replaced, even one created during the export.
+There is no import counterpart in v1.
 
 **Example:**
 ```bash
@@ -230,23 +249,6 @@ pkg6repo export-obsoleted -s /path/to/repo -p openindiana.org -o /path/to/export
 
 # Export only obsoleted packages matching a pattern
 pkg6repo export-obsoleted -s /path/to/repo -p openindiana.org -o /path/to/export.json -q "perl"
-```
-
-### Import Obsoleted Packages
-
-```bash
-pkg6repo import-obsoleted -s <repository> -i <input-file> [-p <publisher>]
-```
-
-This command imports obsoleted packages from a JSON file created by `export-obsoleted`.
-
-**Example:**
-```bash
-# Import obsoleted packages from a file
-pkg6repo import-obsoleted -s /path/to/repo -i /path/to/export.json
-
-# Import obsoleted packages and override the publisher
-pkg6repo import-obsoleted -s /path/to/repo -i /path/to/export.json -p new-publisher
 ```
 
 ## Importing Obsoleted Packages
@@ -321,7 +323,7 @@ impl ObsoletedPackageManager {
         publisher: &str,
         pattern: Option<&str>,
         output_file: &Path,
-    ) -> Result<usize>;
+    ) -> Result<ObsoletedExport>; // Written(n) | Empty | OutputExists
     
     // Import obsoleted packages from a file
     pub fn import_obsoleted_packages(
@@ -363,10 +365,11 @@ pub struct ObsoletedPackageMetadata {
 - **To obsolete a package**, publish a new version whose manifest sets
   `pkg.obsolete=true` (and no other content), as with pkg5. Do not use the
   store for this: legacy clients cannot see store entries.
-- **Deleting store entries is permanent.** `cleanup-obsoleted` removes entries
-  older than its TTL without checking dependencies or snapshot use. Run it with
-  `--dry-run` first and export anything you may need to restore. It is not the
-  v1 purge operation (#39).
+- **Store entries are not deleted by any v1 command** except
+  `restore-obsoleted`, which removes an entry only after publishing it. The
+  former `cleanup-obsoleted` TTL purge was removed: it deleted entries
+  permanently without dependency or snapshot checks. Purge belongs to
+  repository retirement (#39).
 - **Rebuild catalogs after bulk operations** (`restore-obsoleted --no-rebuild`)
   to keep them consistent.
 
@@ -384,15 +387,15 @@ Here are solutions to common issues when working with obsoleted packages:
 3. Use the `search-obsoleted` command with a broader pattern to find similar packages
 4. Check the repository logs for any errors during the obsolete operation
 
-### Errors During Import/Export
+### Errors During Export
 
-**Issue**: Errors occur when importing or exporting obsoleted packages.
+**Issue**: `export-obsoleted` fails.
 
 **Solution**:
-1. Ensure the input/output file paths are correct and writable
-2. Check that the repository exists and is accessible
-3. Verify that the publisher exists in the repository
-4. For import errors, check that the JSON file is valid and has the correct format
+1. If the output file already exists, remove it or choose another path
+2. If no entries matched, check the publisher and pattern with
+   `search-obsoleted`
+3. Check that the repository exists and is accessible
 
 ### Catalog Issues After Restoring Packages
 
@@ -411,42 +414,24 @@ Here are solutions to common issues when working with obsoleted packages:
 **Solution**:
 1. Use the search command with specific patterns to limit the number of packages processed
 2. Use pagination when listing or searching for obsoleted packages
-3. Export obsoleted packages to separate files by category or pattern
-4. Consider using a more powerful machine for repository operations
+3. Consider using a more powerful machine for repository operations
 
 ## Workflow Diagram
 
-Here's a simplified workflow for managing obsoleted packages:
-
 ```
-                                 +-------------------+
-                                 | pkg5 source repo  |
-                                 +-------------------+
-                                          |
-                                          | import-pkg5 (pkg.obsolete=true, see #38)
-                                          v
-                                 +-------------------+
-                                 | Obsoleted Storage |
-                                 +-------------------+
-                                          |
-                                          | (manage)
-                                          v
-                      +------------------------------------------+
-                      |                                          |
-          +-----------+-----------+                  +-----------+-----------+
-          | list-obsoleted        |                  | search-obsoleted      |
-          | show-obsoleted        |                  | export-obsoleted      |
-          +-----------------------+                  +-----------------------+
-                      |                                          |
-                      v                                          v
-          +-----------------------+                  +-----------------------+
-          | restore-obsoleted     |                  | import-obsoleted      |
-          +-----------------------+                  +-----------------------+
-                      |                                          |
-                      v                                          v
-          +-----------------------+                  +-----------------------+
-          | Back to Active Repo   |                  | Different Repository  |
-          +-----------------------+                  +-----------------------+
+  earlier pkg6 builds (obsolete-package, pre-#38 import-pkg5)
+                          |
+                          v
+                +-------------------+
+                | Obsoleted Storage |  (nothing adds entries in v1)
+                +-------------------+
+                    |           |
+   list-obsoleted   |           |  restore-obsoleted
+   show-obsoleted   |           |  (publish, then remove the entry)
+   search-obsoleted |           v
+   export-obsoleted |   +-----------------------+
+   (read-only)      |   | Active repository and |
+                    v   | catalog               |
+              review /  +-----------------------+
+              backup
 ```
-
-This diagram illustrates the flow of packages between the active repository and the obsoleted storage, as well as the various commands used to manage obsoleted packages.

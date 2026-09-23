@@ -90,42 +90,36 @@ fn assert_repo_unchanged(repo: &Path, config: &[u8], current: &Path) {
 }
 
 #[test]
-fn import_archive_into_managed_repository_fails_without_adding_a_publisher() {
-    use libips::repository::{ArchiveWriter, FileBackend, RepositoryVersion, WritableRepository};
+fn remove_publisher_dry_run_leaves_managed_repository_unchanged() {
     let tmp = TempDir::new().unwrap();
     let (repo, config, current) = managed_repo(tmp.path());
 
-    // A .p6p with a publisher the managed repository does not have.
-    let src_path = tmp.path().join("src");
-    let mut src = FileBackend::create(&src_path, RepositoryVersion::V4).unwrap();
-    src.add_publisher("delta").unwrap();
-    let mut tx = src.begin_transaction().unwrap();
-    tx.set_publisher("delta");
-    let mut manifest = libips::actions::Manifest::new();
-    manifest.attributes.push(libips::actions::Attr {
-        key: "pkg.fmri".to_string(),
-        values: vec!["pkg://delta/tools/d@1.0".to_string()],
-        properties: Default::default(),
-    });
-    tx.update_manifest(manifest);
-    tx.commit().unwrap();
-    src.rebuild(Some("delta"), false, false).unwrap();
-    let p6p = tmp.path().join("delta.p6p");
-    let mut writer = ArchiveWriter::create(&p6p).unwrap();
-    writer.add_from_repository(&src, "delta", None).unwrap();
-    writer.finish().unwrap();
-
     let out = pkg6repo(&[
-        "import-archive".as_ref(),
+        "remove-publisher".as_ref(),
+        "-n".as_ref(),
         "-s".as_ref(),
-        p6p.as_os_str(),
-        "-d".as_ref(),
         repo.as_os_str(),
+        "alpha".as_ref(),
+    ]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("Would remove publisher alpha and its 1 packages"),
+        "{}",
+        text(&out)
+    );
+    assert_repo_unchanged(&repo, &config, &current);
+
+    // An unknown publisher fails the whole batch before any generation
+    // switch.
+    let out = pkg6repo(&[
+        "remove-publisher".as_ref(),
+        "-s".as_ref(),
+        repo.as_os_str(),
+        "alpha".as_ref(),
+        "nosuch".as_ref(),
     ]);
     assert!(!out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("receiving packages"), "{}", text(&out));
     assert_repo_unchanged(&repo, &config, &current);
-    assert!(!repo.join("publisher/delta").exists());
 }
 
 #[test]

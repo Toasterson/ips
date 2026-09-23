@@ -297,7 +297,7 @@ pub use file_backend::{FileBackend, IndexEntry};
 pub use generation::{
     FailPoint, GenerationError, GenerationInfo, GenerationReason, GenerationStore, ImportReceipt,
 };
-pub use obsoleted::{ObsoletedPackageManager, ObsoletedPackageMetadata};
+pub use obsoleted::{ObsoletedExport, ObsoletedPackageManager, ObsoletedPackageMetadata};
 pub use pkg5_import::{
     DEFAULT_MAX_ARCHIVE_ENTRIES, Pkg5ImportError, Pkg5ImportOptions, Pkg5ImportOutcome, import_pkg5,
 };

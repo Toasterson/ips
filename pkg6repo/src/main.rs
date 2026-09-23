@@ -3,15 +3,17 @@ mod pkg5_import;
 use error::{Pkg6RepoError, Result};
 use pkg5_import::Pkg5Importer;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use libips::fmri::Fmri;
 use libips::repository::{
-    FileBackend, ProgressInfo, ProgressReporter, ReadableRepository, RepositoryVersion,
-    WritableRepository,
+    FileBackend, ObsoletedExport, PackageInfo, ReadableRepository, RepositoryError,
+    RepositoryVersion, WritableRepository,
 };
 use serde::Serialize;
+use std::collections::{BTreeMap, HashSet};
 use std::convert::TryFrom;
 use std::path::PathBuf;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -22,9 +24,9 @@ mod tests;
 
 // Wrapper structs for JSON serialization
 #[derive(Serialize)]
-struct PropertiesOutput {
+struct PropertiesOutput<'a> {
     #[serde(flatten)]
-    properties: std::collections::HashMap<String, String>,
+    properties: &'a BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -33,14 +35,14 @@ struct InfoOutput {
 }
 
 #[derive(Serialize)]
-struct PackagesOutput {
-    packages: Vec<libips::repository::PackageInfo>,
+struct PackagesOutput<'a> {
+    packages: &'a [PackageInfo],
 }
 
 #[derive(Serialize)]
-struct SearchOutput {
-    query: String,
-    results: Vec<libips::repository::PackageInfo>,
+struct SearchOutput<'a> {
+    query: &'a str,
+    results: &'a [PackageInfo],
 }
 
 #[derive(Serialize)]
@@ -59,7 +61,73 @@ struct ObsoletedPackageDetailsOutput {
     content_hash: String,
 }
 
+/// Output format of the reporting subcommands.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum OutputFormat {
+    #[default]
+    Table,
+    Json,
+    Tsv,
+}
+
+/// Action types `contents -t` can report. The repository contents index
+/// records only these.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ContentsActionType {
+    File,
+    Dir,
+    Link,
+    Depend,
+    License,
+}
+
+impl ContentsActionType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Dir => "dir",
+            Self::Link => "link",
+            Self::Depend => "depend",
+            Self::License => "license",
+        }
+    }
+}
+
+/// Repository property holding the default publisher (pkg5 name).
+const PROP_DEFAULT_PUBLISHER: &str = "publisher/prefix";
+/// Read-only repository property holding the repository format version.
+const PROP_REPOSITORY_VERSION: &str = "repository/version";
+
+/// Parse a repository or source path argument. v1 manages local
+/// repositories only, so a URI (including `file://`) is rejected instead of
+/// being taken as a relative directory name.
+fn local_path(arg: &str) -> std::result::Result<PathBuf, String> {
+    if arg.is_empty() {
+        return Err("the path must not be empty".to_string());
+    }
+    if let Some((scheme, _)) = arg.split_once("://") {
+        let is_scheme = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        if is_scheme {
+            let hint = if scheme.eq_ignore_ascii_case("file") {
+                "; pass the path without the file:// prefix"
+            } else {
+                ""
+            };
+            return Err(format!(
+                "'{arg}' is a URI, but pkg6repo manages local repository paths only{hint}"
+            ));
+        }
+    }
+    Ok(PathBuf::from(arg))
+}
+
 /// pkg6repo - Image Packaging System repository management utility
+///
+/// Manages local repositories only. The depot serves them read-only over
+/// HTTP; there is no remote administration in v1.
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 #[clap(propagate_version = true)]
@@ -71,249 +139,198 @@ struct App {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Create a new package repository
+    ///
+    /// Fails if the directory already holds a repository configuration.
     Create {
         /// Version of the repository to create
         #[clap(long = "repo-version", default_value = "4")]
         repo_version: u32,
 
-        /// Path or URI of the repository to create
-        uri_or_path: String,
+        /// Path of the repository to create
+        #[clap(value_parser = local_path)]
+        path: PathBuf,
     },
 
     /// Add publishers to a repository
+    ///
+    /// Fails without changes if any publisher already exists.
     AddPublisher {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
         /// Publishers to add
+        #[clap(required = true)]
         publisher: Vec<String>,
     },
 
-    /// Remove publishers from a repository
+    /// Remove publishers and all their packages from a repository
+    ///
+    /// Fails without changes if any publisher does not exist.
     RemovePublisher {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
-        /// Perform a dry run
+        /// Only print what would be removed
         #[clap(short = 'n')]
         dry_run: bool,
 
         /// Publishers to remove
+        #[clap(required = true)]
         publisher: Vec<String>,
     },
 
     /// Get repository properties
+    ///
+    /// Supported properties: publisher/prefix (the default publisher) and
+    /// repository/version.
     Get {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
         /// Output format
-        #[clap(short = 'F')]
-        format: Option<String>,
+        #[clap(short = 'F', value_enum, default_value_t)]
+        format: OutputFormat,
 
         /// Omit headers
         #[clap(short = 'H')]
         omit_headers: bool,
 
-        /// Publisher to get properties for
-        #[clap(short = 'p')]
-        publisher: Option<Vec<String>>,
-
-        /// SSL key file
-        #[clap(long)]
-        key: Option<PathBuf>,
-
-        /// SSL certificate file
-        #[clap(long)]
-        cert: Option<PathBuf>,
-
-        /// Properties to get (section/property)
-        section_property: Option<Vec<String>>,
+        /// Properties to get: a section (e.g. publisher) or section/property
+        section_property: Vec<String>,
     },
 
     /// Display repository information
     Info {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
         /// Output format
-        #[clap(short = 'F')]
-        format: Option<String>,
+        #[clap(short = 'F', value_enum, default_value_t)]
+        format: OutputFormat,
 
         /// Omit headers
         #[clap(short = 'H')]
         omit_headers: bool,
 
-        /// Publisher to get information for
+        /// Publisher to show; repeat for several (defaults to all)
         #[clap(short = 'p')]
-        publisher: Option<Vec<String>>,
-
-        /// SSL key file
-        #[clap(long)]
-        key: Option<PathBuf>,
-
-        /// SSL certificate file
-        #[clap(long)]
-        cert: Option<PathBuf>,
+        publisher: Vec<String>,
     },
 
     /// List packages in a repository
+    ///
+    /// Obsolete package versions are listed too, as with pkg5. Fails after
+    /// printing the matches if a pattern matched no package.
     List {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
         /// Output format
-        #[clap(short = 'F')]
-        format: Option<String>,
+        #[clap(short = 'F', value_enum, default_value_t)]
+        format: OutputFormat,
 
         /// Omit headers
         #[clap(short = 'H')]
         omit_headers: bool,
 
-        /// Publisher to list packages for
+        /// Publisher to list packages for; repeat for several (defaults to all)
         #[clap(short = 'p')]
-        publisher: Option<Vec<String>>,
+        publisher: Vec<String>,
 
-        /// SSL key file
-        #[clap(long)]
-        key: Option<PathBuf>,
-
-        /// SSL certificate file
-        #[clap(long)]
-        cert: Option<PathBuf>,
-
-        /// Package FMRI patterns to match
-        pkg_fmri_pattern: Option<Vec<String>>,
+        /// Glob patterns (* and ?) matched against the whole package name
+        pkg_fmri_pattern: Vec<String>,
     },
 
-    /// Show contents of packages in a repository
+    /// Show the files, directories, links, dependencies and licenses of
+    /// packages in a repository
+    ///
+    /// Fails after printing the matches if a pattern matched no package.
     Contents {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
-        /// Show manifest contents
-        #[clap(short = 'm')]
-        manifest: bool,
+        /// Only show actions of this type; repeat for several
+        #[clap(short = 't', value_enum)]
+        action_type: Vec<ContentsActionType>,
 
-        /// Filter by action type
-        #[clap(short = 't')]
-        action_type: Option<Vec<String>>,
-
-        /// Publisher to show contents for
+        /// Publisher to show contents for; repeat for several (defaults to all)
         #[clap(short = 'p')]
-        publisher: Option<Vec<String>>,
+        publisher: Vec<String>,
 
-        /// SSL key file
-        #[clap(long)]
-        key: Option<PathBuf>,
-
-        /// SSL certificate file
-        #[clap(long)]
-        cert: Option<PathBuf>,
-
-        /// Package FMRI patterns to match
-        pkg_fmri_pattern: Option<Vec<String>>,
+        /// Regular expressions matched against the package name
+        pkg_fmri_pattern: Vec<String>,
     },
 
-    /// Rebuild repository metadata
+    /// Rebuild the catalog and search index from the package manifests
     Rebuild {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
-        /// Publisher to rebuild metadata for
+        /// Publisher to rebuild (defaults to all)
         #[clap(short = 'p')]
-        publisher: Option<Vec<String>>,
+        publisher: Option<String>,
 
-        /// SSL key file
-        #[clap(long)]
-        key: Option<PathBuf>,
-
-        /// SSL certificate file
-        #[clap(long)]
-        cert: Option<PathBuf>,
-
-        /// Skip catalog rebuild
-        #[clap(long)]
-        no_catalog: bool,
-
-        /// Skip index rebuild
+        /// Accepted for pkg5 compatibility. The search index is part of the
+        /// catalog and is always rebuilt with it.
         #[clap(long)]
         no_index: bool,
     },
 
-    /// Refresh repository metadata
+    /// Same as rebuild: rebuild the catalog and search index
     Refresh {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
-        /// Publisher to refresh metadata for
+        /// Publisher to refresh (defaults to all)
         #[clap(short = 'p')]
-        publisher: Option<Vec<String>>,
+        publisher: Option<String>,
 
-        /// SSL key file
-        #[clap(long)]
-        key: Option<PathBuf>,
-
-        /// SSL certificate file
-        #[clap(long)]
-        cert: Option<PathBuf>,
-
-        /// Skip catalog refresh
-        #[clap(long)]
-        no_catalog: bool,
-
-        /// Skip index refresh
+        /// Accepted for pkg5 compatibility. The search index is part of the
+        /// catalog and is always rebuilt with it.
         #[clap(long)]
         no_index: bool,
     },
 
     /// Set repository properties
+    ///
+    /// Only publisher/prefix (the default publisher) can be set. All
+    /// arguments are checked before anything is changed.
     Set {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
-
-        /// Publisher to set properties for
-        #[clap(short = 'p')]
-        publisher: Option<String>,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
         /// Properties to set (section/property=value)
+        #[clap(required = true)]
         property_value: Vec<String>,
     },
 
-    /// Search for packages in a repository
+    /// Search the package index of a repository
     Search {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
         /// Output format
-        #[clap(short = 'F')]
-        format: Option<String>,
+        #[clap(short = 'F', value_enum, default_value_t)]
+        format: OutputFormat,
 
         /// Omit headers
         #[clap(short = 'H')]
         omit_headers: bool,
 
-        /// Publisher to search packages for
+        /// Publisher to search (defaults to the default publisher, or all
+        /// publishers if the repository has none)
         #[clap(short = 'p')]
-        publisher: Option<Vec<String>>,
-
-        /// SSL key file
-        #[clap(long)]
-        key: Option<PathBuf>,
-
-        /// SSL certificate file
-        #[clap(long)]
-        cert: Option<PathBuf>,
+        publisher: Option<String>,
 
         /// Maximum number of results to return
         #[clap(short = 'n', long = "limit")]
@@ -321,40 +338,6 @@ enum Commands {
 
         /// Search query
         query: String,
-    },
-
-    /// Create a .p6p archive from a repository
-    Archive {
-        /// Path to the source repository
-        #[clap(short = 's', long)]
-        source: PathBuf,
-
-        /// Output archive path (.p6p)
-        #[clap(short = 'o', long)]
-        output: PathBuf,
-
-        /// Publisher to archive (defaults to all publishers)
-        #[clap(short = 'p', long)]
-        publisher: Option<String>,
-
-        /// Specific packages to include (FMRIs, defaults to all)
-        #[clap(long)]
-        packages: Option<Vec<String>>,
-    },
-
-    /// Import packages from a .p6p archive into a repository
-    ImportArchive {
-        /// Path to the .p6p archive
-        #[clap(short = 's', long)]
-        source: PathBuf,
-
-        /// Path to the destination repository
-        #[clap(short = 'd', long)]
-        destination: PathBuf,
-
-        /// Publisher to import (defaults to all publishers in the archive)
-        #[clap(short = 'p', long)]
-        publisher: Option<String>,
     },
 
     /// Import a pkg5 repository or .p5p archive as one atomic batch
@@ -365,11 +348,11 @@ enum Commands {
     /// FMRI is already published with a different manifest rejects the batch.
     ImportPkg5 {
         /// Path to the pkg5 repository (directory or p5p archive)
-        #[clap(short = 's', long)]
+        #[clap(short = 's', long, value_parser = local_path)]
         source: PathBuf,
 
         /// Path to the destination repository
-        #[clap(short = 'd', long)]
+        #[clap(short = 'd', long, value_parser = local_path)]
         destination: PathBuf,
 
         /// Publisher to import; repeat for several (defaults to all publishers
@@ -394,21 +377,25 @@ enum Commands {
         max_extract_bytes: Option<u64>,
     },
 
-    /// List obsoleted packages in a repository
+    /// List entries of the legacy obsoleted store
+    ///
+    /// The store (<repository>/obsoleted/) holds package versions earlier
+    /// pkg6 builds moved out of the catalog. It is not pkg5 obsoletion: to
+    /// obsolete a package, publish a manifest with pkg.obsolete=true.
     ListObsoleted {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
         /// Output format
-        #[clap(short = 'F')]
-        format: Option<String>,
+        #[clap(short = 'F', value_enum, default_value_t)]
+        format: OutputFormat,
 
         /// Omit headers
         #[clap(short = 'H')]
         omit_headers: bool,
 
-        /// Publisher to list obsoleted packages for
+        /// Publisher to list store entries for
         #[clap(short = 'p')]
         publisher: String,
 
@@ -421,44 +408,45 @@ enum Commands {
         page_size: Option<usize>,
     },
 
-    /// Show details of an obsoleted package
+    /// Show one entry of the legacy obsoleted store
     ShowObsoleted {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
         /// Output format
-        #[clap(short = 'F')]
-        format: Option<String>,
+        #[clap(short = 'F', value_enum, default_value_t)]
+        format: OutputFormat,
 
         /// Publisher of the package
         #[clap(short = 'p')]
         publisher: String,
 
-        /// FMRI of the obsoleted package to show
+        /// Exact FMRI of the store entry
         #[clap(short = 'f')]
         fmri: String,
     },
 
-    /// Search for obsoleted packages
+    /// Search entries of the legacy obsoleted store
     SearchObsoleted {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
         /// Output format
-        #[clap(short = 'F')]
-        format: Option<String>,
+        #[clap(short = 'F', value_enum, default_value_t)]
+        format: OutputFormat,
 
         /// Omit headers
         #[clap(short = 'H')]
         omit_headers: bool,
 
-        /// Publisher to search obsoleted packages for
+        /// Publisher to search store entries for
         #[clap(short = 'p')]
         publisher: String,
 
-        /// Search pattern (supports glob patterns)
+        /// Regular expression matched against the FMRI and the package name.
+        /// A pattern of only digits and dots matches versions containing it.
         #[clap(short = 'q')]
         pattern: String,
 
@@ -467,17 +455,21 @@ enum Commands {
         limit: Option<usize>,
     },
 
-    /// Restore an obsoleted package to the main repository
+    /// Publish an obsoleted-store entry back into the repository
+    ///
+    /// The manifest is published as stored; the store entry is removed only
+    /// after the publication commits. Not supported on repositories managed
+    /// by import-pkg5.
     RestoreObsoleted {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
         /// Publisher of the package
         #[clap(short = 'p')]
         publisher: String,
 
-        /// FMRI of the obsoleted package to restore
+        /// Exact FMRI of the store entry to restore
         #[clap(short = 'f')]
         fmri: String,
 
@@ -486,75 +478,115 @@ enum Commands {
         no_rebuild: bool,
     },
 
-    /// Export obsoleted packages to a file
+    /// Export entries of the legacy obsoleted store to a JSON file
+    ///
+    /// Does not change the catalog or packages. Fails, writing nothing, if
+    /// no entry matches or the output file exists.
     ExportObsoleted {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
+        /// Path of the repository
+        #[clap(short = 's', value_parser = local_path)]
+        repo: PathBuf,
 
-        /// Publisher to export obsoleted packages for
+        /// Publisher to export store entries for
         #[clap(short = 'p')]
         publisher: String,
 
-        /// Output file path
+        /// Output file path (must not exist)
         #[clap(short = 'o')]
-        output_file: String,
+        output_file: PathBuf,
 
-        /// Optional search pattern to filter packages
+        /// Only export entries matching this search-obsoleted pattern
         #[clap(short = 'q')]
         pattern: Option<String>,
     },
-
-    /// Import obsoleted packages from a file
-    ImportObsoleted {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
-
-        /// Input file path
-        #[clap(short = 'i')]
-        input_file: String,
-
-        /// Override publisher (use this instead of the one in the export file)
-        #[clap(short = 'p')]
-        publisher: Option<String>,
-    },
-
-    /// Clean up obsoleted packages older than a specified TTL (time-to-live)
-    CleanupObsoleted {
-        /// Path or URI of the repository
-        #[clap(short = 's')]
-        repo_uri_or_path: String,
-
-        /// Publisher to clean up obsoleted packages for
-        #[clap(short = 'p')]
-        publisher: String,
-
-        /// TTL in days
-        #[clap(short = 't', long = "ttl-days", default_value = "90")]
-        ttl_days: u32,
-
-        /// Perform a dry run (don't actually remove packages)
-        #[clap(short = 'n', long = "dry-run")]
-        dry_run: bool,
-    },
 }
 
-struct ImportProgressReporter;
+/// Fail with `PublisherNotFound` unless every name is a configured publisher.
+fn require_publishers<'a>(
+    repo: &FileBackend,
+    publishers: impl IntoIterator<Item = &'a String>,
+) -> Result<()> {
+    for p in publishers {
+        if !repo.config.publishers.contains(p) {
+            return Err(RepositoryError::PublisherNotFound(p.clone()).into());
+        }
+    }
+    Ok(())
+}
 
-impl ProgressReporter for ImportProgressReporter {
-    fn start(&self, info: &ProgressInfo) {
-        info!("{}", info);
-    }
-    fn update(&self, info: &ProgressInfo) {
-        info!("{}", info);
-    }
-    fn finish(&self, info: &ProgressInfo) {
-        info!("DONE: {}", info.operation);
+/// `None` stands for "all" when a repeatable filter was not given.
+fn filters(values: &[String]) -> Vec<Option<&str>> {
+    if values.is_empty() {
+        vec![None]
+    } else {
+        values.iter().map(|v| Some(v.as_str())).collect()
     }
 }
 
-fn main() -> Result<()> {
+/// Serialize `value` as pretty-printed JSON on stdout.
+fn print_json<T: Serialize>(value: &T) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+/// Print NAME/VERSION/PUBLISHER rows in table or TSV form.
+fn print_fmri_rows<'a>(
+    fmris: impl IntoIterator<Item = &'a Fmri>,
+    format: OutputFormat,
+    omit_headers: bool,
+) {
+    let tsv = format == OutputFormat::Tsv;
+    if !omit_headers {
+        if tsv {
+            println!("NAME\tVERSION\tPUBLISHER");
+        } else {
+            println!("{:<30} {:<15} {:<10}", "NAME", "VERSION", "PUBLISHER");
+        }
+    }
+    for fmri in fmris {
+        let publisher = fmri.publisher.as_deref().unwrap_or("");
+        if tsv {
+            println!("{}\t{}\t{}", fmri.stem(), fmri.version(), publisher);
+        } else {
+            println!(
+                "{:<30} {:<15} {:<10}",
+                fmri.stem(),
+                fmri.version(),
+                publisher
+            );
+        }
+    }
+}
+
+/// The repository properties that have an effect, keyed `section/property`.
+fn effective_properties(repo: &FileBackend) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            PROP_DEFAULT_PUBLISHER.to_string(),
+            repo.config.default_publisher.clone().unwrap_or_default(),
+        ),
+        (
+            PROP_REPOSITORY_VERSION.to_string(),
+            (repo.config.version as u32).to_string(),
+        ),
+    ])
+}
+
+/// Whether the legacy obsoleted store holds anything. `create` makes an
+/// empty `obsoleted/` directory and opening the store manager writes an
+/// index into it, so read-only commands check this first to leave an
+/// unused store untouched.
+fn obsoleted_store_in_use(repo: &FileBackend) -> bool {
+    std::fs::read_dir(repo.path.join("obsoleted"))
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
+fn main() -> miette::Result<()> {
+    Ok(run()?)
+}
+
+fn run() -> Result<()> {
     // Initialize the tracing subscriber with the default log level as debug and no decorations
     // Parse the environment filter first, handling any errors with our custom error type
     let env_filter = EnvFilter::builder()
@@ -576,37 +608,46 @@ fn main() -> Result<()> {
     let cli = App::parse();
 
     match &cli.command {
-        Commands::Create {
-            repo_version,
-            uri_or_path,
-        } => {
+        Commands::Create { repo_version, path } => {
             info!(
                 "Creating repository version {} at {}",
-                repo_version, uri_or_path
+                repo_version,
+                path.display()
             );
 
-            // Convert repo_version to RepositoryVersion
             let repo_version_enum = RepositoryVersion::try_from(*repo_version)?;
 
-            // Create the repository
-            let repo = FileBackend::create(uri_or_path, repo_version_enum)?;
+            // FileBackend::create writes a fresh configuration, which would
+            // drop the publisher list of an existing repository.
+            if path
+                .join(libips::repository::REPOSITORY_CONFIG_FILENAME)
+                .exists()
+                || path.join("pkg5.repository").exists()
+            {
+                return Err(Pkg6RepoError::RepositoryExists(path.clone()));
+            }
+
+            let repo = FileBackend::create(path, repo_version_enum)?;
 
             info!("Repository created successfully at {}", repo.path.display());
             Ok(())
         }
-        Commands::AddPublisher {
-            repo_uri_or_path,
-            publisher,
-        } => {
+        Commands::AddPublisher { repo, publisher } => {
             info!(
                 "Adding publishers {:?} to repository {}",
-                publisher, repo_uri_or_path
+                publisher,
+                repo.display()
             );
 
-            // Open the repository
-            let mut repo = FileBackend::open(repo_uri_or_path)?;
+            let mut repo = FileBackend::open(repo)?;
 
-            // Add each publisher
+            let mut seen = HashSet::new();
+            for p in publisher {
+                if repo.config.publishers.contains(p) || !seen.insert(p) {
+                    return Err(Pkg6RepoError::PublisherExists(p.clone()));
+                }
+            }
+
             for p in publisher {
                 info!("Adding publisher: {}", p);
                 repo.add_publisher(p)?;
@@ -616,206 +657,127 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::RemovePublisher {
-            repo_uri_or_path,
+            repo,
             dry_run,
             publisher,
         } => {
             info!(
                 "Removing publishers {:?} from repository {}",
-                publisher, repo_uri_or_path
+                publisher,
+                repo.display()
             );
             debug!("Dry run: {}", dry_run);
 
-            // Open the repository
-            let mut repo = FileBackend::open(repo_uri_or_path)?;
-
-            // Remove each publisher
-            for p in publisher {
-                info!("Removing publisher: {}", p);
-                repo.remove_publisher(p, *dry_run)?;
-            }
+            let mut repo = FileBackend::open(repo)?;
+            require_publishers(&repo, publisher)?;
 
             if *dry_run {
-                info!("Dry run completed. No changes were made.");
-            } else {
-                info!("Publishers removed successfully");
+                let info = repo.get_info()?;
+                for p in info
+                    .publishers
+                    .iter()
+                    .filter(|p| publisher.contains(&p.name))
+                {
+                    println!(
+                        "Would remove publisher {} and its {} packages",
+                        p.name, p.package_count
+                    );
+                }
+                return Ok(());
             }
 
+            for p in publisher {
+                info!("Removing publisher: {}", p);
+                repo.remove_publisher(p, false)?;
+            }
+
+            info!("Publishers removed successfully");
             Ok(())
         }
         Commands::Get {
-            repo_uri_or_path,
+            repo,
             format,
             omit_headers,
-            publisher,
             section_property,
-            ..
         } => {
-            info!("Getting properties from repository {}", repo_uri_or_path);
+            info!("Getting properties from repository {}", repo.display());
 
-            // Open the repository
-            // In a real implementation with RestBackend, the key and cert parameters would be used for SSL authentication
-            // For now, we're using FileBackend, which doesn't use these parameters
-            let repo = FileBackend::open(repo_uri_or_path)?;
+            let repo = FileBackend::open(repo)?;
+            let all = effective_properties(&repo);
 
-            // Process the publisher parameter
-            let pub_names = if let Some(publishers) = publisher {
-                if !publishers.is_empty() {
-                    publishers.clone()
-                } else {
-                    Vec::new()
-                }
+            let properties: BTreeMap<String, String> = if section_property.is_empty() {
+                all
             } else {
-                Vec::new()
-            };
-
-            // Filter properties if section_property is specified
-            let section_filtered_properties = if let Some(section_props) = section_property {
-                let mut filtered = std::collections::HashMap::new();
-
-                for section_prop in section_props {
-                    // Check if the section_property contains a slash (section/property)
-                    if section_prop.contains('/') {
-                        // Exact match for section/property
-                        if let Some(value) = repo.config.properties.get(section_prop) {
-                            filtered.insert(section_prop.clone(), value.clone());
-                        }
-                    } else {
-                        // Match section only
-                        for (key, value) in &repo.config.properties {
-                            if key.starts_with(&format!("{}/", section_prop)) {
-                                filtered.insert(key.clone(), value.clone());
-                            }
-                        }
+                let mut selected = BTreeMap::new();
+                for name in section_property {
+                    let matches: Vec<_> = all
+                        .iter()
+                        .filter(|(key, _)| {
+                            *key == name
+                                || key.split_once('/').map(|(section, _)| section)
+                                    == Some(name.as_str())
+                        })
+                        .collect();
+                    if matches.is_empty() {
+                        return Err(Pkg6RepoError::UnsupportedProperty(name.clone()));
+                    }
+                    for (key, value) in matches {
+                        selected.insert(key.clone(), value.clone());
                     }
                 }
-
-                filtered
-            } else {
-                // No filtering, use all properties
-                repo.config.properties.clone()
+                selected
             };
 
-            // Filter properties by publisher if specified
-            let filtered_properties = if !pub_names.is_empty() {
-                let mut filtered = std::collections::HashMap::new();
-
-                for (key, value) in &section_filtered_properties {
-                    let parts: Vec<&str> = key.split('/').collect();
-                    if parts.len() == 2 && pub_names.contains(&parts[0].to_string()) {
-                        filtered.insert(key.clone(), value.clone());
-                    }
-                }
-
-                filtered
-            } else {
-                section_filtered_properties
-            };
-
-            // Determine the output format
-            let output_format = format.as_deref().unwrap_or("table");
-
-            match output_format {
-                "table" => {
-                    // Print headers if not omitted
+            match format {
+                OutputFormat::Table => {
                     if !omit_headers {
-                        println!("{:<10} {:<10} {:<20}", "SECTION", "PROPERTY", "VALUE");
+                        println!("{:<12} {:<12} {:<20}", "SECTION", "PROPERTY", "VALUE");
                     }
-
-                    // Print repository properties
-                    for (key, value) in &filtered_properties {
-                        let parts: Vec<&str> = key.split('/').collect();
-                        if parts.len() == 2 {
-                            println!("{:<10} {:<10} {:<20}", parts[0], parts[1], value);
-                        } else {
-                            println!("{:<10} {:<10} {:<20}", "", key, value);
-                        }
+                    for (key, value) in &properties {
+                        let (section, property) = key.split_once('/').unwrap_or(("", key));
+                        println!("{:<12} {:<12} {:<20}", section, property, value);
                     }
                 }
-                "json" => {
-                    // Create a JSON representation of the properties using serde_json
-                    let properties_output = PropertiesOutput {
-                        properties: repo.config.properties.clone(),
-                    };
-
-                    // Serialize to pretty-printed JSON
-                    let json_output = serde_json::to_string_pretty(&properties_output)
-                        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e));
-
-                    println!("{}", json_output);
-                }
-                "tsv" => {
-                    // Print headers if not omitted
+                OutputFormat::Json => print_json(&PropertiesOutput {
+                    properties: &properties,
+                })?,
+                OutputFormat::Tsv => {
                     if !omit_headers {
                         println!("SECTION\tPROPERTY\tVALUE");
                     }
-
-                    // Print repository properties as tab-separated values
-                    for (key, value) in &repo.config.properties {
-                        let parts: Vec<&str> = key.split('/').collect();
-                        if parts.len() == 2 {
-                            println!("{}\t{}\t{}", parts[0], parts[1], value);
-                        } else {
-                            println!("\t{}\t{}", key, value);
-                        }
+                    for (key, value) in &properties {
+                        let (section, property) = key.split_once('/').unwrap_or(("", key));
+                        println!("{}\t{}\t{}", section, property, value);
                     }
-                }
-                _ => {
-                    return Err(Pkg6RepoError::UnsupportedOutputFormat(
-                        output_format.to_string(),
-                    ));
                 }
             }
 
             Ok(())
         }
         Commands::Info {
-            repo_uri_or_path,
+            repo,
             format,
             omit_headers,
             publisher,
-            ..
         } => {
-            info!("Displaying info for repository {}", repo_uri_or_path);
+            info!("Displaying info for repository {}", repo.display());
 
-            // Open the repository
-            // In a real implementation with RestBackend, the key and cert parameters would be used for SSL authentication
-            // For now, we're using FileBackend, which doesn't use these parameters
-            let repo = FileBackend::open(repo_uri_or_path)?;
+            let repo = FileBackend::open(repo)?;
+            require_publishers(&repo, publisher)?;
 
-            // Process the publisher parameter
-            let pub_names = if let Some(publishers) = publisher {
-                if !publishers.is_empty() {
-                    publishers.clone()
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
-
-            // Get repository info
             let mut repo_info = repo.get_info()?;
-
-            // Filter publishers if specified
-            if !pub_names.is_empty() {
-                repo_info.publishers.retain(|p| pub_names.contains(&p.name));
+            if !publisher.is_empty() {
+                repo_info.publishers.retain(|p| publisher.contains(&p.name));
             }
 
-            // Determine the output format
-            let output_format = format.as_deref().unwrap_or("table");
-
-            match output_format {
-                "table" => {
-                    // Print headers if not omitted
+            match format {
+                OutputFormat::Table => {
                     if !omit_headers {
                         println!(
                             "{:<10} {:<8} {:<6} {:<30}",
                             "PUBLISHER", "PACKAGES", "STATUS", "UPDATED"
                         );
                     }
-
-                    // Print repository info
                     for publisher_info in repo_info.publishers {
                         println!(
                             "{:<10} {:<8} {:<6} {:<30}",
@@ -826,25 +788,13 @@ fn main() -> Result<()> {
                         );
                     }
                 }
-                "json" => {
-                    // Create a JSON representation of the repository info using serde_json
-                    let info_output = InfoOutput {
-                        publishers: repo_info.publishers,
-                    };
-
-                    // Serialize to pretty-printed JSON
-                    let json_output = serde_json::to_string_pretty(&info_output)
-                        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e));
-
-                    println!("{}", json_output);
-                }
-                "tsv" => {
-                    // Print headers if not omitted
+                OutputFormat::Json => print_json(&InfoOutput {
+                    publishers: repo_info.publishers,
+                })?,
+                OutputFormat::Tsv => {
                     if !omit_headers {
                         println!("PUBLISHER\tPACKAGES\tSTATUS\tUPDATED");
                     }
-
-                    // Print repository info as tab-separated values
                     for publisher_info in repo_info.publishers {
                         println!(
                             "{}\t{}\t{}\t{}",
@@ -855,536 +805,176 @@ fn main() -> Result<()> {
                         );
                     }
                 }
-                _ => {
-                    return Err(Pkg6RepoError::UnsupportedOutputFormat(
-                        output_format.to_string(),
-                    ));
-                }
             }
 
             Ok(())
         }
         Commands::List {
-            repo_uri_or_path,
+            repo,
             format,
             omit_headers,
             publisher,
             pkg_fmri_pattern,
-            ..
         } => {
-            info!("Listing packages in repository {}", repo_uri_or_path);
+            info!("Listing packages in repository {}", repo.display());
 
-            // Open the repository
-            // In a real implementation with RestBackend, the key and cert parameters would be used for SSL authentication
-            // For now, we're using FileBackend, which doesn't use these parameters
-            let repo = FileBackend::open(repo_uri_or_path)?;
+            let repo = FileBackend::open(repo)?;
+            require_publishers(&repo, publisher)?;
 
-            // Get the publisher if specified
-            let pub_option = if let Some(publishers) = publisher {
-                if !publishers.is_empty() {
-                    Some(publishers[0].as_str())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // Get the pattern if specified
-            let pattern_option = if let Some(patterns) = pkg_fmri_pattern {
-                if !patterns.is_empty() {
-                    Some(patterns[0].as_str())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // List packages
-            let packages = repo.list_packages(pub_option, pattern_option)?;
-
-            // Determine the output format
-            let output_format = format.as_deref().unwrap_or("table");
-
-            match output_format {
-                "table" => {
-                    // Print headers if not omitted
-                    if !omit_headers {
-                        println!("{:<30} {:<15} {:<10}", "NAME", "VERSION", "PUBLISHER");
-                    }
-
-                    // Print packages
-                    for pkg_info in packages {
-                        // Format version and publisher, handling optional fields
-                        let version_str = pkg_info.fmri.version();
-
-                        let publisher_str = match &pkg_info.fmri.publisher {
-                            Some(publisher) => publisher.clone(),
-                            None => String::new(),
-                        };
-
-                        println!(
-                            "{:<30} {:<15} {:<10}",
-                            pkg_info.fmri.stem(),
-                            version_str,
-                            publisher_str
-                        );
+            let mut seen = HashSet::new();
+            let mut packages = Vec::new();
+            let mut unmatched = Vec::new();
+            for pattern in filters(pkg_fmri_pattern) {
+                let mut matched = false;
+                for pub_name in filters(publisher) {
+                    for pkg in repo.list_packages(pub_name, pattern)? {
+                        matched = true;
+                        if seen.insert(pkg.fmri.to_string()) {
+                            packages.push(pkg);
+                        }
                     }
                 }
-                "json" => {
-                    // Create a JSON representation of the packages using serde_json
-                    let packages_output = PackagesOutput { packages };
-
-                    // Serialize to pretty-printed JSON
-                    let json_output = serde_json::to_string_pretty(&packages_output)
-                        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e));
-
-                    println!("{}", json_output);
-                }
-                "tsv" => {
-                    // Print headers if not omitted
-                    if !omit_headers {
-                        println!("NAME\tVERSION\tPUBLISHER");
-                    }
-
-                    // Print packages as tab-separated values
-                    for pkg_info in packages {
-                        // Format version and publisher, handling optional fields
-                        let version_str = pkg_info.fmri.version();
-
-                        let publisher_str = match &pkg_info.fmri.publisher {
-                            Some(publisher) => publisher.clone(),
-                            None => String::new(),
-                        };
-
-                        println!(
-                            "{}\t{}\t{}",
-                            pkg_info.fmri.stem(),
-                            version_str,
-                            publisher_str
-                        );
-                    }
-                }
-                _ => {
-                    return Err(Pkg6RepoError::UnsupportedOutputFormat(
-                        output_format.to_string(),
-                    ));
+                if let (false, Some(pattern)) = (matched, pattern) {
+                    unmatched.push(pattern.to_string());
                 }
             }
 
+            match format {
+                OutputFormat::Json => print_json(&PackagesOutput {
+                    packages: &packages,
+                })?,
+                _ => print_fmri_rows(packages.iter().map(|p| &p.fmri), *format, *omit_headers),
+            }
+
+            if !unmatched.is_empty() {
+                return Err(Pkg6RepoError::NoMatchingPackages(unmatched));
+            }
             Ok(())
         }
         Commands::Contents {
-            repo_uri_or_path,
-            manifest,
+            repo,
             action_type,
             publisher,
             pkg_fmri_pattern,
-            ..
         } => {
-            info!("Showing contents in repository {}", repo_uri_or_path);
+            info!("Showing contents in repository {}", repo.display());
 
-            // Open the repository
-            // In a real implementation with RestBackend, the key and cert parameters would be used for SSL authentication
-            // For now, we're using FileBackend, which doesn't use these parameters
-            let repo = FileBackend::open(repo_uri_or_path)?;
+            let repo = FileBackend::open(repo)?;
+            require_publishers(&repo, publisher)?;
 
-            // Get the publisher if specified
-            let pub_option = if let Some(publishers) = publisher {
-                if !publishers.is_empty() {
-                    Some(publishers[0].as_str())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let action_types: Option<Vec<String>> = (!action_type.is_empty())
+                .then(|| action_type.iter().map(|t| t.as_str().to_string()).collect());
 
-            // Get the pattern if specified
-            let pattern_option = if let Some(patterns) = pkg_fmri_pattern {
-                if !patterns.is_empty() {
-                    Some(patterns[0].as_str())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // Show contents
-            let contents =
-                repo.show_contents(pub_option, pattern_option, action_type.as_deref())?;
-
-            // Print contents
-            for pkg_contents in contents {
-                // Process files
-                if let Some(files) = &pkg_contents.files {
-                    for path in files {
-                        if *manifest {
-                            // If a manifest option is specified, print in manifest format
-                            println!("file path={} type={}", path, pkg_contents.package_id);
-                        } else {
-                            // Otherwise, print in table format
-                            println!(
-                                "{:<40} {:<30} {:<10}",
-                                pkg_contents.package_id, path, "file"
-                            );
+            let mut seen = HashSet::new();
+            let mut contents = Vec::new();
+            let mut unmatched = Vec::new();
+            for pattern in filters(pkg_fmri_pattern) {
+                let mut matched = false;
+                for pub_name in filters(publisher) {
+                    for pkg in repo.show_contents(pub_name, pattern, action_types.as_deref())? {
+                        matched = true;
+                        if seen.insert((pub_name, pkg.package_id.clone())) {
+                            contents.push(pkg);
                         }
                     }
                 }
-
-                // Process directories
-                if let Some(directories) = &pkg_contents.directories {
-                    for path in directories {
-                        if *manifest {
-                            // If a manifest option is specified, print in manifest format
-                            println!("dir path={} type={}", path, pkg_contents.package_id);
-                        } else {
-                            // Otherwise, print in table format
-                            println!("{:<40} {:<30} {:<10}", pkg_contents.package_id, path, "dir");
-                        }
-                    }
+                if let (false, Some(pattern)) = (matched, pattern) {
+                    unmatched.push(pattern.to_string());
                 }
+            }
 
-                // Process links
-                if let Some(links) = &pkg_contents.links {
-                    for path in links {
-                        if *manifest {
-                            // If a manifest option is specified, print in manifest format
-                            println!("link path={} type={}", path, pkg_contents.package_id);
-                        } else {
-                            // Otherwise, print in table format
-                            println!(
-                                "{:<40} {:<30} {:<10}",
-                                pkg_contents.package_id, path, "link"
-                            );
-                        }
-                    }
-                }
-
-                // Process dependencies
-                if let Some(dependencies) = &pkg_contents.dependencies {
-                    for path in dependencies {
-                        if *manifest {
-                            // If a manifest option is specified, print in manifest format
-                            println!("depend path={} type={}", path, pkg_contents.package_id);
-                        } else {
-                            // Otherwise, print in table format
-                            println!(
-                                "{:<40} {:<30} {:<10}",
-                                pkg_contents.package_id, path, "depend"
-                            );
-                        }
-                    }
-                }
-
-                // Process licenses
-                if let Some(licenses) = &pkg_contents.licenses {
-                    for path in licenses {
-                        if *manifest {
-                            // If a manifest option is specified, print in manifest format
-                            println!("license path={} type={}", path, pkg_contents.package_id);
-                        } else {
-                            // Otherwise, print in table format
-                            println!(
-                                "{:<40} {:<30} {:<10}",
-                                pkg_contents.package_id, path, "license"
-                            );
-                        }
+            for pkg in &contents {
+                for (kind, paths) in [
+                    ("file", &pkg.files),
+                    ("dir", &pkg.directories),
+                    ("link", &pkg.links),
+                    ("depend", &pkg.dependencies),
+                    ("license", &pkg.licenses),
+                ] {
+                    for path in paths.iter().flatten() {
+                        println!("{:<40} {:<30} {:<10}", pkg.package_id, path, kind);
                     }
                 }
             }
 
+            if !unmatched.is_empty() {
+                return Err(Pkg6RepoError::NoMatchingPackages(unmatched));
+            }
             Ok(())
         }
         Commands::Rebuild {
-            repo_uri_or_path,
+            repo,
             publisher,
-            no_catalog,
             no_index,
-            ..
+        }
+        | Commands::Refresh {
+            repo,
+            publisher,
+            no_index,
         } => {
-            info!("Rebuilding repository {}", repo_uri_or_path);
+            info!("Rebuilding repository {}", repo.display());
+            if *no_index {
+                warn!("--no-index has no effect: the search index is rebuilt with the catalog");
+            }
 
-            // Open the repository
-            // In a real implementation with RestBackend, the key and cert parameters would be used for SSL authentication
-            // For now, we're using FileBackend, which doesn't use these parameters
-            let repo = FileBackend::open(repo_uri_or_path)?;
-
-            // Get the publisher if specified
-            let pub_option = if let Some(publishers) = publisher {
-                if !publishers.is_empty() {
-                    Some(publishers[0].as_str())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // Rebuild repository metadata
-            repo.rebuild(pub_option, *no_catalog, *no_index)?;
+            let repo = FileBackend::open(repo)?;
+            repo.rebuild(publisher.as_deref(), false, false)?;
 
             info!("Repository rebuilt successfully");
             Ok(())
         }
-        Commands::Refresh {
-            repo_uri_or_path,
-            publisher,
-            no_catalog,
-            no_index,
-            ..
-        } => {
-            info!("Refreshing repository {}", repo_uri_or_path);
-
-            // Open the repository
-            // In a real implementation with RestBackend, the key and cert parameters would be used for SSL authentication
-            // For now, we're using FileBackend, which doesn't use these parameters
-            let repo = FileBackend::open(repo_uri_or_path)?;
-
-            // Get the publisher if specified
-            let pub_option = if let Some(publishers) = publisher {
-                if !publishers.is_empty() {
-                    Some(publishers[0].as_str())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // Refresh repository metadata
-            repo.refresh(pub_option, *no_catalog, *no_index)?;
-
-            info!("Repository refreshed successfully");
-            Ok(())
-        }
         Commands::Set {
-            repo_uri_or_path,
-            publisher,
+            repo,
             property_value,
         } => {
-            info!("Setting properties for repository {}", repo_uri_or_path);
+            info!("Setting properties for repository {}", repo.display());
 
-            // Open the repository
-            let mut repo = FileBackend::open(repo_uri_or_path)?;
+            let mut repo = FileBackend::open(repo)?;
 
-            // Process each property=value pair
+            // Validate every argument before changing anything.
+            let mut default_publisher = None;
             for prop_val in property_value {
-                // Split the property=value string
-                let parts: Vec<&str> = prop_val.split('=').collect();
-                if parts.len() != 2 {
-                    return Err(Pkg6RepoError::InvalidPropertyValueFormat(
-                        prop_val.to_string(),
-                    ));
+                let (property, value) = prop_val.split_once('=').ok_or_else(|| {
+                    Pkg6RepoError::InvalidPropertyValueFormat(prop_val.to_string())
+                })?;
+                if property != PROP_DEFAULT_PUBLISHER {
+                    return Err(Pkg6RepoError::UnsupportedProperty(property.to_string()));
                 }
+                require_publishers(&repo, [&value.to_string()])?;
+                default_publisher = Some(value);
+            }
 
-                let property = parts[0];
-                let value = parts[1];
-
-                // If a publisher is specified, set the publisher property
-                if let Some(pub_name) = publisher {
-                    info!(
-                        "Setting publisher property {}/{} = {}",
-                        pub_name, property, value
-                    );
-                    repo.set_publisher_property(pub_name, property, value)?;
-                } else {
-                    // Otherwise, set the repository property
-                    info!("Setting repository property {} = {}", property, value);
-                    repo.set_property(property, value)?;
-                }
+            if let Some(value) = default_publisher {
+                info!("Setting default publisher to {}", value);
+                repo.set_default_publisher(value)?;
             }
 
             info!("Properties set successfully");
             Ok(())
         }
         Commands::Search {
-            repo_uri_or_path,
+            repo,
             format,
             omit_headers,
             publisher,
             limit,
             query,
-            ..
         } => {
-            info!("Searching for packages in repository {}", repo_uri_or_path);
+            info!("Searching for packages in repository {}", repo.display());
 
-            // Open the repository
-            // In a real implementation with RestBackend, the key and cert parameters would be used for SSL authentication
-            // For now, we're using FileBackend, which doesn't use these parameters
-            let repo = FileBackend::open(repo_uri_or_path)?;
+            let repo = FileBackend::open(repo)?;
+            require_publishers(&repo, publisher)?;
 
-            // Get the publisher if specified
-            let pub_option = if let Some(publishers) = publisher {
-                if !publishers.is_empty() {
-                    Some(publishers[0].as_str())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let packages = repo.search(query, publisher.as_deref(), *limit)?;
 
-            // Search for packages
-            let packages = repo.search(&query, pub_option, *limit)?;
-
-            // Determine the output format
-            let output_format = format.as_deref().unwrap_or("table");
-
-            match output_format {
-                "table" => {
-                    // Print headers if not omitted
-                    if !omit_headers {
-                        println!("{:<30} {:<15} {:<10}", "NAME", "VERSION", "PUBLISHER");
-                    }
-
-                    // Print packages
-                    for pkg_info in packages {
-                        // Format version and publisher, handling optional fields
-                        let version_str = pkg_info.fmri.version();
-
-                        let publisher_str = match &pkg_info.fmri.publisher {
-                            Some(publisher) => publisher.clone(),
-                            None => String::new(),
-                        };
-
-                        println!(
-                            "{:<30} {:<15} {:<10}",
-                            pkg_info.fmri.stem(),
-                            version_str,
-                            publisher_str
-                        );
-                    }
-                }
-                "json" => {
-                    // Create a JSON representation of the search results using serde_json
-                    let search_output = SearchOutput {
-                        query: query.clone(),
-                        results: packages,
-                    };
-
-                    // Serialize to pretty-printed JSON
-                    let json_output = serde_json::to_string_pretty(&search_output)
-                        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e));
-
-                    println!("{}", json_output);
-                }
-                "tsv" => {
-                    // Print headers if not omitted
-                    if !omit_headers {
-                        println!("NAME\tVERSION\tPUBLISHER");
-                    }
-
-                    // Print packages as tab-separated values
-                    for pkg_info in packages {
-                        // Format version and publisher, handling optional fields
-                        let version_str = pkg_info.fmri.version();
-
-                        let publisher_str = match &pkg_info.fmri.publisher {
-                            Some(publisher) => publisher.clone(),
-                            None => String::new(),
-                        };
-
-                        println!(
-                            "{}\t{}\t{}",
-                            pkg_info.fmri.stem(),
-                            version_str,
-                            publisher_str
-                        );
-                    }
-                }
-                _ => {
-                    return Err(Pkg6RepoError::UnsupportedOutputFormat(
-                        output_format.to_string(),
-                    ));
-                }
+            match format {
+                OutputFormat::Json => print_json(&SearchOutput {
+                    query,
+                    results: &packages,
+                })?,
+                _ => print_fmri_rows(packages.iter().map(|p| &p.fmri), *format, *omit_headers),
             }
 
-            Ok(())
-        }
-        Commands::Archive {
-            source,
-            output,
-            publisher,
-            packages,
-        } => {
-            info!(
-                "Creating archive from {} to {}",
-                source.display(),
-                output.display()
-            );
-
-            let source_repo = FileBackend::open(&source)?;
-            let mut writer = libips::repository::ArchiveWriter::create(&output)?;
-
-            let fmri_filter: Option<Vec<libips::fmri::Fmri>> = if let Some(pkg_strs) = packages {
-                let mut fmris = Vec::new();
-                for s in pkg_strs {
-                    let fmri = libips::fmri::Fmri::parse(s).map_err(|e| {
-                        Pkg6RepoError::Other(format!("invalid FMRI '{}': {}", s, e))
-                    })?;
-                    fmris.push(fmri);
-                }
-                Some(fmris)
-            } else {
-                None
-            };
-
-            let info = source_repo.get_info()?;
-            let publishers_to_archive: Vec<String> = if let Some(pub_name) = publisher {
-                vec![pub_name.clone()]
-            } else {
-                info.publishers.iter().map(|p| p.name.clone()).collect()
-            };
-
-            for pub_name in &publishers_to_archive {
-                writer.add_from_repository(&source_repo, pub_name, fmri_filter.as_deref())?;
-            }
-
-            writer.finish()?;
-
-            info!("Archive created successfully at {}", output.display());
-            Ok(())
-        }
-
-        Commands::ImportArchive {
-            source,
-            destination,
-            publisher,
-        } => {
-            info!(
-                "Importing archive from {} to {}",
-                source.display(),
-                destination.display()
-            );
-
-            let source_repo = libips::repository::ArchiveBackend::open(&source)?;
-            let dest_repo = FileBackend::open(&destination)?;
-
-            let progress = ImportProgressReporter;
-            let mut receiver = libips::recv::PackageReceiver::new(&source_repo, dest_repo);
-            receiver = receiver.with_progress(&progress);
-
-            let source_info = source_repo.get_info()?;
-            let publishers_to_import: Vec<String> = if let Some(pub_name) = publisher {
-                vec![pub_name.clone()]
-            } else {
-                source_info
-                    .publishers
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect()
-            };
-
-            for pub_name in &publishers_to_import {
-                let packages = source_repo.list_packages(Some(pub_name), None)?;
-                let fmris: Vec<libips::fmri::Fmri> = packages.into_iter().map(|p| p.fmri).collect();
-                receiver.receive(Some(pub_name), &fmris, false)?;
-            }
-
-            info!("Archive imported successfully");
             Ok(())
         }
 
@@ -1414,7 +1004,7 @@ fn main() -> Result<()> {
         }
 
         Commands::ListObsoleted {
-            repo_uri_or_path,
+            repo,
             format,
             omit_headers,
             publisher,
@@ -1423,119 +1013,57 @@ fn main() -> Result<()> {
         } => {
             info!("Listing obsoleted packages for publisher: {}", publisher);
 
-            // Open the repository
-            let mut repo = FileBackend::open(repo_uri_or_path)?;
+            let mut repo = FileBackend::open(repo)?;
 
-            // Get the obsoleted packages in a new scope to avoid borrowing issues
-            let paginated_result = {
-                // Get the obsoleted package manager
-                let obsoleted_manager = repo.get_obsoleted_manager()?;
+            #[derive(Serialize)]
+            struct PaginatedOutput {
+                #[serde(skip)]
+                fmris: Vec<Fmri>,
+                packages: Vec<String>,
+                page: usize,
+                page_size: usize,
+                total_pages: usize,
+                total_count: usize,
+            }
 
-                // List obsoleted packages with pagination
-                obsoleted_manager.list_obsoleted_packages_paginated(
-                    publisher,
-                    page.clone(),
-                    page_size.clone(),
-                )?
-            }; // obsoleted_manager is dropped here, releasing the mutable borrow on repo
+            let result = if obsoleted_store_in_use(&repo) {
+                let r = repo
+                    .get_obsoleted_manager()?
+                    .list_obsoleted_packages_paginated(publisher, *page, *page_size)?;
+                PaginatedOutput {
+                    packages: r.packages.iter().map(|f| f.to_string()).collect(),
+                    fmris: r.packages,
+                    page: r.page,
+                    page_size: r.page_size,
+                    total_pages: r.total_pages,
+                    total_count: r.total_count,
+                }
+            } else {
+                PaginatedOutput {
+                    fmris: Vec::new(),
+                    packages: Vec::new(),
+                    page: 1,
+                    page_size: page_size.unwrap_or(100),
+                    total_pages: 0,
+                    total_count: 0,
+                }
+            };
 
-            // Determine the output format
-            let output_format = format.as_deref().unwrap_or("table");
-
-            match output_format {
-                "table" => {
-                    // Print headers if not omitted
-                    if !omit_headers {
-                        println!("{:<30} {:<15} {:<10}", "NAME", "VERSION", "PUBLISHER");
-                    }
-
-                    // Print packages
-                    for fmri in &paginated_result.packages {
-                        // Format version and publisher, handling optional fields
-                        let version_str = fmri.version();
-
-                        let publisher_str = match &fmri.publisher {
-                            Some(publisher) => publisher.clone(),
-                            None => String::new(),
-                        };
-
-                        println!(
-                            "{:<30} {:<15} {:<10}",
-                            fmri.stem(),
-                            version_str,
-                            publisher_str
-                        );
-                    }
-
-                    // Print pagination information
+            match format {
+                OutputFormat::Table => {
+                    print_fmri_rows(&result.fmris, *format, *omit_headers);
                     println!(
                         "\nPage {} of {} (Total: {} packages)",
-                        paginated_result.page,
-                        paginated_result.total_pages,
-                        paginated_result.total_count
+                        result.page, result.total_pages, result.total_count
                     );
                 }
-                "json" => {
-                    // Create a JSON representation of the obsoleted packages with pagination info
-                    #[derive(Serialize)]
-                    struct PaginatedOutput {
-                        packages: Vec<String>,
-                        page: usize,
-                        page_size: usize,
-                        total_pages: usize,
-                        total_count: usize,
-                    }
-
-                    let packages_str: Vec<String> = paginated_result
-                        .packages
-                        .iter()
-                        .map(|f| f.to_string())
-                        .collect();
-                    let paginated_output = PaginatedOutput {
-                        packages: packages_str,
-                        page: paginated_result.page,
-                        page_size: paginated_result.page_size,
-                        total_pages: paginated_result.total_pages,
-                        total_count: paginated_result.total_count,
-                    };
-
-                    // Serialize to pretty-printed JSON
-                    let json_output = serde_json::to_string_pretty(&paginated_output)
-                        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e));
-
-                    println!("{}", json_output);
-                }
-                "tsv" => {
-                    // Print headers if not omitted
-                    if !omit_headers {
-                        println!("NAME\tVERSION\tPUBLISHER");
-                    }
-
-                    // Print packages as tab-separated values
-                    for fmri in &paginated_result.packages {
-                        // Format version and publisher, handling optional fields
-                        let version_str = fmri.version();
-
-                        let publisher_str = match &fmri.publisher {
-                            Some(publisher) => publisher.clone(),
-                            None => String::new(),
-                        };
-
-                        println!("{}\t{}\t{}", fmri.stem(), version_str, publisher_str);
-                    }
-
-                    // Print pagination information
+                OutputFormat::Json => print_json(&result)?,
+                OutputFormat::Tsv => {
+                    print_fmri_rows(&result.fmris, *format, *omit_headers);
                     println!(
                         "\nPAGE\t{}\nTOTAL_PAGES\t{}\nTOTAL_COUNT\t{}",
-                        paginated_result.page,
-                        paginated_result.total_pages,
-                        paginated_result.total_count
+                        result.page, result.total_pages, result.total_count
                     );
-                }
-                _ => {
-                    return Err(Pkg6RepoError::UnsupportedOutputFormat(
-                        output_format.to_string(),
-                    ));
                 }
             }
 
@@ -1543,41 +1071,27 @@ fn main() -> Result<()> {
         }
 
         Commands::ShowObsoleted {
-            repo_uri_or_path,
+            repo,
             format,
             publisher,
             fmri,
         } => {
             info!("Showing details of obsoleted package: {}", fmri);
 
-            // Open the repository
-            let mut repo = FileBackend::open(repo_uri_or_path)?;
+            let mut repo = FileBackend::open(repo)?;
+            let parsed_fmri = Fmri::parse(fmri)?;
 
-            // Parse the FMRI
-            let parsed_fmri = libips::fmri::Fmri::parse(fmri)?;
+            let not_found = || Pkg6RepoError::ObsoletedPackageNotFound(parsed_fmri.to_string());
+            if !obsoleted_store_in_use(&repo) {
+                return Err(not_found());
+            }
+            let metadata = repo
+                .get_obsoleted_manager()?
+                .get_obsoleted_package_metadata(publisher, &parsed_fmri)?
+                .ok_or_else(not_found)?;
 
-            // Get the obsoleted package metadata in a new scope to avoid borrowing issues
-            let metadata = {
-                // Get the obsoleted package manager
-                let obsoleted_manager = repo.get_obsoleted_manager()?;
-
-                // Get the obsoleted package metadata
-                match obsoleted_manager.get_obsoleted_package_metadata(publisher, &parsed_fmri)? {
-                    Some(metadata) => metadata,
-                    None => {
-                        return Err(Pkg6RepoError::from(format!(
-                            "Obsoleted package not found: {}",
-                            parsed_fmri
-                        )));
-                    }
-                }
-            }; // obsoleted_manager is dropped here, releasing the mutable borrow on repo
-
-            // Determine the output format
-            let output_format = format.as_deref().unwrap_or("table");
-
-            match output_format {
-                "table" => {
+            match format {
+                OutputFormat::Table => {
                     println!("FMRI: {}", metadata.fmri);
                     println!("Status: {}", metadata.status);
                     println!("Obsolescence Date: {}", metadata.obsolescence_date);
@@ -1596,25 +1110,16 @@ fn main() -> Result<()> {
                     println!("Metadata Version: {}", metadata.metadata_version);
                     println!("Content Hash: {}", metadata.content_hash);
                 }
-                "json" => {
-                    // Create a JSON representation of the obsoleted package details
-                    let details_output = ObsoletedPackageDetailsOutput {
-                        fmri: metadata.fmri,
-                        status: metadata.status,
-                        obsolescence_date: metadata.obsolescence_date,
-                        deprecation_message: metadata.deprecation_message,
-                        obsoleted_by: metadata.obsoleted_by,
-                        metadata_version: metadata.metadata_version,
-                        content_hash: metadata.content_hash,
-                    };
-
-                    // Serialize to pretty-printed JSON
-                    let json_output = serde_json::to_string_pretty(&details_output)
-                        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e));
-
-                    println!("{}", json_output);
-                }
-                "tsv" => {
+                OutputFormat::Json => print_json(&ObsoletedPackageDetailsOutput {
+                    fmri: metadata.fmri,
+                    status: metadata.status,
+                    obsolescence_date: metadata.obsolescence_date,
+                    deprecation_message: metadata.deprecation_message,
+                    obsoleted_by: metadata.obsoleted_by,
+                    metadata_version: metadata.metadata_version,
+                    content_hash: metadata.content_hash,
+                })?,
+                OutputFormat::Tsv => {
                     println!("FMRI\t{}", metadata.fmri);
                     println!("Status\t{}", metadata.status);
                     println!("ObsolescenceDate\t{}", metadata.obsolescence_date);
@@ -1632,18 +1137,13 @@ fn main() -> Result<()> {
                     println!("MetadataVersion\t{}", metadata.metadata_version);
                     println!("ContentHash\t{}", metadata.content_hash);
                 }
-                _ => {
-                    return Err(Pkg6RepoError::UnsupportedOutputFormat(
-                        output_format.to_string(),
-                    ));
-                }
             }
 
             Ok(())
         }
 
         Commands::SearchObsoleted {
-            repo_uri_or_path,
+            repo,
             format,
             omit_headers,
             publisher,
@@ -1655,99 +1155,30 @@ fn main() -> Result<()> {
                 pattern, publisher
             );
 
-            // Open the repository
-            let mut repo = FileBackend::open(repo_uri_or_path)?;
+            let mut repo = FileBackend::open(repo)?;
 
-            // Get the obsoleted packages in a new scope to avoid borrowing issues
-            let obsoleted_packages = {
-                // Get the obsoleted package manager
-                let obsoleted_manager = repo.get_obsoleted_manager()?;
+            let mut obsoleted_packages = if obsoleted_store_in_use(&repo) {
+                repo.get_obsoleted_manager()?
+                    .search_obsoleted_packages(publisher, pattern)?
+            } else {
+                Vec::new()
+            };
+            if let Some(max_results) = limit {
+                obsoleted_packages.truncate(*max_results);
+            }
 
-                // Search for obsoleted packages
-                let mut packages =
-                    obsoleted_manager.search_obsoleted_packages(publisher, pattern)?;
-
-                // Apply limit if specified
-                if let Some(max_results) = limit {
-                    packages.truncate(*max_results);
-                }
-
-                packages
-            }; // obsoleted_manager is dropped here, releasing the mutable borrow on repo
-
-            // Determine the output format
-            let output_format = format.as_deref().unwrap_or("table");
-
-            match output_format {
-                "table" => {
-                    // Print headers if not omitted
-                    if !omit_headers {
-                        println!("{:<30} {:<15} {:<10}", "NAME", "VERSION", "PUBLISHER");
-                    }
-
-                    // Print packages
-                    for fmri in obsoleted_packages {
-                        // Format version and publisher, handling optional fields
-                        let version_str = fmri.version();
-
-                        let publisher_str = match &fmri.publisher {
-                            Some(publisher) => publisher.clone(),
-                            None => String::new(),
-                        };
-
-                        println!(
-                            "{:<30} {:<15} {:<10}",
-                            fmri.stem(),
-                            version_str,
-                            publisher_str
-                        );
-                    }
-                }
-                "json" => {
-                    // Create a JSON representation of the obsoleted packages
-                    let packages_str: Vec<String> =
-                        obsoleted_packages.iter().map(|f| f.to_string()).collect();
-                    let packages_output = ObsoletedPackagesOutput {
-                        packages: packages_str,
-                    };
-
-                    // Serialize to pretty-printed JSON
-                    let json_output = serde_json::to_string_pretty(&packages_output)
-                        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e));
-
-                    println!("{}", json_output);
-                }
-                "tsv" => {
-                    // Print headers if not omitted
-                    if !omit_headers {
-                        println!("NAME\tVERSION\tPUBLISHER");
-                    }
-
-                    // Print packages as tab-separated values
-                    for fmri in obsoleted_packages {
-                        // Format version and publisher, handling optional fields
-                        let version_str = fmri.version();
-
-                        let publisher_str = match &fmri.publisher {
-                            Some(publisher) => publisher.clone(),
-                            None => String::new(),
-                        };
-
-                        println!("{}\t{}\t{}", fmri.stem(), version_str, publisher_str);
-                    }
-                }
-                _ => {
-                    return Err(Pkg6RepoError::UnsupportedOutputFormat(
-                        output_format.to_string(),
-                    ));
-                }
+            match format {
+                OutputFormat::Json => print_json(&ObsoletedPackagesOutput {
+                    packages: obsoleted_packages.iter().map(|f| f.to_string()).collect(),
+                })?,
+                _ => print_fmri_rows(&obsoleted_packages, *format, *omit_headers),
             }
 
             Ok(())
         }
 
         Commands::RestoreObsoleted {
-            repo_uri_or_path,
+            repo,
             publisher,
             fmri,
             no_rebuild,
@@ -1757,43 +1188,35 @@ fn main() -> Result<()> {
                 fmri, publisher
             );
 
-            // Parse the FMRI
-            let parsed_fmri = libips::fmri::Fmri::parse(fmri)?;
+            let parsed_fmri = Fmri::parse(fmri)?;
 
-            // Open the repository
-            let mut repo = FileBackend::open(repo_uri_or_path)?;
+            let mut repo = FileBackend::open(repo)?;
             // Restoring publishes through a transaction; refuse before the
             // side-store record is removed.
             repo.reject_if_managed("restoring an obsoleted package")?;
+
+            let not_found = || Pkg6RepoError::ObsoletedPackageNotFound(parsed_fmri.to_string());
+            if !obsoleted_store_in_use(&repo) {
+                return Err(not_found());
+            }
 
             // Read the manifest; the side-store record is removed only after
             // the package is published again.
             let manifest_content = repo
                 .get_obsoleted_manager()?
                 .get_obsoleted_package_manifest(publisher, &parsed_fmri)?
-                .ok_or_else(|| {
-                    Pkg6RepoError::from(format!("Obsoleted package not found: {}", parsed_fmri))
-                })?;
+                .ok_or_else(not_found)?;
 
-            // Parse the manifest
             let manifest = libips::actions::Manifest::parse_string(manifest_content)?;
 
-            // Begin a transaction
             let mut transaction = repo.begin_transaction()?;
-
-            // Set the publisher for the transaction
             transaction.set_publisher(publisher);
-
-            // Update the manifest in the transaction
             transaction.update_manifest(manifest);
-
-            // Commit the transaction
             transaction.commit()?;
 
             repo.get_obsoleted_manager()?
                 .remove_obsoleted_package(publisher, &parsed_fmri)?;
 
-            // Rebuild the catalog if not disabled
             if !no_rebuild {
                 info!("Rebuilding catalog...");
                 repo.rebuild(Some(publisher), false, false)?;
@@ -1804,95 +1227,40 @@ fn main() -> Result<()> {
         }
 
         Commands::ExportObsoleted {
-            repo_uri_or_path,
+            repo,
             publisher,
             output_file,
             pattern,
         } => {
             info!("Exporting obsoleted packages for publisher: {}", publisher);
 
-            // Open the repository
-            let mut repo = FileBackend::open(repo_uri_or_path)?;
+            let mut repo = FileBackend::open(repo)?;
 
-            // Export the obsoleted packages
-            let count = {
-                // Get the obsoleted package manager
-                let obsoleted_manager = repo.get_obsoleted_manager()?;
-
-                // Export the obsoleted packages
-                let output_path = PathBuf::from(output_file);
-                obsoleted_manager.export_obsoleted_packages(
-                    publisher,
-                    pattern.as_deref(),
-                    &output_path,
-                )?
-            }; // obsoleted_manager is dropped here, releasing the mutable borrow on repo
-
-            info!("Exported {} obsoleted packages to {}", count, output_file);
-            Ok(())
-        }
-
-        Commands::ImportObsoleted {
-            repo_uri_or_path,
-            input_file,
-            publisher,
-        } => {
-            info!("Importing obsoleted packages from {}", input_file);
-
-            // Open the repository
-            let mut repo = FileBackend::open(repo_uri_or_path)?;
-
-            // Import the obsoleted packages
-            let count = {
-                // Get the obsoleted package manager
-                let obsoleted_manager = repo.get_obsoleted_manager()?;
-
-                // Import the obsoleted packages
-                let input_path = PathBuf::from(input_file);
-                obsoleted_manager.import_obsoleted_packages(&input_path, publisher.as_deref())?
-            }; // obsoleted_manager is dropped here, releasing the mutable borrow on repo
-
-            info!("Imported {} obsoleted packages", count);
-            Ok(())
-        }
-
-        Commands::CleanupObsoleted {
-            repo_uri_or_path,
-            publisher,
-            ttl_days,
-            dry_run,
-        } => {
-            if *dry_run {
-                info!(
-                    "Dry run: Cleaning up obsoleted packages older than {} days for publisher: {}",
-                    ttl_days, publisher
-                );
-            } else {
-                info!(
-                    "Cleaning up obsoleted packages older than {} days for publisher: {}",
-                    ttl_days, publisher
-                );
+            if !obsoleted_store_in_use(&repo) {
+                return Err(Pkg6RepoError::NothingToExport(publisher.clone()));
             }
 
-            // Open the repository
-            let mut repo = FileBackend::open(repo_uri_or_path)?;
+            // libips checks for and creates the output file in one atomic
+            // step, so there is no separate existence check here.
+            let count = match repo.get_obsoleted_manager()?.export_obsoleted_packages(
+                publisher,
+                pattern.as_deref(),
+                output_file,
+            )? {
+                ObsoletedExport::Written(count) => count,
+                ObsoletedExport::Empty => {
+                    return Err(Pkg6RepoError::NothingToExport(publisher.clone()));
+                }
+                ObsoletedExport::OutputExists => {
+                    return Err(Pkg6RepoError::OutputExists(output_file.clone()));
+                }
+            };
 
-            // Clean up the obsoleted packages
-            let count = {
-                // Get the obsoleted package manager
-                let obsoleted_manager = repo.get_obsoleted_manager()?;
-
-                // Clean up the obsoleted packages
-                obsoleted_manager
-                    .cleanup_obsoleted_packages_older_than_ttl(publisher, *ttl_days, *dry_run)?
-            }; // obsoleted_manager is dropped here, releasing the mutable borrow on repo
-
-            if *dry_run {
-                info!("Dry run: Would remove {} obsoleted packages", count);
-            } else {
-                info!("Successfully removed {} obsoleted packages", count);
-            }
-
+            println!(
+                "Exported {} obsoleted packages to {}",
+                count,
+                output_file.display()
+            );
             Ok(())
         }
     }

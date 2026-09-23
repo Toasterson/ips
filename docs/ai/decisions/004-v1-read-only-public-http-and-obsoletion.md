@@ -3,6 +3,7 @@
 **Date:** 2026-09-23
 **Status:** Accepted
 **Amends:** [ADR-002](002-openidconnect-rest-authentication.md) (for v1 only)
+**Amended by:** [ADR-009](009-v1-pkg6repo-command-surface.md) (store commands)
 **Issues:** #24, #25, #40
 
 ## Context
