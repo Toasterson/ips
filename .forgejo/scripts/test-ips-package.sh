@@ -4,6 +4,10 @@
 #   * the pkg6srv account (UID/GID 94) and file ownership/modes
 #   * the SMF manifest validates and imports with the instance disabled
 #   * the service starts as pkg6srv and answers /versions/0/
+#   * the native pkg5 client (pkg(1), pkgrecv) reads the catalog, manifests
+#     and payloads of packages imported with pkg6repo import-pkg5 from the
+#     running depot, and installs one into a scratch image (see "pkg5 client
+#     smoke" below)
 #   * an operator-edited config survives an upgrade (preserve=renamenew:
 #     the new default lands in pkg6depotd.kdl.new) and the depot stays up
 #   * uninstall disables the service and removes the payload, but leaves the
@@ -161,6 +165,180 @@ set_config_file "${conf}"
 smf svcadm clear "${svc}"
 wait_state online
 probe
+
+echo "=== pkg5 client smoke: native pkg(1) and pkgrecv against the running depot"
+# Proves that the legacy Python client consumes what import-pkg5 publishes,
+# served by the installed daemon under SMF as pkg6srv:
+#   * the release .p5p and a dependency-free dummy package are imported with
+#     /usr/bin/pkg6repo import-pkg5 into a scratch repository; re-importing
+#     the release archive reports "already imported" and leaves every path
+#     and checksum of the repository unchanged;
+#   * negative control first: while the depot serves the operator repository
+#     (which lacks ${pub}), a fresh pkg(1) image is created but cannot refresh
+#     ${pub}, so the catalog check below cannot pass without the depot's
+#     catalog route;
+#   * the instance is switched to the scratch repository; a fresh scratch
+#     image (pkg image-create --no-refresh, then refresh --full) must list
+#     exactly the source FMRIs, which it can only learn from
+#     /<pub>/catalog/1/, and pkg info -r must fetch the manifest;
+#   * pkgrecv -s <depot> --newest lists the same FMRIs, and pkgrecv -a pulls
+#     both packages over /manifest/0/ and /file/1/ into a scratch .p5p whose
+#     manifests are byte-identical and payloads content-identical to the
+#     sources (pkg5_smoke_compare);
+#   * the dummy installs into the scratch image, its file matches the proto,
+#     pkg verify passes, and it uninstalls again.
+# pkg(1) and pkgrecv run with no_proxy for 127.0.0.1 (sp5/p5).
+# Everything lives in one /var/tmp directory that is removed afterwards
+# (also on failure); /var/pkg6depotd is not touched, and the instance is
+# switched back to ${conf} before the upgrade checks.
+# shellcheck source=pkg5-smoke-lib.sh
+. "${here}/pkg5-smoke-lib.sh"
+pub=${IPS_PUBLISHER}
+url="http://127.0.0.1:${port}"
+dummy=pkg6-release-test/pkg5-smoke
+[ "${pub}" != test ] || fail "publisher '${pub}' collides with the operator repository's; the negative control needs another"
+smoke=$(mktemp -d /var/tmp/pkg6-pkg5-smoke.XXXXXX)
+case "${smoke}" in
+  /var/tmp/pkg6-pkg5-smoke.?*) ;;
+  *) fail "unexpected scratch directory '${smoke}'" ;;
+esac
+cleanup_smoke() { sudo rm -rf -- "${smoke}"; }
+trap cleanup_smoke EXIT
+chmod 0755 "${smoke}"
+mkdir "${smoke}/tmp" "${smoke}/src"
+chmod 0755 "${smoke}/src"
+# p5 CMD...: run a pkg5 tool as the CI user with scratch temp space and no
+# proxy between it and the depot.
+p5() { TMPDIR="${smoke}/tmp" no_proxy=127.0.0.1 NO_PROXY=127.0.0.1 "$@"; }
+# sp5 CMD...: the same as root. sudo resets the environment, so the no-proxy
+# settings go through env(1) rather than sudoers' env_keep.
+sp5() { sudo env TMPDIR="${smoke}/tmp" no_proxy=127.0.0.1 NO_PROXY=127.0.0.1 "$@"; }
+# repo_tree: snapshot of the scratch repository (paths and file checksums).
+repo_tree() {
+  sudo bash -c '. "$1" && pkg5_smoke_tree "$2"' _ "${here}/pkg5-smoke-lib.sh" "${smoke}/depot/repo"
+}
+# depot_restart: restart the instance and wait until a new process answers.
+depot_restart() {
+  local old new=
+  old=$(pgrep -u pkg6srv -f /usr/lib/pkg6depotd || true)
+  smf svcadm restart "${svc}"
+  for _ in $(seq 1 90); do
+    new=$(pgrep -u pkg6srv -f /usr/lib/pkg6depotd || true)
+    [ -n "${new}" ] && [ "${new}" != "${old}" ] && break
+    sleep 1
+  done
+  [ -n "${new}" ] && [ "${new}" != "${old}" ] || fail "pkg6depotd did not restart (still '${old}')"
+  wait_state online
+  probe
+}
+serves_pub() { curl -sSf "${url}/${pub}/catalog/1/catalog.attrs" >/dev/null 2>&1; }
+
+cp "${p5p}" "${smoke}/src/release.p5p"
+mkdir -p "${smoke}/dummy-proto/opt/pkg6-pkg5-smoke"
+echo "pkg6depotd release pkg5 client smoke ${smoke}" >"${smoke}/dummy-proto/opt/pkg6-pkg5-smoke/hello.txt"
+cat >"${smoke}/dummy.p5m" <<EOF
+set name=pkg.fmri value=${dummy}@1.0,5.11-0
+set name=pkg.summary value="pkg6depotd release test: pkg5 client smoke"
+dir path=opt owner=root group=bin mode=0755
+dir path=opt/pkg6-pkg5-smoke owner=root group=bin mode=0755
+file opt/pkg6-pkg5-smoke/hello.txt path=opt/pkg6-pkg5-smoke/hello.txt owner=root group=bin mode=0444
+EOF
+p5 pkgrepo create "${smoke}/dummy-repo"
+p5 pkgrepo -s "${smoke}/dummy-repo" set "publisher/prefix=${pub}"
+p5 pkgsend -s "${smoke}/dummy-repo" publish -d "${smoke}/dummy-proto" "${smoke}/dummy.p5m"
+p5 pkgrecv -s "${smoke}/dummy-repo" -a -d "${smoke}/src/dummy.p5p" "${dummy}"
+chmod 0644 "${smoke}/src/release.p5p" "${smoke}/src/dummy.p5p"
+expected=$({ p5 pkgrecv -s "${smoke}/src/release.p5p" --newest && p5 pkgrecv -s "${smoke}/src/dummy.p5p" --newest; } | sort) \
+  || fail "pkgrecv could not list the source archives"
+rel_fmri=$(echo "${expected}" | grep -F "pkg://${pub}/${IPS_PKG_NAME}@" || true)
+dummy_fmri=$(echo "${expected}" | grep -F "pkg://${pub}/${dummy}@" || true)
+[ "$(echo "${rel_fmri}" | grep -c .)" = 1 ] || fail "release archive does not hold exactly one ${IPS_PKG_NAME} for ${pub}: ${expected}"
+[ "$(echo "${dummy_fmri}" | grep -c .)" = 1 ] || fail "dummy archive does not hold ${dummy} for ${pub}: ${expected}"
+echo "source FMRIs:"
+echo "${expected}"
+
+echo "--- import both archives into a scratch repository"
+sudo mkdir -m 0750 "${smoke}/depot"
+sudo chown pkg6srv:pkg6srv "${smoke}/depot"
+sudo su pkg6srv -c "/usr/bin/pkg6repo create ${smoke}/depot/repo"
+for a in release dummy; do
+  sudo su pkg6srv -c "RUST_LOG=info /usr/bin/pkg6repo import-pkg5 -s ${smoke}/src/${a}.p5p -d ${smoke}/depot/repo" \
+    || fail "import-pkg5 of the ${a} archive failed"
+done
+# Re-importing the same archive is a no-op: it must succeed, say so, and leave
+# every path and byte of the repository as it was.
+tree_before=$(repo_tree) || fail "cannot snapshot ${smoke}/depot/repo"
+echo "${tree_before}" | grep -q '^f ' || fail "scratch repository holds no files after the import: ${tree_before}"
+reimport_log=$(sudo su pkg6srv -c "RUST_LOG=info /usr/bin/pkg6repo import-pkg5 -s ${smoke}/src/release.p5p -d ${smoke}/depot/repo 2>&1") \
+  || fail "re-importing the same archive failed: ${reimport_log}"
+echo "${reimport_log}"
+echo "${reimport_log}" | grep -qF 'archive already imported' \
+  || fail "re-import did not report the archive as already imported"
+tree_after=$(repo_tree) || fail "cannot snapshot ${smoke}/depot/repo"
+[ "${tree_after}" = "${tree_before}" ] \
+  || fail "re-import changed the repository: $(diff <(echo "${tree_before}") <(echo "${tree_after}") || true)"
+echo "re-import left the repository unchanged ($(echo "${tree_before}" | grep -c .) entries)"
+# Same config as the operator's, only the repository root differs.
+sudo sed "s|^\([[:space:]]*root \)\"/var/pkg6depotd/repo\"|\1\"${smoke}/depot/repo\"|" "${conf}" \
+  | sudo tee "${smoke}/depot.kdl" >/dev/null
+sudo grep -qF "root \"${smoke}/depot/repo\"" "${smoke}/depot.kdl" || fail "could not point the scratch config at ${smoke}/depot/repo"
+sudo chown root:pkg6srv "${smoke}/depot.kdl"
+sudo chmod 0640 "${smoke}/depot.kdl"
+
+echo "--- negative control: the operator repository does not serve ${pub}"
+! serves_pub || fail "the operator repository already serves ${pub}; the catalog check would prove nothing"
+# The image must be created, so that only the refresh can fail.
+sp5 pkg image-create -F --no-refresh -p "${pub}=${url}/" "${smoke}/image-neg" \
+  || fail "pkg image-create of the negative-control image failed"
+if sp5 pkg -R "${smoke}/image-neg" refresh --full; then
+  fail "pkg(1) refreshed ${pub} from a depot that does not serve it"
+fi
+echo "pkg(1) failed as expected without a served catalog for ${pub}"
+
+echo "--- serve the scratch repository"
+set_config_file "${smoke}/depot.kdl"
+depot_restart
+serves_pub || fail "depot does not serve ${url}/${pub}/catalog/1/catalog.attrs from the scratch repository"
+
+echo "--- pkg(1): catalog and manifest in a scratch image"
+img="${smoke}/image"
+sp5 pkg image-create -F --no-refresh -p "${pub}=${url}/" "${img}" || fail "pkg image-create failed"
+sp5 pkg -R "${img}" refresh --full || fail "pkg(1) could not read the catalog from ${url}"
+got=$(sp5 pkg -R "${img}" list -Hafv | awk '{ print $1 }' | sort) || fail "pkg list -af found no packages in ${url}"
+[ "${got}" = "${expected}" ] || fail "pkg(1) catalog lists '${got}', the sources hold '${expected}'"
+sp5 pkg -R "${img}" info -r "${rel_fmri}" || fail "pkg info -r could not fetch the manifest of ${rel_fmri}"
+
+echo "--- pkgrecv: manifests and payloads into a scratch archive"
+got=$(p5 pkgrecv -s "${url}/" --newest | sort) || fail "pkgrecv could not list ${url}"
+[ "${got}" = "${expected}" ] || fail "pkgrecv lists '${got}', the sources hold '${expected}'"
+p5 pkgrecv -s "${url}/" -c "${smoke}/pkgrecv-cache" -a -d "${smoke}/received.p5p" "${rel_fmri}" "${dummy_fmri}" \
+  || fail "pkgrecv could not retrieve the packages from ${url}"
+for a in src/release src/dummy received; do
+  pkg5_smoke_unpack "${smoke}/${a}.p5p" "${smoke}/unpacked-${a#src/}" || fail "cannot unpack ${smoke}/${a}.p5p"
+done
+diffs=$(pkg5_smoke_compare "${smoke}/unpacked-received" "${smoke}/unpacked-release" "${smoke}/unpacked-dummy") \
+  || fail "pkgrecv copy from the depot differs from the sources: ${diffs}"
+echo "manifests byte-identical, payloads content-identical:"
+pkg5_smoke_list pkg "${smoke}/unpacked-received"
+
+echo "--- pkg(1): install the dummy package into the scratch image"
+sp5 pkg -R "${img}" install -v "${dummy_fmri}" || fail "pkg install of ${dummy_fmri} from ${url} failed"
+[ "$(sp5 pkg -R "${img}" list -Hv "${dummy}" | awk '{ print $1 }')" = "${dummy_fmri}" ] \
+  || fail "scratch image does not have ${dummy_fmri} installed"
+sudo cmp "${img}/opt/pkg6-pkg5-smoke/hello.txt" "${smoke}/dummy-proto/opt/pkg6-pkg5-smoke/hello.txt" \
+  || fail "installed dummy file differs from its proto"
+sp5 pkg -R "${img}" verify -v "${dummy}" || fail "pkg verify of ${dummy} failed"
+sp5 pkg -R "${img}" uninstall -v "${dummy}" || fail "pkg uninstall of ${dummy} failed"
+sudo test ! -e "${img}/opt/pkg6-pkg5-smoke/hello.txt" || fail "dummy file still present after uninstall"
+
+echo "--- back to the operator repository"
+set_config_file "${conf}"
+depot_restart
+! serves_pub || fail "depot still serves ${pub} after switching back to ${conf}"
+cleanup_smoke
+trap - EXIT
+[ ! -e "${smoke}" ] || fail "scratch directory ${smoke} was not removed"
+echo "pkg5 client smoke passed"
 pid1=$(pgrep -u pkg6srv -f /usr/lib/pkg6depotd)
 
 echo "=== upgrade: operator config must survive"

@@ -394,7 +394,7 @@ for f in "${tip}" "${root}/packaging/ips/pkg6depotd.kdl" "${root}/packaging/ips/
 done
 eq "test sets config/file only through set_config_file" \
   "$(svccfg_config_targets "${tip}")" '"${svc_service}"'
-eq "test switches config/file three times" "$(grep -c '^set_config_file ' "${tip}")" 3
+eq "test switches config/file five times (fail-closed checks, pkg5 smoke)" "$(grep -c '^set_config_file ' "${tip}")" 5
 check "set_config_file refreshes the instance" grep -q '^  smf svcadm refresh "${svc}"$' "${tip}"
 check "set_config_file reads the value back through the instance" \
   grep -q 'svcprop -p config/file "${svc}"' "${tip}"
@@ -402,6 +402,143 @@ check_not "no bare sudo svcadm/svccfg (failures go through smf/fail diagnostics)
   grep -qE '^[[:space:]]*sudo (svcadm|svccfg) ' "${tip}"
 check "start method reads properties through the composed instance view" \
   grep -q 'svcprop -p "$1" "$SMF_FMRI"' "${method}"
+
+# --- pkg5 client smoke: comparison helpers ---------------------------------------
+# shellcheck source=.forgejo/scripts/pkg5-smoke-lib.sh
+. "${scripts}/pkg5-smoke-lib.sh"
+# mkp5p DIR PUB STEM VER BODY PAYLOAD: an unpacked p5p with one manifest and
+# one gzip payload, laid out like pkg5 writes it.
+mkp5p() {
+  mkdir -p "$1/publisher/$2/pkg/$3" "$1/publisher/$2/file/ab"
+  printf '%s\n' "$5" >"$1/publisher/$2/pkg/$3/$4"
+  printf '%s\n' "$6" | gzip -1 >"$1/publisher/$2/file/ab/ab01"
+  printf 'x' >"$1/pkg5.repository"
+}
+sm="${tmp}/smoke"
+mkdir -p "${sm}"
+mkp5p "${sm}/rel" p package%2Fpkg6%2Fdepotd 1.0%2C5.11-0.1.1%3A20260923T000000Z "set name=pkg.fmri value=a" payload-a
+mkdir -p "${sm}/dum/publisher/p/pkg/pkg6-release-test%2Fpkg5-smoke" "${sm}/dum/publisher/p/file/cd"
+printf 'set name=pkg.fmri value=b\n' >"${sm}/dum/publisher/p/pkg/pkg6-release-test%2Fpkg5-smoke/1.0%3AZ"
+printf 'hello\n' | gzip >"${sm}/dum/publisher/p/file/cd/cd02"
+fresh_got() { # the depot copy: same bytes, payloads recompressed differently
+  rm -rf "${sm}/got"
+  cp -R "${sm}/rel" "${sm}/got"
+  cp -R "${sm}/dum/publisher/p/pkg/pkg6-release-test%2Fpkg5-smoke" "${sm}/got/publisher/p/pkg/"
+  mkdir -p "${sm}/got/publisher/p/file/cd"
+  printf 'hello\n' | gzip -9 >"${sm}/got/publisher/p/file/cd/cd02"
+  printf 'payload-a\n' | gzip -9 >"${sm}/got/publisher/p/file/ab/ab01"
+}
+fresh_got
+check "smoke compare: identical content, different compression passes" \
+  pkg5_smoke_compare "${sm}/got" "${sm}/rel" "${sm}/dum"
+printf 'set name=pkg.fmri value=a \n' >"${sm}/got/publisher/p/pkg/package%2Fpkg6%2Fdepotd/1.0%2C5.11-0.1.1%3A20260923T000000Z"
+check_not "smoke compare: a manifest with other bytes fails" pkg5_smoke_compare "${sm}/got" "${sm}/rel" "${sm}/dum"
+fresh_got
+rm "${sm}/got/publisher/p/pkg/pkg6-release-test%2Fpkg5-smoke/1.0%3AZ"
+check_not "smoke compare: a missing manifest fails" pkg5_smoke_compare "${sm}/got" "${sm}/rel" "${sm}/dum"
+fresh_got
+printf 'hellO\n' | gzip >"${sm}/got/publisher/p/file/cd/cd02"
+check_not "smoke compare: a payload with other content fails" pkg5_smoke_compare "${sm}/got" "${sm}/rel" "${sm}/dum"
+fresh_got
+rm "${sm}/got/publisher/p/file/ab/ab01"
+check_not "smoke compare: a missing payload (no /file/ route) fails" pkg5_smoke_compare "${sm}/got" "${sm}/rel" "${sm}/dum"
+fresh_got
+printf 'payload-a\n' >"${sm}/got/publisher/p/file/ab/ab01"
+check_not "smoke compare: an uncompressed payload fails" pkg5_smoke_compare "${sm}/got" "${sm}/rel" "${sm}/dum"
+fresh_got
+mkdir -p "${sm}/got/publisher/p/pkg/extra" && printf 'x\n' >"${sm}/got/publisher/p/pkg/extra/1"
+check_not "smoke compare: an extra manifest fails" pkg5_smoke_compare "${sm}/got" "${sm}/rel" "${sm}/dum"
+fresh_got
+check_not "smoke compare: an empty depot copy fails" pkg5_smoke_compare "${sm}/nothing" "${sm}/rel" "${sm}/dum"
+mkdir -p "${sm}/empty/publisher/p/pkg"
+check_not "smoke compare: an empty source is never vacuous success" pkg5_smoke_compare "${sm}/empty" "${sm}/empty"
+check_not "smoke compare: no sources fails" pkg5_smoke_compare "${sm}/got"
+(cd "${sm}/got" && tar -cf "${sm}/got.p5p" publisher pkg5.repository)
+check "smoke unpack: a tar archive unpacks" pkg5_smoke_unpack "${sm}/got.p5p" "${sm}/unpacked"
+check "smoke unpack: unpacked copy compares equal" pkg5_smoke_compare "${sm}/unpacked" "${sm}/rel" "${sm}/dum"
+check_not "smoke unpack: refuses an existing directory" pkg5_smoke_unpack "${sm}/got.p5p" "${sm}/unpacked"
+t0=$(pkg5_smoke_tree "${sm}/got")
+check "smoke tree: lists files with checksums" grep -q '^f ./publisher/p/file/ab/ab01 [0-9]' <(echo "${t0}")
+check "smoke tree: lists directories" grep -qx 'd ./publisher/p/pkg' <(echo "${t0}")
+eq "smoke tree: an untouched tree snapshots equal" "$(pkg5_smoke_tree "${sm}/got")" "${t0}"
+printf 'y' >"${sm}/got/pkg5.repository"
+check_not "smoke tree: a same-size content change is visible" test "$(pkg5_smoke_tree "${sm}/got")" = "${t0}"
+fresh_got
+mkdir "${sm}/got/new"
+check_not "smoke tree: a new empty directory is visible" test "$(pkg5_smoke_tree "${sm}/got")" = "${t0}"
+fresh_got
+ln -s ab01 "${sm}/got/publisher/p/file/ab/link"
+check_not "smoke tree: a new symlink is visible" test "$(pkg5_smoke_tree "${sm}/got")" = "${t0}"
+fresh_got
+check_not "smoke tree: a missing directory fails" pkg5_smoke_tree "${sm}/nothing"
+
+# --- pkg5 client smoke: wiring in test-ips-package.sh ---------------------------
+# Static only: the smoke needs a live OpenIndiana image and runs in tag CI.
+check "test-ips-package.sh is valid bash" bash -n "${tip}"
+check "pkg5-smoke-lib.sh is valid bash" bash -n "${scripts}/pkg5-smoke-lib.sh"
+has_line() { grep -qF -- "$1" "${tip}"; }
+line_of() { grep -nF -- "$1" "${tip}" | head -1 | cut -d: -f1; }
+check "smoke imports with the installed pkg6repo import-pkg5" has_line '/usr/bin/pkg6repo import-pkg5 -s ${smoke}/src/${a}.p5p -d ${smoke}/depot/repo'
+check "smoke re-imports the same archive (idempotent retry)" has_line '/usr/bin/pkg6repo import-pkg5 -s ${smoke}/src/release.p5p -d ${smoke}/depot/repo 2>&1'
+check "re-import must report the archive as already imported" has_line "grep -qF 'archive already imported'"
+check "re-import snapshots the repository before and after" \
+  test "$(grep -c '^tree_[a-z]*=$(repo_tree) || fail' "${tip}")" = 2
+check "re-import rejects an empty snapshot" has_line "echo \"\${tree_before}\" | grep -q '^f '"
+check "re-import must leave the repository unchanged" has_line '[ "${tree_after}" = "${tree_before}" ]'
+reimport=$(line_of '|| fail "re-importing the same archive failed')
+check "snapshots bracket the re-import" test -n "${reimport}" \
+  -a "$(line_of 'tree_before=$(repo_tree)')" -lt "${reimport:-0}" \
+  -a "${reimport:-0}" -lt "$(line_of 'tree_after=$(repo_tree)')"
+check "smoke reuses the release p5p" has_line 'cp "${p5p}" "${smoke}/src/release.p5p"'
+check "smoke builds a dependency-free dummy with pkgsend" has_line 'p5 pkgsend -s "${smoke}/dummy-repo" publish'
+dummy_p5m=$(sed -n '/^cat >"${smoke}\/dummy.p5m" <<EOF$/,/^EOF$/p' "${tip}")
+check "dummy manifest heredoc is found (keeps the next check honest)" \
+  grep -qx 'set name=pkg.fmri value=${dummy}@1.0,5.11-0' <(echo "${dummy_p5m}")
+check_not "dummy package declares no dependencies" grep -q '^depend ' <(echo "${dummy_p5m}")
+check "smoke has a negative control against the operator repository" \
+  has_line 'fail "pkg(1) refreshed ${pub} from a depot that does not serve it"'
+check "negative control requires its image-create to succeed on its own" \
+  grep -qx '  || fail "pkg image-create of the negative-control image failed"' "${tip}"
+check "negative control expects only the refresh to fail" \
+  grep -qx 'if sp5 pkg -R "${smoke}/image-neg" refresh --full; then' "${tip}"
+check "smoke creates a scratch image without an implicit refresh" \
+  has_line 'sp5 pkg image-create -F --no-refresh -p "${pub}=${url}/" "${img}"'
+check "smoke reads the catalog with pkg refresh --full" has_line 'sp5 pkg -R "${img}" refresh --full'
+check "sp5 passes no_proxy through sudo" \
+  has_line 'sp5() { sudo env TMPDIR="${smoke}/tmp" no_proxy=127.0.0.1 NO_PROXY=127.0.0.1 "$@"; }'
+check "p5 bypasses proxies for the loopback depot" \
+  has_line 'p5() { TMPDIR="${smoke}/tmp" no_proxy=127.0.0.1 NO_PROXY=127.0.0.1 "$@"; }'
+smoke_body=$(sed -n '/^echo "=== pkg5 client smoke/,/^echo "pkg5 client smoke passed"$/p' "${tip}")
+check "smoke body is found" grep -q 'pkg5 client smoke passed' <(echo "${smoke_body}")
+check_not "smoke runs no pkg(1) through bare sudo (no_proxy would be lost)" grep -q 'sudo pkg ' <(echo "${smoke_body}")
+smoke_code=$(echo "${smoke_body}" | grep -v '^[[:space:]]*#' | grep -v '^echo ')
+check "smoke calls pkgrecv" grep -q 'pkgrecv -' <(echo "${smoke_code}")
+eq "every smoke pkgrecv call is wrapped by p5 (no_proxy)" \
+  "$(echo "${smoke_code}" | grep -oE 'pkgrecv -' | grep -c .)" "$(echo "${smoke_code}" | grep -oE '(^|[^[:alnum:]_])p5 pkgrecv -' | grep -c .)"
+check "smoke compares the catalog with the source FMRIs" has_line '[ "${got}" = "${expected}" ] || fail "pkg(1) catalog lists'
+check "smoke fetches the manifest with pkg info -r" has_line 'sp5 pkg -R "${img}" info -r "${rel_fmri}"'
+check "smoke pulls from the depot with pkgrecv into an archive" \
+  has_line 'p5 pkgrecv -s "${url}/" -c "${smoke}/pkgrecv-cache" -a -d "${smoke}/received.p5p"'
+check "smoke compares the pkgrecv copy with both sources" \
+  has_line 'pkg5_smoke_compare "${smoke}/unpacked-received" "${smoke}/unpacked-release" "${smoke}/unpacked-dummy"'
+check "smoke installs the dummy from the depot" has_line 'sp5 pkg -R "${img}" install -v "${dummy_fmri}"'
+check "smoke verifies the installed dummy" has_line 'sp5 pkg -R "${img}" verify -v "${dummy}"'
+# Confinement: pkg(1) only ever runs against the scratch images, nothing is
+# imported into the operator repository, and the scratch dir is removed.
+eq "pkg -R only targets scratch images" \
+  "$(grep -oE 'pkg -R "[^"]*"' "${tip}" | sort -u | tr '\n' ' ')" 'pkg -R "${img}" pkg -R "${smoke}/image-neg" '
+check_not "nothing is imported into the operator repository" grep -qE 'import-pkg5.*-d /var/pkg6depotd' "${tip}"
+check "smoke scratch dir is under /var/tmp" has_line 'smoke=$(mktemp -d /var/tmp/pkg6-pkg5-smoke.XXXXXX)'
+check "smoke cleans up on failure" has_line 'trap cleanup_smoke EXIT'
+check "smoke cleans up on success" has_line '[ ! -e "${smoke}" ] || fail "scratch directory ${smoke} was not removed"'
+smoke_start=$(line_of '=== pkg5 client smoke')
+switch_back=$(awk -v s="${smoke_start}" 'NR > s && $0 == "set_config_file \"${conf}\"" { print NR; exit }' "${tip}")
+upgrade=$(line_of '=== upgrade: operator config must survive')
+check "smoke switches back to the operator config before the upgrade" \
+  test -n "${switch_back}" -a "${smoke_start:-0}" -lt "${switch_back:-0}" -a "${switch_back:-0}" -lt "${upgrade:-0}"
+eq "after switching back the depot restarts and no longer serves the smoke publisher" \
+  "$(sed -n "$((switch_back + 1)),$((switch_back + 2))p" "${tip}")" \
+  "$(printf '%s\n%s' depot_restart '! serves_pub || fail "depot still serves ${pub} after switching back to ${conf}"')"
 
 # --- release test inventory -----------------------------------------------------
 # Synthetic `cargo nextest list --message-format json` documents.

@@ -133,3 +133,44 @@ before removing it.
     `test-ips-package.sh` is what checks that dependencies resolve.
   - Unexpanded `$(NAME)` macros abort the build only in action lines;
     comments are ignored.
+  - The pkg5 client smoke proves that the native OpenIndiana client consumes
+    what `pkg6repo import-pkg5` publishes, served by the installed
+    `pkg6depotd` under SMF as `pkg6srv`. It runs between the
+    fail-closed configuration checks and the upgrade:
+    1. The release `.p5p` and a dummy package without dependencies (built
+       with `pkgsend` and `pkgrecv -a`) are imported with
+       `/usr/bin/pkg6repo import-pkg5` into a scratch repository. The
+       release archive is imported a second time. That must succeed, log
+       `archive already imported`, and leave every path and file checksum
+       of the repository unchanged (`pkg5_smoke_tree`).
+    2. Negative control: while the depot still serves the operator
+       repository, which lacks the release publisher, `pkg image-create`
+       of a fresh image must succeed and its `pkg refresh --full` must then
+       fail.
+    3. The instance is switched to a copy of the operator config whose only
+       change is the repository root, then restarted.
+    4. A fresh scratch image (`pkg image-create -F --no-refresh`, then
+       `pkg refresh --full`) must list exactly the source FMRIs, timestamps
+       included. `pkg info -r` must fetch the release manifest.
+    5. `pkgrecv -s <depot> --newest` must list the same FMRIs.
+       `pkgrecv -a` pulls both packages into a scratch `.p5p`. Its
+       manifests must be byte-identical to the sources. Its payloads must
+       be gzip and decompress to the source bytes. It must hold no other
+       manifest (`pkg5_smoke_compare` in `.forgejo/scripts/pkg5-smoke-lib.sh`).
+    6. `pkg install` of the dummy into the scratch image must succeed. The
+       installed file must match the proto, `pkg verify` must pass, and
+       `pkg uninstall` must remove it.
+    7. The instance is switched back to the operator config and restarted.
+       It must no longer serve the release publisher.
+
+    Without the depot's `/<pub>/catalog/1/` route, steps 4 and 5 fail. Without
+    `/<pub>/manifest/0/`, steps 4 to 6 fail. Without `/<pub>/file/`, steps 5
+    and 6 fail. A fresh image and a fresh `pkgrecv` cache mean nothing can
+    come from a cache. `pkg(1)` (also under `sudo`, through `env`) and
+    `pkgrecv` run with `no_proxy`/`NO_PROXY=127.0.0.1`, so a proxy on the
+    VM cannot intercept the loopback depot. Everything lives in one `/var/tmp/pkg6-pkg5-smoke.*`
+    directory, which is removed at the end or on failure.
+    `/var/pkg6depotd` is never written, so the later upgrade and uninstall
+    checks see the operator repository unchanged. The comparison and snapshot
+    helpers are tested offline by `test-release-scripts.sh`. The smoke itself runs
+    only on the tag-triggered illumos release VM.
