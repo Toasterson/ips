@@ -8,9 +8,10 @@ license-file.workspace = true
 repository.workspace = true
 readme.workspace = true
 keywords.workspace = true
+publish.workspace = true
 
 [dependencies]
-libips = { version = "*", path = "../libips" }
+libips = { path = "../libips" }
 clap = { version = "4", features = ["derive"] }
 miette = { version = "7", features = ["fancy"] }
 thiserror = "2"

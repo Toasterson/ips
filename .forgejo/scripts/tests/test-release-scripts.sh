@@ -505,7 +505,7 @@ check "inventory requires the pkg6repo e2e suite" grep -q 'pkg6repo::e2e_tests=5
 for suite in libips::atomic_pkg5_import pkg6repo::import_pkg5_cli pkg6depotd::atomic_import_http_tests \
   pkg6depotd::telemetry_otlp pkg6depotd::tls_config pkg6depotd::tls_acme pkg6depotd::tls_depot_e2e \
   pkg6depotd::packaged_config pkg6depotd libips libips::retirement pkg6repo::retire_cli \
-  pkg6depotd::retirement_http_tests pkg6repo::cli_surface pkg6repo::manpages "pkg6repo::bin/pkg6repo" \
+  pkg6depotd::retirement_http_tests pkg6depotd::access_lifecycle_e2e pkg6repo::cli_surface pkg6repo::manpages "pkg6repo::bin/pkg6repo" \
   pkg6depotd::cli_surface; do
   check "inventory requires the suite ${suite}" grep -qE "[\" ]${suite}=[1-9]" "${scripts}/release-lib.sh"
   jq --arg s "${suite}" 'del(.["rust-suites"][$s])' "${tmp}/inv-ok.json" > "${tmp}/inv-no-suite.json"

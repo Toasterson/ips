@@ -80,6 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           .forgejo/scripts/tests/test-clippy-report.sh
+          .forgejo/scripts/tests/test-native-link-retry.sh
           .forgejo/scripts/clippy-report.sh --workspace --all-targets --all-features --locked
 
       - name: Build
@@ -113,7 +114,8 @@ jobs:
           cargo -V
           command -v sccache && sccache --version || echo "sccache not on PATH"
           prtconf 2>/dev/null | grep -i memory || true
-          swap -l || true
+          swap -sh || true
+          kstat -p zfs:0:arcstats:size zfs:0:arcstats:c_max 2>/dev/null || true
           df -h /export/home /tmp || true
           zfs list -o name,used,avail,refer,mountpoint 2>/dev/null | head -20 || true
 
@@ -128,19 +130,45 @@ jobs:
         # pregenerated bindings but ships universal ones since aws-lc-rs 1.15,
         # so no bindgen/libclang is needed; it builds through cmake + gcc from
         # build-essential. See docs/research/illumos-crypto-stack.md (#35).
-        # On failure, dump disk and memory state: a silent `ld returned 1`
-        # with no diagnostic is usually ENOSPC or memory pressure on the VM.
+        # Two build jobs, not four: the VM has 8 GB and no swap, and illumos
+        # ld exits 1 without a message when an allocation fails (run 8955).
+        # On failure, dump disk and memory state.
         run: |
-          cargo build --workspace --locked || {
-            echo "=== build failed; host state ==="; df -h /export/home /tmp; swap -l; zfs list 2>/dev/null | head; du -sh target 2>/dev/null; exit 1; }
+          set -euo pipefail
+          cargo build --workspace --locked -j2 || {
+            echo "=== build failed; host state ==="; df -h /export/home /tmp; swap -sh; kstat -p zfs:0:arcstats:size zfs:0:arcstats:c_max; vmstat 1 2; exit 1; }
 
       - name: Build (test targets)
+        # Every test binary links the whole dependency graph, so links are
+        # where memory runs out. Build with -j2; if a link fails, record
+        # memory state and relink alone with -j1. A -j1 pass means the -j2
+        # failure was memory pressure; a -j1 failure is a reproducible link
+        # error with an unmixed log. Compile errors are not retried, and the
+        # step fails whenever the last attempt fails.
         run: |
-          cargo build --workspace --all-targets --locked || {
-            echo "=== build failed; host state ==="; df -h /export/home /tmp; swap -l; zfs list 2>/dev/null | head; du -sh target 2>/dev/null; exit 1; }
+          set -euo pipefail
+          host_state() {
+            echo "=== host state: $1 ==="
+            df -h /export/home /tmp || true
+            swap -sh || true
+            kstat -p zfs:0:arcstats:size zfs:0:arcstats:c_max || true
+            vmstat 1 2 || true
+          }
+          mkdir -p target
+          if cargo build --workspace --all-targets --locked -j2 2>&1 | tee target/build-test-targets.log; then exit 0; fi
+          host_state "build failed at -j2"
+          grep -qE 'linking with .* failed|ld returned [0-9]+ exit status' target/build-test-targets.log || exit 1
+          echo "=== link failed at -j2; retrying with -j1 ==="
+          if cargo build --workspace --all-targets --locked -j1; then
+            echo "=== -j1 retry passed: the -j2 link failure was resource pressure ==="; exit 0
+          fi
+          host_state "retry failed at -j1"
+          echo "=== -j1 retry failed: reproducible link error, see above ==="
+          exit 1
 
       - name: Test (nextest, whole workspace incl. pkg6repo e2e)
         run: |
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
+          export CARGO_BUILD_JOBS=2
           cargo nextest run --workspace --locked

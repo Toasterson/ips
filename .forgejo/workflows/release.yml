@@ -15,6 +15,10 @@ name: release
 #     release metadata from GITHUB_REF through release-lib.sh.
 #   * Whole-job wall clock is capped (6300 s by default), so the illumos job
 #     builds only the release profile and runs the tests in that profile.
+#   * The illumos VM has 8 GB and no swap, and illumos ld exits 1 without a
+#     message when an allocation fails, so the illumos job builds with -j2
+#     and relinks test targets once with -j1 after a link failure (see the
+#     "Build test targets" step). All tests and gates still run.
 #   * Every multi-line step starts with `set -euo pipefail` instead of relying
 #     on the runner's default shell flags.
 #   * Tests: `cargo nextest run --workspace --release` runs every maintained
@@ -163,14 +167,44 @@ jobs:
         run: |
           set -euo pipefail
           date -u
-          cargo build --workspace --release --locked || {
-            echo "=== build failed; host state ==="; df -h /export/home /tmp; swap -l; du -sh target 2>/dev/null; exit 1; }
+          cargo build --workspace --release --locked -j2 || {
+            echo "=== build failed; host state ==="; df -h /export/home /tmp; swap -sh; kstat -p zfs:0:arcstats:size zfs:0:arcstats:c_max; vmstat 1 2; exit 1; }
           date -u
+
+      - name: Build test targets (release profile)
+        # The same `cargo test --no-run` nextest runs, done here so the link
+        # can be retried. Build with -j2; if a link fails, record memory
+        # state and relink alone with -j1. A -j1 pass means the -j2 failure
+        # was memory pressure; a -j1 failure is a reproducible link error
+        # with an unmixed log. Compile errors are not retried, and the step
+        # fails whenever the last attempt fails.
+        run: |
+          set -euo pipefail
+          host_state() {
+            echo "=== host state: $1 ==="
+            df -h /export/home /tmp || true
+            swap -sh || true
+            kstat -p zfs:0:arcstats:size zfs:0:arcstats:c_max || true
+            vmstat 1 2 || true
+          }
+          mkdir -p target
+          date -u
+          if cargo test --workspace --release --locked --no-run -j2 2>&1 | tee target/build-test-targets.log; then date -u; exit 0; fi
+          host_state "build failed at -j2"
+          grep -qE 'linking with .* failed|ld returned [0-9]+ exit status' target/build-test-targets.log || exit 1
+          echo "=== link failed at -j2; retrying with -j1 ==="
+          if cargo test --workspace --release --locked --no-run -j1; then
+            echo "=== -j1 retry passed: the -j2 link failure was resource pressure ==="; date -u; exit 0
+          fi
+          host_state "retry failed at -j1"
+          echo "=== -j1 retry failed: reproducible link error, see above ==="
+          exit 1
 
       - name: Test inventory (required suites present, nothing skipped)
         run: |
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
+          export CARGO_BUILD_JOBS=2
           . .forgejo/scripts/release-lib.sh
           cargo nextest list --workspace --release --locked --message-format json > target/nextest-list.json
           release_check_test_inventory target/nextest-list.json
@@ -179,8 +213,9 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
+          export CARGO_BUILD_JOBS=2
           cargo nextest run --workspace --release --locked || {
-            echo "=== tests failed; host state ==="; df -h /export/home /tmp; swap -l; du -sh target 2>/dev/null; exit 1; }
+            echo "=== tests failed; host state ==="; df -h /export/home /tmp; swap -sh; kstat -p zfs:0:arcstats:size zfs:0:arcstats:c_max; vmstat 1 2; exit 1; }
           date -u
 
       - name: Build IPS package
