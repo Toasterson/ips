@@ -1,0 +1,265 @@
+.\"
+.\" This Source Code Form is subject to the terms of the Mozilla Public
+.\" License, v. 2.0. If a copy of the MPL was not distributed with this
+.\" file, You can obtain one at https://mozilla.org/MPL/2.0/.
+.\"
+.Dd September 23, 2026
+.Dt PKG6REPO 1
+.Os
+.Sh NAME
+.Nm pkg6repo
+.Nd manage local IPS package repositories
+.Sh SYNOPSIS
+.Nm
+.Cm create
+.Op Fl -repo-version Ar 4
+.Ar path
+.Nm
+.Cm add-publisher
+.Fl s Ar repo
+.Ar publisher ...
+.Nm
+.Cm remove-publisher
+.Op Fl n
+.Fl s Ar repo
+.Ar publisher ...
+.Nm
+.Cm get
+.Fl s Ar repo
+.Op Fl F Ar format
+.Op Fl H
+.Op Ar name ...
+.Nm
+.Cm set
+.Fl s Ar repo
+.Ar section/property Ns = Ns Ar value ...
+.Nm
+.Cm info
+.Fl s Ar repo
+.Op Fl F Ar format
+.Op Fl H
+.Op Fl p Ar publisher ...
+.Nm
+.Cm list
+.Fl s Ar repo
+.Op Fl F Ar format
+.Op Fl H
+.Op Fl p Ar publisher ...
+.Op Ar pattern ...
+.Nm
+.Cm contents
+.Fl s Ar repo
+.Op Fl t Ar type ...
+.Op Fl p Ar publisher ...
+.Op Ar pattern ...
+.Nm
+.Cm search
+.Fl s Ar repo
+.Op Fl F Ar format
+.Op Fl H
+.Op Fl p Ar publisher
+.Op Fl n Ar limit
+.Ar query
+.Nm
+.Cm rebuild | refresh
+.Fl s Ar repo
+.Op Fl p Ar publisher
+.Op Fl -no-index
+.Nm
+.Cm import-pkg5
+.Fl s Ar source
+.Fl d Ar repo
+.Op Fl p Ar publisher ...
+.Op Fl -adopt-existing
+.Op Fl -max-archive-entries Ar n
+.Op Fl -max-extract-bytes Ar n
+.Nm
+.Cm list-obsoleted | search-obsoleted | show-obsoleted |
+.Cm restore-obsoleted | export-obsoleted
+.Fl s Ar repo
+.Fl p Ar publisher
+.Ar ...
+.Sh DESCRIPTION
+The
+.Nm
+utility creates and maintains IPS package repositories on the local file
+system.
+The
+.Xr pkg6depotd 8
+depot serves them read-only over HTTP; there is no remote administration.
+Every
+.Ar repo ,
+.Ar path
+and
+.Ar source
+operand is a file system path.
+A URI, including a
+.Pa file://
+URI, is rejected.
+.Pp
+A subcommand either does what it reports or exits non-zero.
+Unknown publishers, unsupported properties and existing output files are
+detected before anything is changed.
+.Pp
+The
+.Fl F
+option selects
+.Cm table
+(the default),
+.Cm json
+or
+.Cm tsv
+output.
+.Fl H
+omits the header line.
+.Sh SUBCOMMANDS
+.Bl -tag -width Ds
+.It Cm create Oo Fl -repo-version Ar 4 Oc Ar path
+Create a repository.
+Version 4 is the only format.
+Fails if
+.Ar path
+already holds
+.Pa pkg6.repository
+or
+.Pa pkg5.repository .
+.It Cm add-publisher Fl s Ar repo Ar publisher ...
+Add publishers.
+The first publisher of a repository becomes its default publisher.
+Fails, adding none, if a publisher already exists or is named twice.
+.It Cm remove-publisher Oo Fl n Oc Fl s Ar repo Ar publisher ...
+Remove publishers with their catalogs and package manifests.
+Fails, removing none, if a publisher does not exist.
+With
+.Fl n ,
+print what would be removed and change nothing.
+.It Cm get Fl s Ar repo Oo Ar name ... Oc
+Print repository properties, optionally only the named sections or
+.Ar section/property
+names.
+The properties are
+.Sy publisher/prefix ,
+the default publisher, and
+.Sy repository/version .
+Any other name is an error.
+.It Cm set Fl s Ar repo Ar section/property Ns = Ns Ar value ...
+Set properties.
+Only
+.Sy publisher/prefix
+can be set, to a configured publisher.
+All operands are checked before anything changes.
+.It Cm info Fl s Ar repo Op Fl p Ar publisher ...
+Print the package count, status and last update time of each publisher,
+or of the given publishers.
+.It Cm list Fl s Ar repo Oo Fl p Ar publisher ... Oc Op Ar pattern ...
+List package versions, including obsolete ones.
+A
+.Ar pattern
+is a glob
+.Pq Sq * , Sq \&?
+matched against the whole package name.
+All publishers and patterns given are used.
+If a pattern matches nothing, the other matches are printed and the
+command exits 1.
+.It Cm contents Fl s Ar repo Oo Fl t Ar type ... Oc Oo Fl p Ar publisher ... Oc Op Ar pattern ...
+Print one line per file, directory, link, dependency and license of the
+matching packages.
+A
+.Ar pattern
+is a regular expression matched against the package name.
+.Ar type
+is one of
+.Cm file ,
+.Cm dir ,
+.Cm link ,
+.Cm depend
+or
+.Cm license .
+Unmatched patterns are handled as by
+.Cm list .
+.It Cm search Fl s Ar repo Oo Fl p Ar publisher Oc Oo Fl n Ar limit Oc Ar query
+Search the package index.
+Without
+.Fl p ,
+the default publisher is searched, or every publisher if there is no
+default.
+.It Cm rebuild | refresh Fl s Ar repo Oo Fl p Ar publisher Oc Op Fl -no-index
+Rebuild the catalog and the search index, which is part of it, from the
+package manifests.
+The two subcommands are the same.
+.Fl -no-index
+is accepted for pkg5 scripts and has no effect.
+On a repository managed by
+.Cm import-pkg5
+the result is published as a new generation.
+.It Cm import-pkg5 Fl s Ar source Fl d Ar repo Op Fl p Ar publisher ...
+Import a pkg5 repository directory or
+.Pa .p5p
+archive.
+All packages of the selected publishers, by default all in
+.Ar source ,
+become visible in one generation switch, or none do.
+Importing an archive that was already imported changes nothing.
+An exact FMRI that is already published with a different manifest rejects
+the whole import.
+.Fl -adopt-existing
+converts a repository in the older layout; run it while readers are
+stopped.
+.It Cm list-obsoleted , search-obsoleted Fl q Ar regex , show-obsoleted Fl f Ar fmri
+Inspect the legacy obsoleted store, which earlier pkg6 builds filled with
+package versions moved out of the catalog.
+These subcommands do not change the catalog or packages; opening a
+non-empty store may rewrite its own index under
+.Pa obsoleted/ .
+.It Cm restore-obsoleted Fl s Ar repo Fl p Ar publisher Fl f Ar fmri Op Fl -no-rebuild
+Publish a store entry's manifest into the repository and then remove the
+entry.
+Not supported on repositories managed by
+.Cm import-pkg5 .
+.It Cm export-obsoleted Fl s Ar repo Fl p Ar publisher Fl o Ar file Op Fl q Ar regex
+Write matching store entries to a new JSON
+.Ar file .
+Fails, writing nothing, if
+.Ar file
+exists or nothing matches.
+.El
+.Sh OBSOLETE PACKAGES
+To obsolete a package, publish a new version whose manifest sets
+.Sy pkg.obsolete=true .
+It stays in the catalog, where
+.Xr pkg 1
+clients see it.
+The obsoleted store is not obsoletion and not retirement.
+.Sh EXIT STATUS
+.Bl -tag -width Ds
+.It 0
+The command completed.
+.It 1
+An error occurred, or a pattern matched nothing.
+.It 2
+Invalid command line, including a URI where a path is required.
+.El
+.Sh EXAMPLES
+Create a repository for the depot and add a publisher:
+.Bd -literal -offset indent
+# pkg6repo create /var/pkg6depotd/repo
+# pkg6repo add-publisher -s /var/pkg6depotd/repo openindiana.org
+.Ed
+.Pp
+Import a pkg5 archive:
+.Bd -literal -offset indent
+# pkg6repo import-pkg5 -s userland.p5p -d /var/pkg6depotd/repo
+.Ed
+.Sh SEE ALSO
+.Xr pkg 1 ,
+.Xr pkg6depotd 8
+.Sh NOTES
+The pkg5 subcommands and options that
+.Nm
+does not implement are rejected, among them remote repositories,
+.Fl -key ,
+.Fl -cert ,
+.Cm set Fl p ,
+.Cm contents Fl m
+and
+.Cm rebuild Fl -no-catalog .

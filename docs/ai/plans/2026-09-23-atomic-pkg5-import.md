@@ -4,6 +4,7 @@
 **Status:** Active
 **Issue:** [#38](https://code.aopc.cloud/OpenIndiana/ips/issues/38) (part of #24, transaction model #26)
 **Decision:** [ADR-007](../decisions/007-atomic-pkg5-import-via-repository-generations.md)
+**Amended by:** [ADR-009](../decisions/009-v1-pkg6repo-command-surface.md) — `import-archive` is removed; mentions of it below are historical
 
 ## Goal
 

@@ -62,6 +62,76 @@ struct ObsoletedPackagesExport {
     pub packages: Vec<ObsoletedPackageExport>,
 }
 
+/// What [`ObsoletedPackageManager::export_obsoleted_packages`] did with the
+/// output file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObsoletedExport {
+    /// The output file was created holding this many entries (at least one).
+    Written(usize),
+    /// No entry matched, or every match lacked metadata or a manifest. No
+    /// file was created.
+    Empty,
+    /// The output file already existed and was left untouched.
+    OutputExists,
+}
+
+/// Write `export` to `output_file` unless it is empty or `output_file`
+/// exists. The check and the creation are one atomic step: the JSON goes to
+/// a temporary file in the same directory, which is then linked to
+/// `output_file` with no-replace semantics. A failed write leaves no file.
+fn write_export_noclobber(
+    export: &ObsoletedPackagesExport,
+    output_file: &Path,
+) -> Result<ObsoletedExport> {
+    use std::io::Write;
+
+    if export.packages.is_empty() {
+        info!("No packages found to export");
+        return Ok(ObsoletedExport::Empty);
+    }
+
+    let io_err = |what: &str, e: &dyn std::fmt::Display| {
+        ObsoletedPackageError::IoError(format!("{what} {}: {e}", output_file.display()))
+    };
+
+    let dir = match output_file.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".pkg6-export-");
+    #[cfg(unix)]
+    {
+        // Same mode `File::create` would give, subject to the umask.
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    let mut tmp = builder
+        .tempfile_in(dir)
+        .map_err(|e| io_err("Failed to create a temporary file for", &e))?;
+
+    {
+        let mut writer = std::io::BufWriter::new(tmp.as_file_mut());
+        serde_json::to_writer_pretty(&mut writer, export)
+            .map_err(|e| io_err("Failed to write export to file", &e))?;
+        writer
+            .flush()
+            .map_err(|e| io_err("Failed to write export to file", &e))?;
+    }
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| io_err("Failed to sync export file", &e))?;
+
+    match tmp.persist_noclobber(output_file) {
+        Ok(_) => Ok(ObsoletedExport::Written(export.packages.len())),
+        // The temporary file is removed when the returned handle drops.
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok(ObsoletedExport::OutputExists)
+        }
+        Err(e) => Err(io_err("Failed to create output file", &e.error).into()),
+    }
+}
+
 /// Errors that can occur in obsoleted package operations
 #[derive(Debug, Error, Diagnostic)]
 pub enum ObsoletedPackageError {
@@ -2251,21 +2321,23 @@ impl ObsoletedPackageManager {
     ///
     /// This method exports obsoleted packages to a JSON file that can be imported into another repository.
     ///
+    /// The file is written to a temporary file next to `output_file` and then
+    /// linked into place without replacing anything, so `output_file` either
+    /// does not exist afterwards or holds a complete export. An existing
+    /// `output_file`, including one created while the export ran, is never
+    /// touched. Nothing is written when no entry survives.
+    ///
     /// # Arguments
     ///
     /// * `publisher` - The publisher to export packages for
     /// * `pattern` - Optional pattern to filter packages by
     /// * `output_file` - Path to the output file
-    ///
-    /// # Returns
-    ///
-    /// The number of packages exported
     pub fn export_obsoleted_packages(
         &self,
         publisher: &str,
         pattern: Option<&str>,
         output_file: &Path,
-    ) -> Result<usize> {
+    ) -> Result<ObsoletedExport> {
         info!("Exporting obsoleted packages for publisher: {}", publisher);
 
         // Get the packages to export
@@ -2274,11 +2346,6 @@ impl ObsoletedPackageManager {
         } else {
             self.list_obsoleted_packages(publisher)?
         };
-
-        if packages.is_empty() {
-            info!("No packages found to export");
-            return Ok(0);
-        }
 
         info!("Found {} packages to export", packages.len());
 
@@ -2318,30 +2385,11 @@ impl ObsoletedPackageManager {
             });
         }
 
-        // Write the export to the output file
-        let file = fs::File::create(output_file).map_err(|e| {
-            ObsoletedPackageError::IoError(format!(
-                "Failed to create output file {}: {}",
-                output_file.display(),
-                e
-            ))
-        })?;
-
-        let writer = std::io::BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, &export).map_err(|e| {
-            ObsoletedPackageError::IoError(format!(
-                "Failed to write export to file {}: {}",
-                output_file.display(),
-                e
-            ))
-        })?;
-
-        info!(
-            "Exported {} packages to {}",
-            export.packages.len(),
-            output_file.display()
-        );
-        Ok(export.packages.len())
+        let outcome = write_export_noclobber(&export, output_file)?;
+        if let ObsoletedExport::Written(count) = outcome {
+            info!("Exported {} packages to {}", count, output_file.display());
+        }
+        Ok(outcome)
     }
 
     /// Import obsoleted packages from a file
@@ -2600,6 +2648,122 @@ fn url_encode(s: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn one_entry_export() -> ObsoletedPackagesExport {
+        let fmri = Fmri::parse("pkg://test/old@1.0").unwrap();
+        ObsoletedPackagesExport {
+            version: 1,
+            export_date: format_timestamp(&SystemTime::now()),
+            packages: vec![ObsoletedPackageExport {
+                publisher: "test".to_string(),
+                fmri: fmri.to_string(),
+                metadata: ObsoletedPackageMetadata::new(&fmri.to_string(), NULL_HASH, None, None),
+                manifest: String::new(),
+            }],
+        }
+    }
+
+    /// Everything in `dir` except the export itself: leftover temporaries.
+    fn strays(dir: &Path, output: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p != output)
+            .collect()
+    }
+
+    #[test]
+    fn export_with_no_surviving_entries_writes_no_file() {
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("export.json");
+        let mut export = one_entry_export();
+        export.packages.clear();
+
+        assert_eq!(
+            write_export_noclobber(&export, &output).unwrap(),
+            ObsoletedExport::Empty
+        );
+        assert!(!output.exists());
+        assert!(strays(dir.path(), &output).is_empty());
+    }
+
+    #[test]
+    fn export_with_no_matching_entries_writes_no_file() {
+        let dir = tempdir().unwrap();
+        let manager = ObsoletedPackageManager::new(dir.path());
+        manager.init().unwrap();
+        let fmri = Fmri::parse("pkg://test/old@1.0").unwrap();
+        manager
+            .store_obsoleted_package("test", &fmri, "set name=pkg.fmri value=x\n", None, None)
+            .unwrap();
+        let output = dir.path().join("export.json");
+
+        assert_eq!(
+            manager
+                .export_obsoleted_packages("test", Some("nomatch"), &output)
+                .unwrap(),
+            ObsoletedExport::Empty
+        );
+        assert!(!output.exists());
+
+        assert_eq!(
+            manager
+                .export_obsoleted_packages("test", None, &output)
+                .unwrap(),
+            ObsoletedExport::Written(1)
+        );
+        let written: ObsoletedPackagesExport =
+            serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+        assert_eq!(written.packages.len(), 1);
+    }
+
+    #[test]
+    fn export_never_replaces_an_existing_file() {
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("export.json");
+        fs::write(&output, b"not ours").unwrap();
+
+        assert_eq!(
+            write_export_noclobber(&one_entry_export(), &output).unwrap(),
+            ObsoletedExport::OutputExists
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"not ours");
+        assert!(strays(dir.path(), &output).is_empty());
+    }
+
+    #[test]
+    fn concurrent_exports_to_one_path_create_it_exactly_once() {
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("export.json");
+        let export = one_entry_export();
+        let barrier = std::sync::Barrier::new(8);
+
+        let outcomes: Vec<ObsoletedExport> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        write_export_noclobber(&export, &output).unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        let written = outcomes
+            .iter()
+            .filter(|o| **o == ObsoletedExport::Written(1))
+            .count();
+        let refused = outcomes
+            .iter()
+            .filter(|o| **o == ObsoletedExport::OutputExists)
+            .count();
+        assert_eq!((written, refused), (1, 7), "{outcomes:?}");
+        let on_disk: ObsoletedPackagesExport =
+            serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+        assert_eq!(on_disk.packages.len(), 1);
+        assert!(strays(dir.path(), &output).is_empty());
+    }
 
     #[test]
     fn test_obsoleted_package_manager_basic() {

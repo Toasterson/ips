@@ -164,11 +164,131 @@ mod tests {
                 "-o",
                 "/o.json",
             ],
-            &["import-obsoleted", "-s", "/r", "-i", "/o.json"],
-            &["cleanup-obsoleted", "-s", "/r", "-p", "test", "--dry-run"],
         ] {
             parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
         }
+    }
+
+    // Removed from the v1 command set (#40): cleanup-obsoleted permanently
+    // deleted store entries without dependency or snapshot checks;
+    // import-obsoleted created new store entries, which hide packages
+    // without pkg5 obsoletion semantics; archive/import-archive duplicated
+    // pkg6recv with a pkg6-only format and silently empty results.
+    #[test]
+    fn test_removed_commands_are_rejected() {
+        for args in [
+            &["cleanup-obsoleted", "-s", "/r", "-p", "test", "--dry-run"][..],
+            &["import-obsoleted", "-s", "/r", "-i", "/o.json"],
+            &["archive", "-s", "/r", "-o", "/o.p6p"],
+            &["import-archive", "-s", "/o.p6p", "-d", "/r"],
+        ] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{args:?}"
+            );
+        }
+        let names: Vec<String> = <crate::App as clap::CommandFactory>::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        for removed in [
+            "cleanup-obsoleted",
+            "import-obsoleted",
+            "import-archive",
+            "archive",
+        ] {
+            assert!(!names.iter().any(|n| n == removed), "{removed}: {names:?}");
+        }
+    }
+
+    #[test]
+    fn test_repository_uris_are_rejected() {
+        for args in [
+            &["create", "http://example.com/repo"][..],
+            &["list", "-s", "https://pkg.example.com/"],
+            &["info", "-s", "file:///var/repo"],
+            &["import-pkg5", "-s", "http://x/a.p5p", "-d", "/r"],
+            &["import-pkg5", "-s", "/a.p5p", "-d", "file:///r"],
+        ] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{args:?}"
+            );
+            assert!(
+                err.to_string().contains("local repository paths only"),
+                "{err}"
+            );
+        }
+        // A colon alone does not make a URI.
+        parse(&["list", "-s", "/var/repo:old"]).unwrap();
+    }
+
+    #[test]
+    fn test_unsupported_options_are_rejected() {
+        use clap::error::ErrorKind;
+        for (args, kind) in [
+            // No remote repositories, so no client certificates.
+            (
+                &["get", "-s", "/r", "--key", "/k"][..],
+                ErrorKind::UnknownArgument,
+            ),
+            (
+                &["list", "-s", "/r", "--cert", "/c"],
+                ErrorKind::UnknownArgument,
+            ),
+            // pkg5's contents -m prints the manifest; the old flag invented one.
+            (&["contents", "-s", "/r", "-m"], ErrorKind::UnknownArgument),
+            // Only indexed action types.
+            (
+                &["contents", "-s", "/r", "-t", "set"],
+                ErrorKind::InvalidValue,
+            ),
+            // --no-catalog skipped the only thing rebuild does.
+            (
+                &["rebuild", "-s", "/r", "--no-catalog"],
+                ErrorKind::UnknownArgument,
+            ),
+            // Single-publisher operations take -p once.
+            (
+                &["rebuild", "-s", "/r", "-p", "a", "-p", "b"],
+                ErrorKind::ArgumentConflict,
+            ),
+            (
+                &["search", "-s", "/r", "-p", "a", "-p", "b", "q"],
+                ErrorKind::ArgumentConflict,
+            ),
+            // Publisher properties have no effect in v1.
+            (&["get", "-s", "/r", "-p", "a"], ErrorKind::UnknownArgument),
+            (
+                &["set", "-s", "/r", "-p", "a", "x/y=z"],
+                ErrorKind::UnknownArgument,
+            ),
+            (&["list", "-s", "/r", "-F", "xml"], ErrorKind::InvalidValue),
+            (
+                &["add-publisher", "-s", "/r"],
+                ErrorKind::MissingRequiredArgument,
+            ),
+            (
+                &["remove-publisher", "-s", "/r"],
+                ErrorKind::MissingRequiredArgument,
+            ),
+            (&["set", "-s", "/r"], ErrorKind::MissingRequiredArgument),
+        ] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(err.kind(), kind, "{args:?}: {err}");
+        }
+        // Repeatable filters stay accepted where every value is honoured.
+        parse(&["list", "-s", "/r", "-p", "a", "-p", "b", "x", "y"]).unwrap();
+        parse(&[
+            "contents", "-s", "/r", "-p", "a", "-p", "b", "-t", "file", "-t", "dir",
+        ])
+        .unwrap();
+        parse(&["info", "-s", "/r", "-p", "a", "-p", "b"]).unwrap();
+        parse(&["rebuild", "-s", "/r", "--no-index"]).unwrap();
     }
 
     /// Actions recorded for `stem` in one v1 catalog part of publisher `test`.
