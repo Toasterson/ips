@@ -1346,19 +1346,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-timeout"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b90d566bffbce6a75bd8b09a05aa8c2cb1fabb6cb348f8840c9e4c90a0d83b0"
-dependencies = [
- "hyper",
- "hyper-util",
- "pin-project-lite",
- "tokio",
- "tower-service",
-]
-
-[[package]]
 name = "hyper-tls"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2123,6 +2110,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry-appender-tracing"
+version = "0.31.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef6a1ac5ca3accf562b8c306fa8483c85f4390f768185ab775f242f7fe8fdcc2"
+dependencies = [
+ "opentelemetry",
+ "tracing",
+ "tracing-core",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "opentelemetry-http"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2149,9 +2149,6 @@ dependencies = [
  "prost",
  "reqwest",
  "thiserror 2.0.17",
- "tokio",
- "tonic",
- "tracing",
 ]
 
 [[package]]
@@ -2180,8 +2177,6 @@ dependencies = [
  "percent-encoding",
  "rand",
  "thiserror 2.0.17",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]
@@ -2387,12 +2382,16 @@ dependencies = [
  "jsonwebtoken",
  "knuffel",
  "libips",
+ "miette 5.10.0",
  "miette 7.6.0",
  "nix",
  "opentelemetry",
+ "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
+ "opentelemetry-proto",
  "opentelemetry_sdk",
  "predicates",
+ "prost",
  "reqwest",
  "rusqlite",
  "rustls",
@@ -3592,15 +3591,10 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "hyper",
- "hyper-timeout",
- "hyper-util",
  "percent-encoding",
  "pin-project",
  "sync_wrapper",
- "tokio",
  "tokio-stream",
- "tower",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -3625,9 +3619,7 @@ checksum = "d039ad9159c98b70ecfd540b2573b97f7f52c3e8d9f8ad57a24b916a536975f9"
 dependencies = [
  "futures-core",
  "futures-util",
- "indexmap",
  "pin-project-lite",
- "slab",
  "sync_wrapper",
  "tokio",
  "tokio-util",

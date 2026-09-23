@@ -22,4 +22,35 @@ fn packaged_config_parses() {
     assert_eq!(config.repository.mode.as_deref(), Some("readonly"));
     assert!(config.server.tls_cert.is_none() && config.server.tls_key.is_none());
     assert!(config.oauth2.is_none(), "v1 ships without remote auth");
+
+    // The sample documents OTLP export but ships it disabled, and every
+    // value in it must pass validation so enabling it cannot fail on them.
+    let telemetry = pkg6depotd::telemetry_settings(&config).expect("valid telemetry");
+    assert!(telemetry.otlp.is_none(), "OTLP export ships disabled");
+    assert_eq!(telemetry.log_format, pkg6depotd::telemetry::LogFormat::Json);
+    let otlp = config
+        .telemetry
+        .and_then(|t| t.otlp)
+        .expect("sample documents the otlp block");
+    assert_eq!(otlp.enabled, Some(false));
+    assert_eq!(otlp.endpoint.as_deref(), Some("http://127.0.0.1:4318"));
+}
+
+#[test]
+fn packaged_config_with_otlp_enabled_is_valid() {
+    let text = std::fs::read_to_string(packaged_config()).unwrap();
+    let enabled = text.replace("enabled false", "enabled true");
+    assert_ne!(text, enabled);
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("enabled.kdl");
+    std::fs::write(&path, enabled).unwrap();
+    let config = Config::load(Some(path)).unwrap();
+    let otlp = pkg6depotd::telemetry_settings(&config)
+        .unwrap()
+        .otlp
+        .expect("enabled");
+    assert_eq!(
+        otlp.endpoint.signal_url("/v1/traces"),
+        "http://127.0.0.1:4318/v1/traces"
+    );
 }

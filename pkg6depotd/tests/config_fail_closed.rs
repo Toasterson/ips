@@ -160,7 +160,9 @@ repository {
     root "/nonexistent/pkg6depotd-test-repo"
 }
 telemetry {
-    otlp-endpoint "https://collector:s3cr3t-otlp@otel.invalid:4318"
+    otlp {
+        endpoint "https://otel.invalid:4318/s3cr3t-otlp-path"
+    }
 }
 oauth2 {
     issuer "https://issuer.invalid/s3cr3t-issuer"
@@ -203,4 +205,78 @@ fn load_config_api_rejects_invalid_and_accepts_valid() {
         pkg6depotd::bind_addr(&config).unwrap(),
         "127.0.0.1:0".parse().unwrap()
     );
+}
+
+/// Rejected telemetry settings fail closed and never echo the endpoint or
+/// other config text, whether the problem is semantic or a KDL syntax error.
+#[test]
+fn invalid_telemetry_fails_without_echoing_secrets() {
+    let cases = [
+        (
+            "legacy.kdl",
+            "telemetry {\n    otlp-endpoint \"https://otel.invalid:4318/s3cr3t\"\n}\n",
+            "telemetry.otlp-endpoint is not supported",
+        ),
+        (
+            "userinfo.kdl",
+            "telemetry {\n    otlp {\n        endpoint \"https://user:s3cr3t@otel.invalid:4318\"\n    }\n}\n",
+            "contains user credentials",
+        ),
+        (
+            "query.kdl",
+            "telemetry {\n    otlp {\n        endpoint \"https://otel.invalid:4318/?token=s3cr3t\"\n    }\n}\n",
+            "query or fragment",
+        ),
+        (
+            "noendpoint.kdl",
+            "telemetry {\n    otlp {\n        enabled true\n    }\n}\n",
+            "endpoint is required",
+        ),
+        (
+            "unknown-key.kdl",
+            "telemetry {\n    otlp {\n        endpoint \"http://127.0.0.1:4318\"\n        headerz \"Bearer s3cr3t\"\n    }\n}\n",
+            "cannot load configuration",
+        ),
+        (
+            "wrong-type.kdl",
+            "telemetry {\n    otlp {\n        endpoint \"http://127.0.0.1:4318\"\n        timeout-ms \"s3cr3t\"\n    }\n}\n",
+            "line 10, column 20",
+        ),
+        (
+            "syntax.kdl",
+            "telemetry {\n    otlp {\n        endpoint \"http://s3cr3t.invalid:4318\"\n    \n}\n",
+            "cannot load configuration",
+        ),
+    ];
+    let dir = TempDir::new().unwrap();
+    for (name, telemetry, message) in cases {
+        let body = format!(
+            "server {{\n    bind \"127.0.0.1:0\"\n}}\nrepository {{\n    root \"/nonexistent\"\n}}\n{telemetry}"
+        );
+        let path = write(&dir, name, &body);
+        for cmd in ["config-test", "start"] {
+            depotd(
+                dir.path(),
+                &["--no-daemon", "--config", path.to_str().unwrap(), cmd],
+            )
+            .failure()
+            .stderr(predicate::str::contains(message))
+            .stdout(predicate::str::contains("s3cr3t").not())
+            .stderr(predicate::str::contains("s3cr3t").not());
+        }
+    }
+}
+
+#[test]
+fn disabled_otlp_block_passes_config_test() {
+    let dir = TempDir::new().unwrap();
+    let body = format!(
+        "{VALID}telemetry {{\n    log-format \"json\"\n    otlp {{\n        enabled false\n        endpoint \"http://127.0.0.1:4318\"\n    }}\n}}\n"
+    );
+    let path = write(&dir, "disabled.kdl", &body);
+    depotd(
+        dir.path(),
+        &["--config", path.to_str().unwrap(), "config-test"],
+    )
+    .success();
 }

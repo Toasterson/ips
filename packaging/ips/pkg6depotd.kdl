@@ -30,5 +30,33 @@ repository {
 
 telemetry {
     service-name "pkg6depotd"
+    // Local log output on the SMF log: "json" or "text".
     log-format "json"
+
+    // OpenTelemetry export of traces, metrics and logs over OTLP/HTTP
+    // (protobuf). Off until you set enabled true and point endpoint at a
+    // collector's OTLP/HTTP base URL; /v1/traces, /v1/metrics and /v1/logs
+    // are appended. Credentials, query strings and fragments are rejected in
+    // the URL: run a local collector that adds authentication.
+    //
+    // Export never blocks requests. Each signal buffers up to queue-size
+    // records, plus the batch being sent; when the collector is slow or
+    // down, the oldest are dropped and counted in
+    // pkg6depotd.telemetry.dropped. Proxy environment variables are ignored.
+    otlp {
+        enabled false
+        endpoint "http://127.0.0.1:4318"
+        // traces true
+        // metrics true
+        // logs true
+        // log-level "info"            // error, warn, info, debug, trace
+        // sample-ratio 1.0            // fraction of requests traced
+        // timeout-ms 5000             // per export attempt
+        // max-retries 3
+        // queue-size 2048             // records per signal
+        // batch-size 512
+        // flush-interval-ms 5000
+        // metrics-interval-ms 60000
+        // shutdown-timeout-ms 5000    // flush budget on svcadm disable/restart
+    }
 }
