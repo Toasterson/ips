@@ -137,27 +137,36 @@ async fn serve(config: &Config) -> Result<()> {
         .await
         .map(Arc::new);
 
-    // Retirement reads the heartbeat as proof that this depot records every
-    // access and answers apply's fence; start it before any request is served.
-    state
-        .start_access_heartbeat()
-        .map_err(|e| miette::miette!(e))?;
     let router = http::routes::app_router_with_auth(state.clone(), auth_state);
-    let served = listen(config, router, hangup).await;
-    // A clean stop is not a gap in the access history.
-    state.shutdown_access();
-    served
+    let served = listen(config, router, hangup, &state).await;
+    match &served {
+        // Requests may still be served until the process exits: leave the
+        // run open (a gap after restart) rather than claim it complete.
+        Ok(http::server::Stopped::DrainExpired) => state.abandon_access(),
+        // A clean stop, or serving never started, is not a gap in the
+        // access history.
+        Ok(http::server::Stopped::Drained) | Err(_) => state.shutdown_access(),
+    }
+    served.map(|_| ())
 }
 
-async fn listen(config: &Config, router: axum::Router, hangup: tls::HangupTarget) -> Result<()> {
+/// Bind (and for TLS, load or issue the certificate), then serve until
+/// SIGTERM/SIGINT.
+async fn listen(
+    config: &Config,
+    router: axum::Router,
+    hangup: tls::HangupTarget,
+    state: &DepotRepo,
+) -> Result<http::server::Stopped> {
     let addr = bind_addr(config)?;
-    match tls::plan(config)? {
+    let stopped = match tls::plan(config)? {
         None => {
             let listener = tokio::net::TcpListener::bind(addr)
                 .await
                 .map_err(crate::errors::DepotError::Io)?;
             tracing::info!("Starting pkg6depotd on {}", addr);
-            http::server::run_until(router, listener, http::server::shutdown_signal()).await?;
+            start_access_heartbeat(state)?;
+            http::server::run_until(router, listener, http::server::shutdown_signal()).await?
         }
         Some(plan) => {
             // Fails closed: the port is only opened once a valid
@@ -168,6 +177,7 @@ async fn listen(config: &Config, router: axum::Router, hangup: tls::HangupTarget
                 .await
                 .map_err(crate::errors::DepotError::Io)?;
             tracing::info!("Starting pkg6depotd on {} with TLS", addr);
+            start_access_heartbeat(state)?;
             http::server::run_tls_until(
                 router,
                 listener,
@@ -175,8 +185,19 @@ async fn listen(config: &Config, router: axum::Router, hangup: tls::HangupTarget
                 plan.handshake_timeout(),
                 http::server::shutdown_signal(),
             )
-            .await?;
+            .await?
         }
-    }
-    Ok(())
+    };
+    Ok(stopped)
+}
+
+/// Retirement reads the heartbeat as proof that this depot records every
+/// access and answers apply's fence. Start it only once the port is open
+/// and TLS is ready, immediately before serving: SIGTERM is handled only
+/// while serving, so a run started during ACME backoff would end without
+/// its `e` line and show as a gap.
+fn start_access_heartbeat(state: &DepotRepo) -> Result<()> {
+    state
+        .start_access_heartbeat()
+        .map_err(|e| miette::miette!(e))
 }

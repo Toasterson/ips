@@ -106,12 +106,25 @@ su pkg6srv -c '/usr/bin/pkg6repo retire apply -s /var/pkg6depotd/repo /var/pkg6d
 ```
 
 `retire apply` takes the access fence in `retention/access/fence.lock`
-and creates the directory if the depot has not yet done so. Run as root,
-it can leave root-owned files there that the depot cannot open. The depot
-then logs that it cannot record accesses and keeps serving, but access
-history is unproven and no version becomes an inactivity candidate until
-the ownership is fixed (`chown -R pkg6srv:pkg6srv
-/var/pkg6depotd/repo/retention`) and the depot is restarted.
+and creates the lock (and `retention/` and `retention/access/`) if the
+depot has not yet done so; `retire close-depot` may create the day's
+access log. Run as root, both give just these newly created entries to
+the owner of the repository, so the depot can keep writing there; if
+that fails they remove them again and stop. They change nothing that
+already exists, and the other files `retire apply` writes as root
+(generations, snapshots, audit records) stay root-owned. Root-owned files
+under `retention/access/` from elsewhere (copying or restoring the
+repository as root, for example) keep the depot from recording: it logs that it cannot record accesses and keeps
+serving, but access history is unproven and no version becomes an
+inactivity candidate until the ownership is fixed (`chown -R
+pkg6srv:pkg6srv /var/pkg6depotd/repo/retention`) and the depot is
+restarted.
+
+The depot starts recording only once it is ready to serve (with TLS,
+after its certificate is loaded or issued), so stopping it while ACME
+issuance backs off leaves no gap. A stop whose requests are still running
+after the 10-second drain is not clean: the depot leaves its run open,
+and after the restart that stop is a gap in access history.
 
 The package does not deliver anything under `/var/pkg6depotd`: the
 repository, its policy and its access records are operator data.

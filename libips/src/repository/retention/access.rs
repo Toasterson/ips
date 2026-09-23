@@ -309,6 +309,25 @@ fn read_fence(dir: &Path) -> Option<String> {
         .filter(|s| usable(s))
 }
 
+/// Give `path`, just created by this process, to the owner of `reference`
+/// when they differ, as when an operator runs pkg6repo as root on a
+/// repository the depot user owns. Fails if the owner cannot be changed.
+fn adopt(path: &Path, reference: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let want = fs::metadata(reference).at(reference)?;
+    let have = fs::symlink_metadata(path).at(path)?;
+    if have.uid() == want.uid() {
+        return Ok(());
+    }
+    std::os::unix::fs::lchown(path, Some(want.uid()), Some(want.gid())).map_err(|source| {
+        RetentionError::AccessOwner {
+            path: path.to_path_buf(),
+            uid: want.uid(),
+            source,
+        }
+    })
+}
+
 fn open_fence_lock(dir: &Path) -> Result<File> {
     fs::create_dir_all(dir).at(dir)?;
     let path = dir.join(FENCE_LOCK_FILE);
@@ -319,6 +338,55 @@ fn open_fence_lock(dir: &Path) -> Result<File> {
         .truncate(false)
         .open(&path)
         .at(&path)
+}
+
+/// Open the fence lock for an apply, creating `retention/`, the access
+/// directory and the lock as needed. The depot opens the lock for writing,
+/// so what this creates goes to the owner of `owner` (the repository), as
+/// when root runs pkg6repo; if that fails, it is removed again.
+fn create_fence_lock(repo: &Path, owner: &Path) -> Result<File> {
+    let dir = access_dir(repo);
+    let lock_path = dir.join(FENCE_LOCK_FILE);
+    // Directories this call creates, outermost first. A depot creating one
+    // meanwhile at worst sees it adopted by the owner or, if still empty,
+    // removed again; it creates it anew when it next starts a run.
+    let new_dirs: Vec<&Path> = [dir.parent().unwrap_or(repo), dir.as_path()]
+        .into_iter()
+        .filter(|d| fs::symlink_metadata(d).is_err())
+        .collect();
+    let mut new_lock = false;
+    let opened = (|| {
+        fs::create_dir_all(&dir).at(&dir)?;
+        let lock = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(f) => {
+                new_lock = true;
+                f
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => open_fence_lock(&dir)?,
+            Err(e) => return Err(e).at(&lock_path),
+        };
+        for d in &new_dirs {
+            adopt(d, owner)?;
+        }
+        if new_lock {
+            adopt(&lock_path, owner)?;
+        }
+        Ok(lock)
+    })();
+    if opened.is_err() {
+        if new_lock {
+            let _ = fs::remove_file(&lock_path);
+        }
+        for d in new_dirs.iter().rev() {
+            let _ = fs::remove_dir(d);
+        }
+    }
+    opened
 }
 
 struct Run {
@@ -554,6 +622,29 @@ impl AccessRecorder {
         if let Err(e) = result {
             self.fail(&mut st, &e);
         }
+    }
+
+    /// Stop recording without ending the run, for a depot that stops while
+    /// requests may still be served (its drain timed out). Later accesses
+    /// are not recorded and the heartbeat stops, so the run goes stale and
+    /// shows as a gap once the depot restarts, instead of claiming an
+    /// access history the depot can no longer vouch for. Dropping the
+    /// recorder afterwards writes nothing.
+    pub fn abandon(&self) {
+        let Ok(mut st) = self.state.lock() else {
+            return;
+        };
+        if st.closed {
+            return;
+        }
+        st.closed = true;
+        if st.run.is_some() {
+            warn!(
+                queued_lost = st.pending.len(),
+                "depot stops with requests still running; its access history ends here and shows as a gap after restart"
+            );
+        }
+        st.pending.clear();
     }
 
     /// Run [`AccessRecorder::tick`] every [`TICK_INTERVAL`] on a thread
@@ -817,8 +908,8 @@ impl AccessFence {
     /// naming the recorders that did not confirm.
     pub fn acquire(repo: &Path, timeout: std::time::Duration) -> Result<Self> {
         let dir = access_dir(repo);
-        let lock = open_fence_lock(&dir)?;
         let lock_path = dir.join(FENCE_LOCK_FILE);
+        let lock = create_fence_lock(repo, repo)?;
         lock.lock().at(&lock_path)?;
         let nonce = new_token();
         let fence = dir.join(FENCE_FILE);
@@ -879,7 +970,19 @@ pub fn close_recorder(repo: &Path, instance: &str, actor: &str) -> Result<DateTi
         .collect();
     let dir = access_dir(repo);
     let line = format!("{}\tx\t{}\t{}\n", now.timestamp(), instance, actor);
-    append_line(&day_file(&dir, now.date_naive()), &line, true)?;
+    let day = day_file(&dir, now.date_naive());
+    // Depots append to today's log: create it for the directory's owner.
+    match OpenOptions::new().append(true).create_new(true).open(&day) {
+        Ok(_) => {
+            if let Err(e) = adopt(&day, &dir) {
+                let _ = fs::remove_file(&day);
+                return Err(e);
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).at(&day),
+    }
+    append_line(&day, &line, true)?;
     // The line may have created today's log.
     File::open(&dir).and_then(|d| d.sync_all()).at(&dir)?;
     Ok(now)
@@ -1655,6 +1758,72 @@ mod tests {
         let log = AccessLog::load(repo.path()).unwrap();
         assert_eq!(log.gaps().len(), 1, "{:?}", log.gaps());
         assert_eq!(log.gaps()[0].until, at(1, 3));
+        assert_eq!(proven(repo.path(), at(9, 0)), Some(at(1, 3)));
+    }
+
+    #[test]
+    fn created_entries_go_to_the_owner_or_nothing_is_left() {
+        use std::os::unix::fs::MetadataExt;
+        let repo = managed_repo();
+        let dir = access_dir(repo.path());
+        // Same owner: nothing to change.
+        drop(AccessFence::acquire(repo.path(), std::time::Duration::from_millis(100)).unwrap());
+        let me = fs::metadata(dir.join(FENCE_LOCK_FILE)).unwrap().uid();
+        assert_eq!(fs::metadata(&dir).unwrap().uid(), me);
+        if me == 0 {
+            return; // root can give anything away
+        }
+        // A reference owned by root cannot be matched by an ordinary user.
+        let probe = repo.path().join("probe");
+        fs::write(&probe, "").unwrap();
+        assert!(matches!(
+            adopt(&probe, Path::new("/")),
+            Err(RetentionError::AccessOwner { uid: 0, .. })
+        ));
+        // A failed apply removes everything it created, `retention/` too...
+        let fresh = managed_repo();
+        let retention = access_dir(fresh.path()).parent().unwrap().to_path_buf();
+        assert!(matches!(
+            create_fence_lock(fresh.path(), Path::new("/")),
+            Err(RetentionError::AccessOwner { .. })
+        ));
+        assert!(!retention.exists());
+        // ...but nothing that was there before.
+        fs::create_dir(&retention).unwrap();
+        assert!(create_fence_lock(fresh.path(), Path::new("/")).is_err());
+        assert!(retention.is_dir());
+        assert!(!access_dir(fresh.path()).exists());
+        fs::create_dir(access_dir(fresh.path())).unwrap();
+        assert!(create_fence_lock(fresh.path(), Path::new("/")).is_err());
+        assert!(access_dir(fresh.path()).is_dir());
+        assert!(!access_dir(fresh.path()).join(FENCE_LOCK_FILE).exists());
+    }
+
+    #[test]
+    fn an_abandoned_run_stays_open_like_a_crash() {
+        let repo = managed_repo();
+        let rec = AccessRecorder::new(repo.path(), "d1");
+        record(&rec, AccessKind::Manifest, "k1", at(1, 1));
+        rec.abandon();
+        // Later accesses, heartbeats and the drop write nothing: the depot
+        // no longer vouches for its access history.
+        assert_eq!(
+            record(&rec, AccessKind::Manifest, "k2", at(1, 2)),
+            Recorded::Skipped
+        );
+        rec.tick();
+        drop(rec);
+        let log = AccessLog::load(repo.path()).unwrap();
+        assert_eq!(log.open_runs().len(), 1);
+        assert_eq!(log.manifest_access("k2"), None);
+        assert_eq!(proven(repo.path(), at(1, 3)), None);
+        // The restart turns it into a gap.
+        clock::pin(Some(at(1, 3)));
+        let rec = AccessRecorder::new(repo.path(), "d1");
+        rec.tick();
+        drop(rec);
+        let log = AccessLog::load(repo.path()).unwrap();
+        assert_eq!(log.gaps().len(), 1, "{:?}", log.gaps());
         assert_eq!(proven(repo.path(), at(9, 0)), Some(at(1, 3)));
     }
 

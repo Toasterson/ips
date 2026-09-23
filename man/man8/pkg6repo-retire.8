@@ -166,8 +166,10 @@ complete, and fails closed where it is not.
 Each depot records under a name made of its host name and listen address,
 which stays the same across restarts and must differ between depots
 serving the same repository.
-While it runs it writes a heartbeat every minute, and it ends its records
-with a clean shutdown.
+It starts recording once it is ready to serve (with TLS, after its
+certificate is loaded or issued), writes a heartbeat every minute while it
+runs, and ends its records with a clean shutdown.
+A stop whose requests do not finish within ten seconds is not clean.
 The following make accesses possibly missing, and inactivity then counts
 from their end only:
 .Bl -bullet
@@ -205,12 +207,15 @@ runs as
 and creates the directory when it starts.
 Run
 .Nm pkg6repo retire
-as the same user:
+as the same user.
 .Cm apply
 creates
 .Pa retention/access/fence.lock
-if it is missing, and a root-owned lock or directory keeps the depot from
-recording.
+and
+.Cm close-depot
+creates the day's access log if they are missing; run as root, both give
+what they create to the owner of the repository, and fail without
+changing anything if they cannot.
 A request that writes an access record waits until the record is on disk,
 but never for a running
 .Cm apply .

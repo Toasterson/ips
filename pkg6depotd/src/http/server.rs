@@ -13,13 +13,25 @@ use tokio::net::TcpListener;
 /// timeout.
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How serving ended after the shutdown signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// Every in-flight request finished.
+    Drained,
+    /// [`DRAIN_TIMEOUT`] expired; request tasks may still be running and
+    /// serving until the process exits.
+    DrainExpired,
+}
+
 pub async fn run(router: Router, listener: TcpListener) -> Result<()> {
-    run_until(router, listener, std::future::pending()).await
+    run_until(router, listener, std::future::pending())
+        .await
+        .map(|_| ())
 }
 
 /// Serve until `shutdown` resolves, then stop accepting and give in-flight
 /// requests up to [`DRAIN_TIMEOUT`] to finish.
-pub async fn run_until<F>(router: Router, listener: TcpListener, shutdown: F) -> Result<()>
+pub async fn run_until<F>(router: Router, listener: TcpListener, shutdown: F) -> Result<Stopped>
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -36,7 +48,7 @@ pub async fn run_tls_until<F>(
     store: Arc<CertStore>,
     handshake_timeout: Duration,
     shutdown: F,
-) -> Result<()>
+) -> Result<Stopped>
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -62,9 +74,10 @@ pub async fn run_tls(
         std::future::pending(),
     )
     .await
+    .map(|_| ())
 }
 
-async fn serve_until<L, F>(router: Router, listener: L, shutdown: F) -> Result<()>
+async fn serve_until<L, F>(router: Router, listener: L, shutdown: F) -> Result<Stopped>
 where
     L: Listener,
     L::Addr: Debug,
@@ -84,14 +97,16 @@ where
     };
     tokio::select! {
         served = server.into_future() => {
-            served.map_err(|e| crate::errors::DepotError::Server(e.to_string()))
+            served
+                .map(|()| Stopped::Drained)
+                .map_err(|e| crate::errors::DepotError::Server(e.to_string()))
         }
         _ = drain_expired => {
             tracing::warn!(
                 "requests still running {}s after shutdown was requested; stopping anyway",
                 DRAIN_TIMEOUT.as_secs()
             );
-            Ok(())
+            Ok(Stopped::DrainExpired)
         }
     }
 }

@@ -163,6 +163,20 @@ pub enum RetentionError {
     )]
     AccessUnconfirmed { depots: Vec<String> },
 
+    #[error("cannot give {path} to the repository owner (uid {uid}): {source}")]
+    #[diagnostic(
+        code(ips::retention::access_owner),
+        help(
+            "The depot must be able to write <repo>/retention/access/, so entries created there belong to the owner of the repository. Run pkg6repo as that user (for example `su pkg6srv -c 'pkg6repo retire ...'`) or as root. What this command had just created there was removed again"
+        )
+    )]
+    AccessOwner {
+        path: PathBuf,
+        uid: u32,
+        #[source]
+        source: io::Error,
+    },
+
     #[error("no running depot named {instance:?} has recorded access (open: {})", .known.join(", "))]
     #[diagnostic(
         code(ips::retention::unknown_depot),

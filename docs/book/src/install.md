@@ -67,7 +67,9 @@ reads stays owned by the service user.
 - It depends on `svc:/system/filesystem/local` and
   `svc:/milestone/network`.
 - `stop` is `:kill`. SIGTERM stops accepting connections, gives running
-  requests up to 10 seconds, flushes telemetry, then exits.
+  requests up to 10 seconds, flushes telemetry, then exits. If requests
+  are still running after 10 seconds, the stop does not count as clean
+  for access recording (see [Retention](retention.md)).
 - `refresh` is `:kill -HUP`. SIGHUP only re-reads TLS certificates.
   **Configuration changes need `svcadm restart`.**
 - The package restarts the service when the binary or method changes,

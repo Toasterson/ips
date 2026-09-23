@@ -217,6 +217,14 @@ impl DepotRepo {
         self.access.shutdown();
     }
 
+    /// Stop access recording without ending the run, when the depot stops
+    /// while requests may still be served: the run goes stale and shows
+    /// as a gap after restart instead of vouching for accesses it cannot
+    /// record.
+    pub fn abandon_access(&self) {
+        self.access.abandon();
+    }
+
     pub fn get_manifest_path(&self, publisher: &str, fmri: &Fmri) -> Option<PathBuf> {
         if !is_valid_publisher_name(publisher) || check_fmri_components(fmri).is_err() {
             return None;

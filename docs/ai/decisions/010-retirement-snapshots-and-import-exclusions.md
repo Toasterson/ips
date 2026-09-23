@@ -157,6 +157,22 @@ Maintainer decisions on #39/#40/#24 (2026-09-22):
     recorder with records but no head is a gap up to its last record; an
     unreadable head, or a summary folded through yesterday or later, is
     refused. Deleting heads together with logs is not detected.
+    A depot starts its run (and heartbeat) only once it is ready to serve:
+    port bound and, with TLS, the certificate loaded or issued. SIGTERM is
+    handled only while serving, so a run started during ACME backoff would
+    end without an `e` line. On SIGTERM/SIGINT the depot drains requests
+    for up to 10 s; only a complete drain ends the run with `e`. If
+    requests are still running when the drain expires, the recorder is
+    *abandoned*: it records nothing more, drops queued records, stops
+    heartbeating and writes no `e`, so the run goes stale and becomes a gap
+    after restart instead of vouching for accesses it can no longer record.
+    When `pkg6repo` (typically run as root) creates `retention/`,
+    `retention/access/`, `fence.lock` (apply) or a day log (`close-depot`),
+    it gives each newly created entry to the repository's owner so the
+    depot can keep writing; if that `chown` fails it removes what it
+    created and fails (`ips::retention::access_owner`). Existing entries are
+    never changed; root-owned files already there keep the depot from
+    recording, which is a gap until the operator fixes ownership.
 12. **Final access check under a fence, synchronised with the switch.**
     `GenerationStore::commit_gated` runs a gate after the catalogs are built
     and the generation is durable, holding what it returns until the switch

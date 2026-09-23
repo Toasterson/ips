@@ -16,7 +16,7 @@ pub enum RetireCommand {
     /// Compute a retirement plan for review; changes nothing
     Plan {
         /// Repository path
-        #[clap(short = 's')]
+        #[clap(short = 's', value_parser = crate::local_path)]
         repo: PathBuf,
 
         /// Policy file (default: <repo>/policy.kdl if present)
@@ -48,7 +48,7 @@ pub enum RetireCommand {
     /// Recheck a plan against the current repository and apply it atomically
     Apply {
         /// Repository path
-        #[clap(short = 's')]
+        #[clap(short = 's', value_parser = crate::local_path)]
         repo: PathBuf,
 
         /// Plan file written by `retire plan -o`
@@ -66,7 +66,7 @@ pub enum RetireCommand {
     /// Make hidden versions visible in catalogs and search again
     Restore {
         /// Repository path
-        #[clap(short = 's')]
+        #[clap(short = 's', value_parser = crate::local_path)]
         repo: PathBuf,
 
         /// Exact FMRI or regex:<pattern> of hidden versions; at least one
@@ -85,7 +85,7 @@ pub enum RetireCommand {
     /// Show the policy, hidden versions, snapshot problems and audit trail
     Status {
         /// Repository path
-        #[clap(short = 's')]
+        #[clap(short = 's', value_parser = crate::local_path)]
         repo: PathBuf,
 
         /// Policy file (default: <repo>/policy.kdl if present)
@@ -112,7 +112,7 @@ pub enum RetireCommand {
     /// is unproven back to its failure
     CloseDepot {
         /// Repository path
-        #[clap(short = 's')]
+        #[clap(short = 's', value_parser = crate::local_path)]
         repo: PathBuf,
 
         /// Depot name as `retire status` lists it (host/listen address)
@@ -122,7 +122,7 @@ pub enum RetireCommand {
     /// Validate a policy and keep files without touching the repository
     CheckPolicy {
         /// Repository whose policy.kdl to check
-        #[clap(short = 's')]
+        #[clap(short = 's', value_parser = crate::local_path)]
         repo: Option<PathBuf>,
 
         /// Policy file

@@ -324,3 +324,32 @@ fn retire_output_follows_the_pkg6repo_command_rules() {
     assert!(out.contains("already exists"), "{out}");
     assert_eq!(fs::read_to_string(&plan).unwrap(), "operator notes");
 }
+
+#[test]
+fn retire_rejects_a_repository_uri_as_a_usage_error() {
+    // ADR-009: -s takes a local path; a URI is a usage error (exit 2) for
+    // every retire subcommand, not a later repository error.
+    let tmp = TempDir::new().unwrap();
+    let uri = format!("file://{}", tmp.path().join("repo").display());
+    let plan = tmp.path().join("plan.json");
+    let cases: [&[&str]; 6] = [
+        &["plan"],
+        &["apply", s(&plan)],
+        &["restore", "pkg://oi/library/foo@1.0"],
+        &["status"],
+        &["close-depot", "depot"],
+        &["check-policy"],
+    ];
+    for args in cases {
+        let (sub, rest) = args.split_first().unwrap();
+        let mut argv = vec!["retire", sub, "-s", uri.as_str()];
+        argv.extend_from_slice(rest);
+        let out = pkg6repo(&argv);
+        assert_eq!(out.status.code(), Some(2), "{sub}: {}", text(&out));
+        assert!(
+            text(&out).contains("without the file:// prefix"),
+            "{sub}: {}",
+            text(&out)
+        );
+    }
+}
