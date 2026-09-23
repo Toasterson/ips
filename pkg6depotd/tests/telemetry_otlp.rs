@@ -790,7 +790,7 @@ fn sigterm_drains_and_flushes_before_exit() {
     .unwrap();
 
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("pkg6depotd"))
-        .args(["--no-daemon", "--config", config.to_str().unwrap(), "start"])
+        .args(["--config", config.to_str().unwrap(), "start"])
         .env("RUST_LOG", "info")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

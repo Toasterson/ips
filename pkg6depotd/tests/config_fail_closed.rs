@@ -187,11 +187,7 @@ oauth2 {
 fn start_with_valid_config_but_missing_repository_fails() {
     let dir = TempDir::new().unwrap();
     let good = write(&dir, "good.kdl", VALID);
-    depotd(
-        dir.path(),
-        &["--no-daemon", "--config", good.to_str().unwrap(), "start"],
-    )
-    .failure();
+    depotd(dir.path(), &["--config", good.to_str().unwrap(), "start"]).failure();
 }
 
 #[test]

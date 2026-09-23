@@ -49,7 +49,7 @@
 	    timeout_seconds='60' />
 
 	<property_group name='startd' type='framework'>
-		<!-- pkg6depotd runs in the foreground (no-daemon). -->
+		<!-- pkg6depotd always runs in the foreground. -->
 		<propval name='duration' type='astring' value='child' />
 	</property_group>
 

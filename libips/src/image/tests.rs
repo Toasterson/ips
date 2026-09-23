@@ -248,3 +248,141 @@ fn test_refresh_catalogs_directory_clearing() {
     // Clean up
     temp_dir.close().unwrap();
 }
+
+/// Files under the image metadata that must survive any publisher operation.
+fn metadata_witnesses(image: &Image) -> Vec<std::path::PathBuf> {
+    let marker = image.metadata_dir().join("marker");
+    fs::write(&marker, "image metadata").unwrap();
+    let witnesses = vec![image.image_json_path(), image.installed_db_path(), marker];
+    for w in &witnesses {
+        assert!(w.exists(), "{} missing before the test", w.display());
+    }
+    witnesses
+}
+
+#[test]
+fn test_add_publisher_rejects_path_names() {
+    let temp_dir = tempdir().unwrap();
+    let mut image = Image::create_image(temp_dir.path().join("image"), ImageType::Full).unwrap();
+    for name in ["..", ".", "", "a/b", "../x", "a\\b", "-x"] {
+        let err = image
+            .add_publisher(name, "http://example.com/repo", vec![], true)
+            .unwrap_err();
+        assert!(
+            matches!(err, ImageError::InvalidPublisherName(ref n) if n == name),
+            "{name:?}: {err:?}"
+        );
+        assert!(image.publisher_catalog_dir(name).is_err(), "{name:?}");
+    }
+    assert!(image.publishers().is_empty());
+    assert!(Image::load(image.path()).unwrap().publishers().is_empty());
+}
+
+#[test]
+fn test_path_publisher_names_cannot_delete_image_metadata() {
+    // An image configured before names were checked may hold such names;
+    // catalog_dir().join("..") is the image metadata directory itself.
+    for name in ["..", "../..", "x/../.."] {
+        let temp_dir = tempdir().unwrap();
+        let mut image =
+            Image::create_image(temp_dir.path().join("image"), ImageType::Full).unwrap();
+        image.publishers.push(Publisher {
+            name: name.to_string(),
+            origin: "http://127.0.0.1:9/".to_string(),
+            mirrors: vec![],
+            is_default: true,
+        });
+        image.save().unwrap();
+        let witnesses = metadata_witnesses(&image);
+
+        let err = image
+            .refresh_catalogs(&[name.to_string()], true)
+            .unwrap_err();
+        assert!(
+            matches!(err, ImageError::InvalidPublisherName(_)),
+            "{err:?}"
+        );
+        let err = image.refresh_catalogs(&[], true).unwrap_err();
+        assert!(
+            matches!(err, ImageError::InvalidPublisherName(_)),
+            "{err:?}"
+        );
+
+        // unset-publisher: the configuration entry goes, nothing is deleted.
+        image.remove_publisher(name).unwrap();
+        image.purge_publisher_catalog(name).unwrap();
+
+        for w in &witnesses {
+            assert!(w.exists(), "{name:?} deleted {}", w.display());
+        }
+        assert!(temp_dir.path().join("image").exists());
+    }
+}
+
+#[test]
+fn test_refresh_rejects_unknown_publisher_next_to_known_one() {
+    let temp_dir = tempdir().unwrap();
+    let mut image = Image::create_image(temp_dir.path().join("image"), ImageType::Full).unwrap();
+    image
+        .add_publisher("known", "http://127.0.0.1:9/", vec![], true)
+        .unwrap();
+    // Checked before anything is deleted or downloaded.
+    let err = image
+        .refresh_catalogs(&["known".to_string(), "nosuch".to_string()], true)
+        .unwrap_err();
+    assert!(
+        matches!(err, ImageError::PublisherNotFound(ref n) if n == "nosuch"),
+        "{err:?}"
+    );
+}
+
+/// A downloaded catalog for `publisher` holding one package, `stem`.
+fn write_downloaded_catalog(image: &Image, publisher: &str, stem: &str) {
+    let dir = image.publisher_catalog_dir(publisher).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let ts = "20260923T000000Z";
+    fs::write(
+        dir.join("catalog.attrs"),
+        format!(
+            r#"{{"created":"{ts}","last-modified":"{ts}","package-count":1,"package-version-count":1,"parts":{{"catalog.base.C":{{"last-modified":"{ts}"}}}},"version":1}}"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("catalog.base.C"),
+        format!(r#"{{"{publisher}":{{"{stem}":[{{"version":"1.0,5.11-0:{ts}"}}]}}}}"#),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_purge_publisher_catalog_keeps_remaining_publisher() {
+    let temp_dir = tempdir().unwrap();
+    let mut image = Image::create_image(temp_dir.path().join("image"), ImageType::Full).unwrap();
+    image
+        .add_publisher("keep", "http://127.0.0.1:9/", vec![], false)
+        .unwrap();
+    image
+        .add_publisher("gone", "http://127.0.0.1:9/", vec![], true)
+        .unwrap();
+    write_downloaded_catalog(&image, "keep", "web/kept");
+    write_downloaded_catalog(&image, "gone", "web/removed");
+    image.build_catalog().unwrap();
+    let witnesses = metadata_witnesses(&image);
+
+    image.remove_publisher("gone").unwrap();
+    image.purge_publisher_catalog("gone").unwrap();
+
+    assert!(!image.catalog_dir().join("gone").exists());
+    assert!(image.catalog_dir().join("keep").exists());
+    let offered: Vec<(String, String)> = image
+        .query_catalog(None)
+        .unwrap()
+        .into_iter()
+        .map(|p| (p.publisher, p.fmri.stem().to_string()))
+        .collect();
+    assert_eq!(offered, vec![("keep".to_string(), "web/kept".to_string())]);
+    for w in &witnesses {
+        assert!(w.exists(), "deleted {}", w.display());
+    }
+}

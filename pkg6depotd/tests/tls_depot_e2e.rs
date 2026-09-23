@@ -30,7 +30,7 @@ impl Drop for Depot {
 impl Depot {
     fn start(config: &Path, cwd: &Path) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_pkg6depotd"))
-            .args(["--no-daemon", "--config", config.to_str().unwrap(), "start"])
+            .args(["--config", config.to_str().unwrap(), "start"])
             .current_dir(cwd)
             .env("RUST_LOG", "pkg6depotd=info")
             .stdout(Stdio::null())

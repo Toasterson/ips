@@ -1,6 +1,5 @@
 pub mod cli;
 pub mod config;
-pub mod daemon;
 pub mod errors;
 pub mod http;
 pub mod repo;
@@ -86,10 +85,7 @@ pub async fn run() -> Result<()> {
 
     match args.command.unwrap_or(Commands::Start) {
         Commands::Start => {
-            if !args.no_daemon {
-                daemon::daemonize().map_err(|e| miette::miette!(e))?;
-            }
-            // After daemonizing: OTLP export runs on its own threads.
+            // Always in the foreground; OTLP export runs on its own threads.
             let telemetry = telemetry::init(&settings)?;
 
             let served = serve(&config).await;
@@ -121,9 +117,6 @@ pub async fn run() -> Result<()> {
             for line in tls::preflight(tls_plan.as_ref())? {
                 println!("  {line}");
             }
-        }
-        _ => {
-            println!("Command not yet implemented");
         }
     }
 

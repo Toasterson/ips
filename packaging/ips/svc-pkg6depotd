@@ -39,7 +39,7 @@ start)
 		export RUST_LOG
 	fi
 
-	exec $DEPOTD --no-daemon --config "$config" start
+	exec $DEPOTD --config "$config" start
 	;;
 *)
 	echo "Usage: $0 start"
