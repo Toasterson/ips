@@ -531,6 +531,41 @@ check "SMF uses the packaged method" grep -q "exec='/lib/svc/method/svc-pkg6depo
 check "method execs the packaged daemon" grep -q '^DEPOTD=/usr/lib/pkg6depotd$' "${method}"
 check "instance disabled by default" grep -q "<create_default_instance enabled='false' />" "${xml}"
 check "child duration" grep -q "name='duration' type='astring' value='child'" "${xml}"
+# duration=child reports online once the method execs the daemon, before it
+# parses the file: the method must run config-test first and map a rejected
+# file to SMF_EXIT_ERR_CONFIG (maintenance). Run it against stubs.
+smf="${tmp}/smf"
+mkdir -p "${smf}"
+printf '%s\n' 'SMF_EXIT_ERR_FATAL=95' 'SMF_EXIT_ERR_CONFIG=96' >"${smf}/smf_include.sh"
+printf '%s\n' '#!/bin/sh' 'echo "$*" >>"${STUB_LOG}"' \
+  'case "$*" in *" config-test") [ -z "${STUB_BAD}" ] || { echo "parse error" >&2; exit 1; } ;; esac' \
+  'echo "ran $*"' >"${smf}/depotd"
+printf '%s\n' '#!/bin/sh' 'echo "${STUB_CONFIG}"' >"${smf}/svcprop"
+chmod +x "${smf}/depotd" "${smf}/svcprop"
+sed -e "s|/lib/svc/share/smf_include.sh|${smf}/smf_include.sh|" \
+  -e "s|^DEPOTD=/usr/lib/pkg6depotd$|DEPOTD=${smf}/depotd|" \
+  -e "s|/usr/bin/svcprop|${smf}/svcprop|" "${method}" >"${smf}/method"
+: >"${smf}/good.kdl"
+run_method() { # run_method CONFIG BAD -> exit status; STUB_LOG gets daemon calls
+  : >"${smf}/calls"
+  set +e
+  STUB_LOG="${smf}/calls" STUB_CONFIG="$1" STUB_BAD="$2" SMF_FMRI=svc:/test \
+    sh "${smf}/method" start >"${smf}/out" 2>&1
+  local rc=$?
+  set -e
+  echo "${rc}"
+}
+eq "method: valid config execs start" "$(run_method "${smf}/good.kdl" '')" 0
+eq "method: valid config is tested, then started" "$(cat "${smf}/calls")" \
+  "--config ${smf}/good.kdl config-test
+--config ${smf}/good.kdl start"
+eq "method: invalid config exits SMF_EXIT_ERR_CONFIG" "$(run_method "${smf}/good.kdl" 1)" 96
+eq "method: invalid config never starts the daemon" "$(cat "${smf}/calls")" \
+  "--config ${smf}/good.kdl config-test"
+check "method: invalid config logs the daemon's diagnostic" grep -q 'parse error' "${smf}/out"
+check "method: invalid config says how to recover" grep -q 'svcadm clear svc:/test' "${smf}/out"
+eq "method: missing config exits SMF_EXIT_ERR_CONFIG" "$(run_method "${smf}/missing.kdl" '')" 96
+eq "method: missing config runs nothing" "$(cat "${smf}/calls")" ""
 tools=$(sed -n 's/^for b in \(.*\); do$/\1/p' "${build}")
 eq "build stages the operator tools" "${tools}" "pkg6repo pkg6recv"
 check_not "p5m delivers nothing at usr/bin/pkgtree (developer/pkgtree owns it)" has_action 'path=usr/bin/pkgtree( |$)'

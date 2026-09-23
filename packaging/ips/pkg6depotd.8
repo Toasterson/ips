@@ -302,6 +302,11 @@ The default is
 The service will not start if the file is missing, unreadable by
 .Sy pkg6srv ,
 or invalid; there are no built-in defaults.
+The start method runs
+.Cm config-test
+on the file first and, if it fails, puts the instance into maintenance;
+fix the file, then run
+.Nm svcadm clear .
 .It Sy config/log_filter
 A
 .Ev RUST_LOG
