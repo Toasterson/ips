@@ -94,3 +94,6 @@ sample_data
 /.output.txt
 /repo/
 /artifacts/
+
+# Release pipeline outputs
+/dist/

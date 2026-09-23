@@ -1,0 +1,62 @@
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# IPS manifest template for the pkg6 depot server and local operator tools.
+# Expanded by pkgmogrify in .forgejo/scripts/build-ips-package.sh; every
+# macro used below is supplied there from the release tag.
+#
+# Shared parent directories (etc, usr/bin, lib/svc/...) are left implicit, as
+# in oi-userland, so their attributes never conflict with the OS packages.
+#
+set name=pkg.fmri value=$(IPS_FMRI)
+set name=pkg.summary value="pkg6 IPS repository depot server and operator tools"
+set name=pkg.description \
+    value="pkg6depotd serves IPS package repositories to pkg(1) clients over the pkg5 depot protocol. Includes the SMF service svc:/application/pkg/pkg6depotd and the local repository tools pkg6repo, pkg6recv and pkgtree."
+set name=pkg.human-version value=$(RELEASE_VERSION)
+set name=info.classification \
+    value=org.opensolaris.category.2008:System/Packaging
+set name=info.upstream-url value=https://code.aopc.cloud/OpenIndiana/ips
+set name=info.source-url \
+    value=https://code.aopc.cloud/OpenIndiana/ips/archive/$(RELEASE_TAG).tar.gz
+set name=info.repository-url value=https://code.aopc.cloud/OpenIndiana/ips.git
+set name=info.repository-changeset value=$(RELEASE_COMMIT)
+# org.opensolaris.smf.fmri is not set here: pkgdepend generate derives it
+# from the SMF manifest, and a second copy fails pkglint (manifest006).
+set name=variant.arch value=i386
+#
+# Service account. UID/GID 94 is unassigned in oi-userland's
+# doc/reserved_uids_and_gids.md; reserve it there before GA.
+group groupname=pkg6srv gid=94
+user username=pkg6srv ftpuser=false gcos-field="pkg6 depot server Reserved UID" \
+    group=pkg6srv password=NP uid=94
+#
+# Configuration. The service user may read it, nobody else: later releases
+# keep TLS and ACME credentials here. Operator edits survive upgrades.
+dir  path=etc/pkg6depotd owner=root group=pkg6srv mode=0750
+file path=etc/pkg6depotd/pkg6depotd.kdl owner=root group=pkg6srv mode=0640 \
+    preserve=renamenew
+#
+# SMF service. Restart a running depot when its binary or method changes;
+# disable it before the package is removed.
+file path=lib/svc/manifest/application/pkg/pkg6depotd.xml owner=root \
+    group=sys mode=0444 disable_fmri=svc:/application/pkg/pkg6depotd:default \
+    restart_fmri=svc:/system/manifest-import:default
+file path=lib/svc/method/svc-pkg6depotd owner=root group=bin mode=0555 \
+    restart_fmri=svc:/application/pkg/pkg6depotd:default
+file path=usr/lib/pkg6depotd owner=root group=bin mode=0555 \
+    restart_fmri=svc:/application/pkg/pkg6depotd:default
+#
+# Local operator tools. Repository administration is local-only in v1.
+file path=usr/bin/pkg6recv owner=root group=bin mode=0555
+file path=usr/bin/pkg6repo owner=root group=bin mode=0555
+file path=usr/bin/pkgtree owner=root group=bin mode=0555
+file path=usr/share/man/man8/pkg6depotd.8 owner=root group=bin mode=0444
+#
+# Repositories are operator data and are deliberately NOT delivered: pkg(1)
+# salvages unpackaged content of a removed directory into /var/pkg/lost+found,
+# which would move a repository away on uninstall. The operator creates
+# /var/pkg6depotd (ideally its own ZFS dataset); see pkg6depotd(8).
+#
+license LICENSE license=MPL-2.0

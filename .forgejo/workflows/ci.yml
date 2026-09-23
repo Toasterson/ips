@@ -63,13 +63,19 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets --locked
 
-      - name: Test (nextest)
-        run: cargo nextest run --workspace --locked
-
-      - name: End-to-end tests
+      - name: Test inventory (required suites present, nothing skipped)
+        # Same check as the release gate (.forgejo/scripts/release-lib.sh).
         run: |
-          cargo run -p xtask --locked -- build-e2e
-          cargo run -p xtask --locked -- run-e2e
+          set -euo pipefail
+          . .forgejo/scripts/release-lib.sh
+          cargo nextest list --workspace --locked --message-format json > target/nextest-list.json
+          release_check_test_inventory target/nextest-list.json
+
+      - name: Test (nextest, whole workspace incl. pkg6repo e2e)
+        # The pkg6repo e2e_tests target is self-contained (it drives the
+        # pkg6repo binary Cargo builds for the test profile), so the workspace
+        # run covers it; no separate xtask e2e step is needed.
+        run: cargo nextest run --workspace --locked
 
       - name: Docs
         run: cargo doc --workspace --no-deps --locked
@@ -111,7 +117,8 @@ jobs:
           cargo build --workspace --all-targets --locked || {
             echo "=== build failed; host state ==="; df -h /export/home /tmp; swap -l; zfs list 2>/dev/null | head; du -sh target 2>/dev/null; exit 1; }
 
-      - name: Test (nextest)
+      - name: Test (nextest, whole workspace incl. pkg6repo e2e)
         run: |
+          set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo nextest run --workspace --locked

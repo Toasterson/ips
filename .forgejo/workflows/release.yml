@@ -1,12 +1,41 @@
 name: release
 
-# Build and publish release tarballs when a v* tag is pushed. Solstice CI jobs
-# run in independent VMs with no artifact passing, so each platform job
-# builds its own tarball and uploads it straight to the Forgejo release for
-# the tag (creating the release if it does not exist yet).
+# One pipeline for every release tag: vX.Y.Z-alpha.N, vX.Y.Z-beta.N,
+# vX.Y.Z-rc.N and stable vX.Y.Z all run exactly the same jobs and gates. Any
+# other v* tag fails the first step. See docs/release-process.md.
+#
+# Solstice CI constraints that shape this file (see ci.yml and ADR 005):
+#   * `needs:` is ignored and there are no cross-job artifacts, so each
+#     platform job is self-contained: verify the tag, build, test, package,
+#     then upload its own assets. A job uploads only after its own gates pass.
+#   * The checkout is `fetch --depth=1 --no-tags`; the scripts fetch the tag
+#     and prove tag == HEAD == GITHUB_SHA == tag on origin before building and
+#     again before uploading.
+#   * No $GITHUB_ENV and `${{ env.* }}` expands to empty: steps re-derive the
+#     release metadata from GITHUB_REF through release-lib.sh.
+#   * Whole-job wall clock is capped (6300 s by default), so the illumos job
+#     builds only the release profile and runs the tests in that profile.
+#   * Every multi-line step starts with `set -euo pipefail` instead of relying
+#     on the runner's default shell flags.
+#   * Tests: `cargo nextest run --workspace --release` runs every maintained
+#     test, including the pkg6repo `e2e_tests` target, which drives the
+#     release `pkg6repo` binary Cargo built (CARGO_BIN_EXE_pkg6repo) in
+#     per-test temporary directories. No filters are applied. A preceding
+#     inventory step (release_check_test_inventory) fails the job if a
+#     required suite is missing or shrinks, or if any test other than the
+#     allow-listed opt-in network test would not run.
+#   * For an annotated tag the runner's GITHUB_SHA may be the tag object;
+#     release_verify_commit accepts that or the peeled commit, nothing else.
+#
+# Release state (upload-release-assets.sh):
+#   * the Forgejo release is created as a draft, prerelease for alpha/beta/rc;
+#   * assets are immutable: never deleted or replaced, identical re-uploads
+#     are skipped, differing ones fail;
+#   * a pre-release leaves draft once both platforms' assets are present;
+#   * a stable release is never published by CI; a maintainer publishes it.
 #
 # Requires a repository secret RELEASE_TOKEN (PAT with write:repository), or
-# repo settings that grant the per-run FORGEJO_TOKEN release write access.
+# an automatic FORGEJO_TOKEN that has release write access.
 
 on:
   push:
@@ -16,58 +45,152 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SCCACHE_STARTUP_TIMEOUT: "60"
+  CARGO_INCREMENTAL: "0"
   FORGE_BASE: https://code.aopc.cloud
   REPO_OWNER: OpenIndiana
   REPO_NAME: ips
-  BINARIES: pkg6 pkg6repo pkg6recv pkg6depotd pkgtree
 
 jobs:
   linux:
-    name: Release build (Linux x86_64)
+    name: Release (Linux x86_64)
     runs-on: rust
     steps:
+      - name: Verify release tag and provenance
+        run: |
+          set -euo pipefail
+          . .forgejo/scripts/release-lib.sh
+          release_init
+          release_fetch_tag
+          release_verify_commit
+          release_verify_cargo_version
+          echo "release ${RELEASE_TAG}: channel=${RELEASE_CHANNEL} prerelease=${RELEASE_PRERELEASE}"
+          echo "commit ${RELEASE_COMMIT}, ${RELEASE_TAG_TYPE} ${RELEASE_TAG_OBJECT}"
+          rustc -Vv
+          cargo -V
+
+      - name: Release script self-tests
+        run: .forgejo/scripts/tests/test-release-scripts.sh
+
+      - name: Install cargo-nextest
+        run: |
+          set -euo pipefail
+          curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
+
+      - name: Format check
+        run: cargo fmt --all --check
+
       - name: Build release binaries
         run: cargo build --workspace --release --locked
 
-      - name: Package
+      - name: Test inventory (required suites present, nothing skipped)
         run: |
           set -euo pipefail
-          staging=$(mktemp -d)
-          for b in $BINARIES; do install -m0755 "target/release/$b" "$staging/$b"; done
-          tar -C "$staging" -czf ips-linux-x86_64.tar.gz .
-          sha256sum ips-linux-x86_64.tar.gz > ips-linux-x86_64.tar.gz.sha256
+          . .forgejo/scripts/release-lib.sh
+          cargo nextest list --workspace --release --locked --message-format json > target/nextest-list.json
+          release_check_test_inventory target/nextest-list.json
+
+      - name: Test (nextest, whole workspace incl. pkg6repo e2e, release profile)
+        run: cargo nextest run --workspace --release --locked
+
+      - name: Package tarball, checksums and provenance
+        run: |
+          set -euo pipefail
+          . .forgejo/scripts/release-lib.sh
+          release_init
+          .forgejo/scripts/package-tarball.sh linux-x86_64 dist
+          .forgejo/scripts/write-provenance.sh linux-x86_64 dist \
+            "dist/$(release_tarball_name linux-x86_64)"
 
       - name: Upload to Forgejo release
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
-        run: |
-          set -euo pipefail
-          .forgejo/scripts/upload-release-assets.sh ips-linux-x86_64.tar.gz ips-linux-x86_64.tar.gz.sha256
+        run: .forgejo/scripts/upload-release-assets.sh linux-x86_64 dist
 
   illumos:
-    name: Release build (illumos x86_64)
+    name: Release (illumos x86_64, IPS package)
     runs-on: illumos
     steps:
-      - name: Install jq (release upload script)
+      - name: Install jq
+        # pkg exits 4 when there is nothing to do.
         run: sudo pkg install -v text/jq || [ $? -eq 4 ]
 
-      - name: Build release binaries
-        run: cargo build --workspace --release --locked
-
-      - name: Package
+      - name: Verify release tag and provenance
         run: |
           set -euo pipefail
-          staging=$(mktemp -d)
-          for b in $BINARIES; do cp "target/release/$b" "$staging/$b" && chmod 0755 "$staging/$b"; done
-          gtar -C "$staging" -czf ips-illumos-x86_64.tar.gz .
-          sha256sum ips-illumos-x86_64.tar.gz > ips-illumos-x86_64.tar.gz.sha256 \
-            || digest -a sha256 ips-illumos-x86_64.tar.gz > ips-illumos-x86_64.tar.gz.sha256
+          . .forgejo/scripts/release-lib.sh
+          release_init
+          release_fetch_tag
+          release_verify_commit
+          release_verify_cargo_version
+          echo "release ${RELEASE_TAG}: channel=${RELEASE_CHANNEL} prerelease=${RELEASE_PRERELEASE}"
+          echo "commit ${RELEASE_COMMIT}, ${RELEASE_TAG_TYPE} ${RELEASE_TAG_OBJECT}"
+          uname -a
+          rustc -Vv
+          cargo -V
+          df -h /export/home /tmp || true
+
+      - name: Release script self-tests
+        run: .forgejo/scripts/tests/test-release-scripts.sh
+
+      - name: Install cargo-nextest
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cargo/bin"
+          curl -LsSf https://get.nexte.st/latest/illumos | gtar zxf - -C "$HOME/.cargo/bin"
+          PATH="$HOME/.cargo/bin:$PATH" cargo nextest --version
+
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          date -u
+          cargo build --workspace --release --locked || {
+            echo "=== build failed; host state ==="; df -h /export/home /tmp; swap -l; du -sh target 2>/dev/null; exit 1; }
+          date -u
+
+      - name: Test inventory (required suites present, nothing skipped)
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          . .forgejo/scripts/release-lib.sh
+          cargo nextest list --workspace --release --locked --message-format json > target/nextest-list.json
+          release_check_test_inventory target/nextest-list.json
+
+      - name: Test (nextest, whole workspace incl. pkg6repo e2e, release profile)
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo nextest run --workspace --release --locked || {
+            echo "=== tests failed; host state ==="; df -h /export/home /tmp; swap -l; du -sh target 2>/dev/null; exit 1; }
+          date -u
+
+      - name: Build IPS package
+        run: .forgejo/scripts/build-ips-package.sh dist
+
+      - name: Test IPS package on this throwaway VM
+        # Installs into the VM's live image, exercises SMF and upgrades.
+        # Safe only because every Solstice job gets a fresh, discarded VM.
+        env:
+          PKG6_TEST_LIVE_IMAGE: yes-this-is-a-throwaway-vm
+        run: |
+          set -euo pipefail
+          . .forgejo/scripts/release-lib.sh
+          release_init
+          .forgejo/scripts/test-ips-package.sh "dist/$(release_p5p_name)"
+
+      - name: Package tarball, checksums and provenance
+        run: |
+          set -euo pipefail
+          . .forgejo/scripts/release-lib.sh
+          release_init
+          .forgejo/scripts/package-tarball.sh illumos-x86_64 dist
+          . target/ips/fmri.env
+          IPS_FMRI="${IPS_FMRI}" .forgejo/scripts/write-provenance.sh illumos-x86_64 dist \
+            "dist/$(release_tarball_name illumos-x86_64)" \
+            "dist/$(release_p5p_name)" \
+            "dist/$(release_manifest_name)"
 
       - name: Upload to Forgejo release
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
-        run: |
-          set -euo pipefail
-          .forgejo/scripts/upload-release-assets.sh ips-illumos-x86_64.tar.gz ips-illumos-x86_64.tar.gz.sha256
+        run: .forgejo/scripts/upload-release-assets.sh illumos-x86_64 dist
