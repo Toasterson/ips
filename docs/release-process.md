@@ -136,4 +136,6 @@ RELEASE_TAG_OVERRIDE=v0.0.0-alpha.0 RELEASE_ALLOW_UNTAGGED=1 \
 
 This writes only to `target/ips` and `dist`. Do not run
 `test-ips-package.sh` on a shared host. It installs packages and changes SMF
-state on the live system.
+state on the live system. It also points the running depot at a scratch
+repository for the pkg5 client smoke (see `packaging/ips/README.md`,
+Validation).
