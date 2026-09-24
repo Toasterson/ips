@@ -1290,4 +1290,91 @@ set name=info.classification value=\"org.opensolaris.category.2008:Web Services\
         assert!(deps[0].fmri.is_some());
         assert!(deps[1].predicate.is_some());
     }
+
+    #[test]
+    fn extract_metadata_json_skips_large_irrelevant_action_arrays() {
+        let text = "set name=pkg.fmri value=pkg://openindiana.org/consolidation/userland/userland-incorporation@0.5.11-2024.0.0.1
+set name=pkg.summary value=\"Userland incorporation\"
+set name=variant.arch value=i386 value=sparc
+depend fmri=pkg:/library/zlib@1.3-2024.0.0.1 type=incorporate facet.version-lock.library/zlib=true
+depend fmri=pkg:/runtime/python-311 type=require predicate=pkg:/foo/bar
+";
+        let mut manifest = Manifest::parse_string(text.to_string()).unwrap();
+        manifest.files = (0..50_000)
+            .map(|i| File {
+                path: format!("usr/share/doc/{}/README \"quoted\" ü", i),
+                owner: "root".to_string(),
+                group: "bin".to_string(),
+                mode: "0444".to_string(),
+                ..Default::default()
+            })
+            .collect();
+        manifest.directories = (0..1_000)
+            .map(|i| Dir {
+                path: format!("usr/share/doc/{}", i),
+                ..Default::default()
+            })
+            .collect();
+        // Serde emits fields in declaration order, so `files` and
+        // `directories` sit between `attributes` and `dependencies` and have
+        // to be skipped mid-stream. Leading whitespace must not defeat the
+        // JSON detection.
+        let mut json = b"\n  \t".to_vec();
+        json.extend(serde_json::to_vec(&manifest).unwrap());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        std::fs::write(&path, &json).unwrap();
+
+        let (attrs, deps) = Manifest::extract_metadata(&path).unwrap();
+        let full: Manifest = serde_json::from_slice(&json).unwrap();
+        assert_eq!(attrs, full.attributes);
+        assert_eq!(deps, full.dependencies);
+        assert_eq!(attrs.len(), 3);
+        assert_eq!(attrs[2].values, vec!["i386", "sparc"]);
+        assert_eq!(deps.len(), 2);
+        assert!(deps[0].facets.contains_key("version-lock.library/zlib"));
+        assert!(deps[1].predicate.is_some());
+    }
+
+    #[test]
+    fn extract_metadata_json_without_catalog_fields_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        std::fs::write(&path, br#"{"files":[{"path":"a"}],"unknown":{"x":[1,2]}}"#).unwrap();
+        let (attrs, deps) = Manifest::extract_metadata(&path).unwrap();
+        assert!(attrs.is_empty());
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn extract_metadata_rejects_malformed_json() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, content) in [
+            // Truncated mid-array.
+            (
+                "truncated",
+                r#"{"attributes":[{"key":"pkg.fmri","values":["pkg:/a@1"]}"#,
+            ),
+            // Valid object followed by trailing garbage.
+            (
+                "trailing",
+                r#"{"attributes":[]} set name=pkg.summary value=x"#,
+            ),
+            // Wrong type for a catalog field.
+            ("wrong_type", r#"{"dependencies":"not-an-array"}"#),
+            // Looks like JSON but is text; must not be silently re-read as text.
+            ("text_after_brace", "{\nset name=pkg.fmri value=pkg:/a@1\n"),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).unwrap();
+            let err = Manifest::extract_metadata(&path).unwrap_err();
+            assert!(
+                matches!(err, crate::actions::ActionError::InvalidJsonManifest { .. }),
+                "{}: unexpected error {:?}",
+                name,
+                err
+            );
+        }
+    }
 }

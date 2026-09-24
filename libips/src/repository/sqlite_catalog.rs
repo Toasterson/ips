@@ -219,7 +219,7 @@ pub fn build_shards(
         // Iterate catalog parts. Each part can contain millions of dependency
         // action strings; loading the whole part into memory OOMs at ~4GB on
         // large publishers. Instead, stream the JSON and emit SQL inserts per
-        // version entry, holding only one stem's versions at a time.
+        // version entry, holding only one version's actions at a time.
         let part_names: Vec<String> = catalog_manager.attrs().parts.keys().cloned().collect();
 
         // pkg5 records pkg.obsolete in the dependency part only (older pkg6
@@ -457,8 +457,9 @@ fn hash_file_streaming(path: &Path) -> Result<(String, u64), ShardBuildError> {
 
 /// Stream a catalog part JSON file for a single target publisher, calling
 /// `on_entry(stem, version_entry)` for each version. Other publishers and
-/// metadata keys are walked past with `IgnoredAny` so peak memory stays
-/// bounded by one stem's `Vec<PackageVersionEntry>` regardless of repo size.
+/// metadata keys are walked past with `IgnoredAny`, and each stem's version
+/// array is visited element by element, so peak memory stays bounded by one
+/// `PackageVersionEntry` regardless of repo or stem size.
 fn stream_catalog_part_for_publisher<F>(
     path: &Path,
     target_publisher: &str,
@@ -471,7 +472,9 @@ where
     ) -> std::result::Result<(), rusqlite::Error>,
 {
     use crate::repository::catalog::PackageVersionEntry;
-    use serde::de::{DeserializeSeed, Deserializer as _, IgnoredAny, MapAccess, Visitor};
+    use serde::de::{
+        DeserializeSeed, Deserializer as _, IgnoredAny, MapAccess, SeqAccess, Visitor,
+    };
     use std::fmt;
 
     let file = std::fs::File::open(path)
@@ -493,6 +496,10 @@ where
     }
     struct StemsVisitor<'s, 'a, F> {
         state: &'s mut State<'a, F>,
+    }
+    struct VersionsSeed<'s, 'a, 'k, F> {
+        state: &'s mut State<'a, F>,
+        stem: &'k str,
     }
 
     impl<'de, 's, 'a, F> Visitor<'de> for TopVisitor<'s, 'a, F>
@@ -552,14 +559,51 @@ where
                     let _: IgnoredAny = map.next_value()?;
                     continue;
                 }
-                let versions: Vec<PackageVersionEntry> = map.next_value()?;
-                for v in &versions {
-                    if let Err(e) = (self.state.on_entry)(&stem, v) {
-                        self.state.sql_err = Some(e);
-                        break;
-                    }
+                map.next_value_seed(VersionsSeed {
+                    state: &mut *self.state,
+                    stem: &stem,
+                })?;
+            }
+            Ok(())
+        }
+    }
+
+    impl<'de, 's, 'a, F> DeserializeSeed<'de> for VersionsSeed<'s, 'a, '_, F>
+    where
+        F: FnMut(&str, &PackageVersionEntry) -> std::result::Result<(), rusqlite::Error>,
+    {
+        type Value = ();
+        fn deserialize<D>(self, d: D) -> std::result::Result<(), D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            d.deserialize_seq(self)
+        }
+    }
+
+    impl<'de, 's, 'a, F> Visitor<'de> for VersionsSeed<'s, 'a, '_, F>
+    where
+        F: FnMut(&str, &PackageVersionEntry) -> std::result::Result<(), rusqlite::Error>,
+    {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a stem's list of version entries")
+        }
+        fn visit_seq<A>(self, mut seq: A) -> std::result::Result<(), A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            // One entry at a time: a stem can have thousands of versions
+            // with thousands of actions each.
+            while self.state.sql_err.is_none() {
+                let Some(entry) = seq.next_element::<PackageVersionEntry>()? else {
+                    return Ok(());
+                };
+                if let Err(e) = (self.state.on_entry)(self.stem, &entry) {
+                    self.state.sql_err = Some(e);
                 }
             }
+            while seq.next_element::<IgnoredAny>()?.is_some() {}
             Ok(())
         }
     }

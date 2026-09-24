@@ -162,25 +162,61 @@ pub(crate) fn write_catalog_part(path: &Path, part: &mut CatalogPart) -> Result<
         .unwrap_or_default())
 }
 
+/// `Write` adapter that mirrors every byte into both the part's temp file
+/// and the running SHA-1, so serde can serialize straight to disk while the
+/// signature is computed over exactly the bytes written.
+struct TeeWriter {
+    file: BufWriter<std::fs::File>,
+    hasher: Sha1,
+}
+
+impl Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write_all(buf)?;
+        self.hasher.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// The stem currently being streamed. Its `"<stem>":[` opening is deferred
+/// until the first entry, so a stem with no entries in this part is omitted
+/// exactly as `write_catalog_part` omits an absent BTreeMap key.
+struct OpenStem {
+    name: String,
+    entries: usize,
+}
+
 /// Streaming writer for a CatalogPart file (catalog.base.C and friends).
 ///
-/// Used by rebuild_catalog_batched to avoid materialising every package's
-/// entry in memory before serialising. The standard writer takes a fully
-/// built CatalogPart; on a 200k-package publisher that structure plus the
-/// surrounding accumulators in rebuild exceeded available RAM and OOMed
-/// the process partway through the rebuild. This writer emits stems
-/// directly to a temp file (and a SHA-1 hasher) as the caller produces
-/// them, so memory stays bounded by the entries for one stem at a time.
+/// Used by rebuild_catalog_batched to avoid materialising package entries
+/// in memory before serialising. A fully built CatalogPart for a
+/// 200k-package publisher exceeded available RAM, and so did buffering all
+/// versions of one stem: thousands of versions of an incorporation with
+/// ~8,000 depend actions each is itself gigabytes. Callers therefore open a
+/// stem with [`begin_stem`](Self::begin_stem), emit one version at a time
+/// with [`write_entry`](Self::write_entry), and close it with
+/// [`end_stem`](Self::end_stem). Each entry is serialized directly into the
+/// temp file and the SHA-1 hasher, so memory stays bounded by one version
+/// entry regardless of how many versions a stem has.
 ///
 /// The on-disk layout produced here is byte-identical to what
 /// `write_catalog_part` would emit for the same inputs: opening `{`,
 /// `"<publisher>":{<stem-entries>}`, then `,"_SIGNATURE":{"sha-1":"..."}`,
-/// then closing `}` and a trailing newline.
+/// then closing `}` and a trailing newline. That equivalence requires stems
+/// to arrive in strictly ascending byte order (the order of the reference
+/// writer's BTreeMap); out-of-order stems are rejected rather than written
+/// as a catalog whose canonical key order pkg5 would not reproduce.
 pub(crate) struct StreamingCatalogPartWriter {
     tmp_path: PathBuf,
-    writer: BufWriter<std::fs::File>,
-    hasher: Sha1,
+    out: TeeWriter,
+    committed: bool,
     first_stem: bool,
+    last_stem: Option<String>,
+    open: Option<OpenStem>,
 }
 
 impl StreamingCatalogPartWriter {
@@ -191,87 +227,140 @@ impl StreamingCatalogPartWriter {
             path: tmp_path.clone(),
             source: e,
         })?;
-        let mut writer = BufWriter::with_capacity(64 * 1024, f);
-        let mut hasher = Sha1::new();
-
-        let pub_json = serde_json::to_string(publisher)
-            .map_err(|e| RepositoryError::JsonSerializeError(format!("publisher json: {}", e)))?;
-        let opening = format!("{{{}:{{", pub_json);
-        writer
-            .write_all(opening.as_bytes())
-            .map_err(|e| RepositoryError::FileWriteError {
-                path: tmp_path.clone(),
-                source: e,
-            })?;
-        hasher.update(opening.as_bytes());
-
-        Ok(Self {
+        let mut w = Self {
             tmp_path,
-            writer,
-            hasher,
+            out: TeeWriter {
+                file: BufWriter::with_capacity(64 * 1024, f),
+                hasher: Sha1::new(),
+            },
+            committed: false,
             first_stem: true,
-        })
+            last_stem: None,
+            open: None,
+        };
+        w.write_raw(b"{")?;
+        w.write_json_string(publisher)?;
+        w.write_raw(b":{")?;
+        Ok(w)
     }
 
-    /// Emit one stem's entries: `,"<stem>":[<entries...>]` (or omit the
-    /// leading comma on the first stem). `entries` is small — one stem's
-    /// worth of versions.
-    pub(crate) fn write_stem(&mut self, stem: &str, entries: &[PackageVersionEntry]) -> Result<()> {
-        if entries.is_empty() {
-            return Ok(());
+    /// Open `stem` for entries. Nothing is written until the first
+    /// [`write_entry`](Self::write_entry), so a stem that receives no
+    /// entries leaves no trace in the part.
+    pub(crate) fn begin_stem(&mut self, stem: &str) -> Result<()> {
+        if let Some(open) = &self.open {
+            return Err(RepositoryError::Other(format!(
+                "catalog part writer: stem '{}' opened while '{}' is still open",
+                stem, open.name
+            )));
+        }
+        if let Some(last) = &self.last_stem {
+            if stem.as_bytes() <= last.as_bytes() {
+                return Err(RepositoryError::Other(format!(
+                    "catalog part writer: stem '{}' is not after '{}'; stems must be \
+                     written in strictly ascending order",
+                    stem, last
+                )));
+            }
+        }
+        self.open = Some(OpenStem {
+            name: stem.to_string(),
+            entries: 0,
+        });
+        Ok(())
+    }
+
+    /// Serialize one version entry of the open stem straight to the file
+    /// and hasher. Entries appear in the order they are written.
+    pub(crate) fn write_entry(&mut self, entry: &PackageVersionEntry) -> Result<()> {
+        let Some(open) = self.open.as_mut() else {
+            return Err(RepositoryError::Other(format!(
+                "catalog part writer: entry for version '{}' written with no open stem",
+                entry.version
+            )));
+        };
+        let first_entry = open.entries == 0;
+        open.entries += 1;
+        if first_entry {
+            // `,"<stem>":[` — the leading comma only between stems.
+            let name = open.name.clone();
+            if !self.first_stem {
+                self.write_raw(b",")?;
+            }
+            self.first_stem = false;
+            self.write_json_string(&name)?;
+            self.write_raw(b":[")?;
+        } else {
+            self.write_raw(b",")?;
         }
 
-        // Build the stem chunk in a small in-memory buffer so we can
-        // mirror the same bytes to the file and the hasher in one shot.
-        let mut buf: Vec<u8> = Vec::with_capacity(256 + entries.len() * 64);
-        if !self.first_stem {
-            buf.push(b',');
+        // Python-style formatter so separators match write_catalog_part.
+        let mut ser = Serializer::with_formatter(&mut self.out, PythonFormatter);
+        entry
+            .serialize(&mut ser)
+            .map_err(|e| self.serialize_error("catalog entry", e))
+    }
+
+    /// Close the open stem, emitting `]` if it received any entries.
+    pub(crate) fn end_stem(&mut self) -> Result<()> {
+        let Some(open) = self.open.take() else {
+            return Err(RepositoryError::Other(
+                "catalog part writer: end_stem called with no open stem".to_string(),
+            ));
+        };
+        if open.entries > 0 {
+            self.write_raw(b"]")?;
         }
-        self.first_stem = false;
+        self.last_stem = Some(open.name);
+        Ok(())
+    }
 
-        let stem_json = serde_json::to_string(stem)
-            .map_err(|e| RepositoryError::JsonSerializeError(format!("stem json: {}", e)))?;
-        buf.extend_from_slice(stem_json.as_bytes());
-        buf.push(b':');
-
-        // Serialize the entries array via the Python-style formatter so
-        // separators match write_catalog_part's output exactly.
-        {
-            let formatter = PythonFormatter;
-            let mut ser = Serializer::with_formatter(&mut buf, formatter);
-            entries
-                .serialize(&mut ser)
-                .map_err(|e| RepositoryError::JsonSerializeError(format!("stem entries: {}", e)))?;
-        }
-
-        self.writer
-            .write_all(&buf)
+    fn write_raw(&mut self, bytes: &[u8]) -> Result<()> {
+        self.out
+            .write_all(bytes)
             .map_err(|e| RepositoryError::FileWriteError {
                 path: self.tmp_path.clone(),
                 source: e,
-            })?;
-        self.hasher.update(&buf);
-        Ok(())
+            })
+    }
+
+    /// Write `s` as a JSON string literal, escaped exactly as the reference
+    /// writer's serde_json serializer escapes map keys.
+    fn write_json_string(&mut self, s: &str) -> Result<()> {
+        let mut ser = Serializer::with_formatter(&mut self.out, PythonFormatter);
+        s.serialize(&mut ser)
+            .map_err(|e| self.serialize_error("catalog key", e))
+    }
+
+    fn serialize_error(&self, what: &str, e: serde_json::Error) -> RepositoryError {
+        if e.is_io() {
+            RepositoryError::FileWriteError {
+                path: self.tmp_path.clone(),
+                source: e.into(),
+            }
+        } else {
+            RepositoryError::JsonSerializeError(format!("{}: {}", what, e))
+        }
     }
 
     /// Close the publisher map, compute the SHA-1 over the no-signature
     /// content, append the `_SIGNATURE` field, and atomically rename to
     /// `final_path`. Returns the SHA-1 hex digest.
     pub(crate) fn finalize(mut self, final_path: &Path) -> Result<String> {
+        if let Some(open) = &self.open {
+            return Err(RepositoryError::Other(format!(
+                "catalog part writer: finalized while stem '{}' is still open",
+                open.name
+            )));
+        }
         // Close inner publisher object — emit `}` to both file and hasher.
-        self.writer
-            .write_all(b"}")
-            .map_err(|e| RepositoryError::FileWriteError {
-                path: self.tmp_path.clone(),
-                source: e,
-            })?;
-        self.hasher.update(b"}");
+        self.write_raw(b"}")?;
 
         // The reference write_catalog_part hashes the full no-signature
         // serialization, which would be `{...}\n` (one more `}` plus
         // newline). Mirror that into a clone of the hasher to derive the
         // signature without committing those bytes to the file yet.
-        let mut sig_hasher = self.hasher.clone();
+        let mut sig_hasher = self.out.hasher.clone();
         sig_hasher.update(b"}\n");
         let sig = format!("{:x}", sig_hasher.finalize());
 
@@ -281,25 +370,34 @@ impl StreamingCatalogPartWriter {
         // metadata field (since CatalogPart's `metadata` is declared
         // after `packages` and both are flattened).
         let trailer = format!(",\"_SIGNATURE\":{{\"sha-1\":\"{}\"}}}}\n", sig);
-        self.writer
-            .write_all(trailer.as_bytes())
-            .map_err(|e| RepositoryError::FileWriteError {
+        self.out.file.write_all(trailer.as_bytes()).map_err(|e| {
+            RepositoryError::FileWriteError {
                 path: self.tmp_path.clone(),
                 source: e,
-            })?;
-        self.writer
+            }
+        })?;
+        self.out
+            .file
             .flush()
             .map_err(|e| RepositoryError::FileWriteError {
                 path: self.tmp_path.clone(),
                 source: e,
             })?;
-        drop(self.writer);
 
         fs::rename(&self.tmp_path, final_path).map_err(|e| RepositoryError::FileWriteError {
             path: final_path.to_path_buf(),
             source: e,
         })?;
+        self.committed = true;
         Ok(sig)
+    }
+}
+
+impl Drop for StreamingCatalogPartWriter {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.tmp_path);
+        }
     }
 }
 
@@ -330,6 +428,8 @@ mod tests {
     use crate::repository::catalog::PackageVersionEntry;
     use std::collections::BTreeMap;
 
+    const PUB: &str = "openindiana.org";
+
     fn entry(version: &str, sig: Option<&str>) -> PackageVersionEntry {
         PackageVersionEntry {
             version: version.to_string(),
@@ -338,57 +438,223 @@ mod tests {
         }
     }
 
-    #[test]
-    fn streaming_writer_matches_full_writer_byte_for_byte() {
-        let dir = std::env::temp_dir().join(format!(
-            "ips_streaming_writer_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let pub_name = "openindiana.org";
-
-        let stems = vec![
-            (
-                "system/library",
-                vec![entry("1.0", Some("aaaa")), entry("1.1", Some("bbbb"))],
-            ),
-            ("web/server/nginx", vec![entry("1.18.0", Some("cccc"))]),
-            ("zfs/utils", vec![entry("0.5.11", Some("dddd"))]),
-        ];
-
-        // Streaming writer output.
-        let stream_out = dir.join("stream.json");
-        let stream_tmp = dir.join("stream.tmp");
-        let mut sw = StreamingCatalogPartWriter::begin(stream_tmp, pub_name).unwrap();
-        for (stem, entries) in &stems {
-            sw.write_stem(stem, entries).unwrap();
+    fn entry_with_actions(version: &str, actions: &[&str]) -> PackageVersionEntry {
+        PackageVersionEntry {
+            version: version.to_string(),
+            actions: Some(actions.iter().map(|a| a.to_string()).collect()),
+            signature_sha1: None,
         }
-        let stream_sig = sw.finalize(&stream_out).unwrap();
+    }
 
-        // Reference (non-streaming) writer output.
+    /// Stream `stems` through the stateful writer. Stems with no entries
+    /// are still opened and closed, as rebuild does for sparse parts.
+    fn stream(
+        dir: &Path,
+        publisher: &str,
+        stems: &[(&str, Vec<PackageVersionEntry>)],
+    ) -> (String, Vec<u8>) {
+        let out = dir.join("stream.json");
+        let mut w = StreamingCatalogPartWriter::begin(dir.join("stream.tmp"), publisher).unwrap();
+        for (stem, entries) in stems {
+            w.begin_stem(stem).unwrap();
+            for e in entries {
+                w.write_entry(e).unwrap();
+            }
+            w.end_stem().unwrap();
+        }
+        let sig = w.finalize(&out).unwrap();
+        (sig, std::fs::read(&out).unwrap())
+    }
+
+    /// Reference output from the whole-part writer. Stems without entries
+    /// are absent from the map, as they would be in a built CatalogPart.
+    fn reference(
+        dir: &Path,
+        publisher: &str,
+        stems: &[(&str, Vec<PackageVersionEntry>)],
+    ) -> (String, Vec<u8>) {
         let mut part = CatalogPart::new();
         let mut pub_map: BTreeMap<String, Vec<PackageVersionEntry>> = BTreeMap::new();
-        for (stem, entries) in &stems {
-            pub_map.insert(stem.to_string(), entries.clone());
+        for (stem, entries) in stems {
+            if !entries.is_empty() {
+                pub_map.insert(stem.to_string(), entries.clone());
+            }
         }
-        part.packages.insert(pub_name.to_string(), pub_map);
-        let ref_out = dir.join("ref.json");
-        let ref_sig = write_catalog_part(&ref_out, &mut part).unwrap();
+        part.packages.insert(publisher.to_string(), pub_map);
+        let out = dir.join("ref.json");
+        let sig = write_catalog_part(&out, &mut part).unwrap();
+        (sig, std::fs::read(&out).unwrap())
+    }
 
-        let stream_bytes = std::fs::read(&stream_out).unwrap();
-        let ref_bytes = std::fs::read(&ref_out).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-
+    fn assert_matches_reference(publisher: &str, stems: &[(&str, Vec<PackageVersionEntry>)]) {
+        let dir = tempfile::tempdir().unwrap();
+        let (stream_sig, stream_bytes) = stream(dir.path(), publisher, stems);
+        let (ref_sig, ref_bytes) = reference(dir.path(), publisher, stems);
         assert_eq!(stream_sig, ref_sig, "streaming sig != reference sig");
-        assert_eq!(
+        assert!(
+            stream_bytes == ref_bytes,
+            "streaming bytes != reference bytes\nstream: {}\nref:    {}",
             String::from_utf8_lossy(&stream_bytes),
-            String::from_utf8_lossy(&ref_bytes),
-            "streaming bytes != reference bytes"
+            String::from_utf8_lossy(&ref_bytes)
+        );
+
+        // The signature covers the part without `_SIGNATURE`: the publisher
+        // map closed with `}` and a trailing newline.
+        let text = String::from_utf8(stream_bytes).unwrap();
+        let body = text
+            .strip_suffix(&format!(
+                ",\"_SIGNATURE\":{{\"sha-1\":\"{}\"}}}}\n",
+                stream_sig
+            ))
+            .expect("part ends with its _SIGNATURE trailer");
+        let mut h = Sha1::new();
+        h.update(body.as_bytes());
+        h.update(b"}\n");
+        assert_eq!(format!("{:x}", h.finalize()), stream_sig);
+    }
+
+    #[test]
+    fn unfinished_streaming_writer_removes_temporary_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("catalog.base.C.tmp");
+        let mut writer = StreamingCatalogPartWriter::begin(tmp.clone(), PUB).unwrap();
+        writer.begin_stem("foo").unwrap();
+        assert!(writer.finalize(&dir.path().join("catalog.base.C")).is_err());
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn streaming_writer_matches_full_writer_byte_for_byte() {
+        assert_matches_reference(
+            PUB,
+            &[
+                (
+                    "system/library",
+                    vec![entry("1.0", Some("aaaa")), entry("1.1", Some("bbbb"))],
+                ),
+                ("web/server/nginx", vec![entry("1.18.0", Some("cccc"))]),
+                ("zfs/utils", vec![entry("0.5.11", Some("dddd"))]),
+            ],
+        );
+    }
+
+    #[test]
+    fn streaming_writer_matches_reference_for_prefix_stems() {
+        // BTreeMap byte order: `foo` < `foo-bar` < `foo/bar` < `foo/bar/baz`
+        // < `foobar`. Sorting full FMRI strings (`foo@...` vs `foo/bar@...`)
+        // would put `foo/bar` first because '/' < '@'.
+        assert_matches_reference(
+            PUB,
+            &[
+                (
+                    "foo",
+                    vec![entry("1.0", Some("a1")), entry("2.0", Some("a2"))],
+                ),
+                ("foo-bar", vec![entry("1.0", Some("b1"))]),
+                ("foo/bar", vec![entry("0.1", Some("c1"))]),
+                ("foo/bar/baz", vec![entry("0.1", Some("d1"))]),
+                ("foobar", vec![entry("3", Some("e1"))]),
+            ],
+        );
+    }
+
+    #[test]
+    fn streaming_writer_omits_stems_without_entries() {
+        // Dependency/summary parts only carry stems whose versions have
+        // actions, while rebuild opens every stem on every part.
+        assert_matches_reference(
+            PUB,
+            &[
+                ("a/empty-first", vec![]),
+                (
+                    "b/deps",
+                    vec![entry_with_actions("1.0", &["depend fmri=x type=require"])],
+                ),
+                ("c/empty-middle", vec![]),
+                (
+                    "d/deps",
+                    vec![entry_with_actions(
+                        "2.0",
+                        &["set name=variant.arch value=i386"],
+                    )],
+                ),
+                ("e/empty-last", vec![]),
+            ],
+        );
+    }
+
+    #[test]
+    fn streaming_writer_matches_reference_for_empty_part() {
+        assert_matches_reference(PUB, &[]);
+        assert_matches_reference(PUB, &[("only/empty", vec![]), ("other/empty", vec![])]);
+    }
+
+    #[test]
+    fn streaming_writer_matches_reference_for_escaping_and_unicode() {
+        assert_matches_reference(
+            "pub\"lisher\\ü",
+            &[
+                (
+                    "a/quote\"back\\slash",
+                    vec![entry_with_actions(
+                        "1.0",
+                        &[
+                            "set name=pkg.summary value=\"say \\\"hi\\\"\"",
+                            "set name=pkg.description value=tab\there\nnewline\u{1}ctl",
+                        ],
+                    )],
+                ),
+                (
+                    "library/ünïcödé",
+                    vec![entry_with_actions(
+                        "5.11-2024.0.0.1:20240101T000000Z",
+                        &["set name=pkg.summary value=\"日本語 ✓ 𝄞 \u{2028}\""],
+                    )],
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn streaming_writer_matches_reference_for_many_versions_of_one_stem() {
+        let versions: Vec<PackageVersionEntry> = (0..100_000)
+            .map(|i| PackageVersionEntry {
+                version: format!("0.5.11-2024.0.0.{}:20240101T000000Z", i),
+                actions: Some(vec![
+                    format!("depend fmri=pkg:/a@{} type=incorporate", i),
+                    "set name=variant.arch value=i386".to_string(),
+                ]),
+                signature_sha1: Some(format!("{:040x}", i)),
+            })
+            .collect();
+        assert_matches_reference(
+            PUB,
+            &[
+                ("consolidation/userland/userland-incorporation", versions),
+                ("z/after", vec![entry("1", Some("ff"))]),
+            ],
+        );
+    }
+
+    #[test]
+    fn streaming_writer_rejects_out_of_order_or_unbalanced_stems() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = StreamingCatalogPartWriter::begin(dir.path().join("t.tmp"), PUB).unwrap();
+        w.begin_stem("foo/bar").unwrap();
+        w.end_stem().unwrap();
+        // `foo` sorts before `foo/bar`: writing it now would break key order.
+        assert!(w.begin_stem("foo").is_err());
+        // Repeating a stem would emit a duplicate key.
+        assert!(w.begin_stem("foo/bar").is_err());
+
+        assert!(w.write_entry(&entry("1", None)).is_err(), "no open stem");
+        assert!(w.end_stem().is_err(), "no open stem");
+
+        w.begin_stem("zzz").unwrap();
+        assert!(w.begin_stem("zzzz").is_err(), "nested stem");
+        assert!(
+            w.finalize(&dir.path().join("t.json")).is_err(),
+            "finalize with open stem"
         );
     }
 }

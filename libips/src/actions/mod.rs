@@ -99,6 +99,21 @@ pub enum ActionError {
     #[error(transparent)]
     #[diagnostic(code(ips::action_error::parser))]
     ParserError(#[from] pest::error::Error<Rule>),
+
+    #[error("manifest {} looks like JSON but cannot be parsed: {source}", .path.display())]
+    #[diagnostic(
+        code(ips::action_error::invalid_json_manifest),
+        help(
+            "The manifest starts with '{{' but is not a valid JSON manifest. Restore it from the \
+             original package source or republish the package; it will not be read as a text \
+             manifest."
+        )
+    )]
+    InvalidJsonManifest {
+        path: std::path::PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 pub trait FacetedAction {
@@ -1079,43 +1094,55 @@ impl Manifest {
     /// single line, regardless of how many file actions a manifest has.
     ///
     /// Used by catalog rebuild, where pest's full-AST parser OOMs on
-    /// manifests with thousands of file actions. JSON manifests fall back
-    /// to the structured deserializer (small in practice) and we keep only
-    /// attributes + dependencies.
+    /// manifests with thousands of file actions. JSON manifests are streamed
+    /// from the file and only `attributes` and `dependencies` are
+    /// materialised; every other action array (files, dirs, links, ...) is
+    /// skipped without being built. A manifest that starts with `{` but is
+    /// not valid JSON is an error, not a text manifest.
     pub fn extract_metadata<P: AsRef<Path>>(path: P) -> Result<(Vec<Attr>, Vec<Dependency>)> {
-        use std::io::{BufRead, BufReader, Read};
+        use std::io::{BufRead, BufReader};
 
-        // JSON-detection: peek at the first non-whitespace byte. If it's
-        // `{`, deserialize the whole thing structurally — JSON manifests
-        // produced by pkg6 don't carry the unbounded action lists that
-        // make text manifests dangerous.
-        let mut first = std::fs::File::open(path.as_ref())?;
-        let mut probe = [0u8; 1];
-        let mut peeked: Option<u8> = None;
-        loop {
-            match first.read(&mut probe)? {
-                0 => break,
-                _ => {
-                    let b = probe[0];
-                    if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
-                        continue;
-                    }
-                    peeked = Some(b);
-                    break;
+        /// The catalog-relevant subset of a JSON [`Manifest`]. Unknown
+        /// fields are skipped by serde without allocating their contents.
+        #[derive(Deserialize)]
+        struct JsonCatalogMetadata {
+            #[serde(default)]
+            attributes: Vec<Attr>,
+            #[serde(default)]
+            dependencies: Vec<Dependency>,
+        }
+
+        let path = path.as_ref();
+        let mut reader = BufReader::new(std::fs::File::open(path)?);
+
+        // JSON detection: skip leading whitespace and peek at the first
+        // byte. The skipped whitespace is insignificant to both formats.
+        let first_byte = loop {
+            let buf = reader.fill_buf()?;
+            let Some(pos) = buf
+                .iter()
+                .position(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+            else {
+                if buf.is_empty() {
+                    break None;
                 }
-            }
+                let len = buf.len();
+                reader.consume(len);
+                continue;
+            };
+            let b = buf[pos];
+            reader.consume(pos);
+            break Some(b);
+        };
+        if first_byte == Some(b'{') {
+            let meta: JsonCatalogMetadata = serde_json::from_reader(reader).map_err(|source| {
+                ActionError::InvalidJsonManifest {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
+            return Ok((meta.attributes, meta.dependencies));
         }
-        drop(first);
-        if peeked == Some(b'{') {
-            let content = read_to_string(path.as_ref())?;
-            if let Ok(manifest) = serde_json::from_str::<Manifest>(&content) {
-                return Ok((manifest.attributes, manifest.dependencies));
-            }
-            // Fall through to text scan if JSON parse fails.
-        }
-
-        let file = std::fs::File::open(path.as_ref())?;
-        let reader = BufReader::new(file);
 
         let mut attributes: Vec<Attr> = Vec::new();
         let mut dependencies: Vec<Dependency> = Vec::new();

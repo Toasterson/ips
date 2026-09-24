@@ -680,4 +680,194 @@ dir path=usr/share/doc/example mode=0755 owner=root group=bin
         assert!(reporter.update_count() > 0, "No update events recorded");
         assert!(reporter.finish_count() > 0, "No finish events recorded");
     }
+
+    /// Write a manifest straight into the repository's pkg/ tree, where the
+    /// rebuild's on-disk walker finds it.
+    fn put_manifest(repo_path: &Path, publisher: &str, stem: &str, version: &str, body: &str) {
+        let path = FileBackend::construct_manifest_path(repo_path, publisher, stem, version);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+
+    /// Rebuild streams every version into the parts in canonical key order:
+    /// prefix stems, a many-version incorporation, a JSON manifest with a
+    /// large file array, and a stem with no dependency or summary actions.
+    /// Each part must be exactly what the whole-part reference writer
+    /// produces when it re-serializes the parsed part, which is how a
+    /// signature checker sees it.
+    #[test]
+    fn rebuild_catalog_streams_parts_in_canonical_order() {
+        use crate::repository::catalog::{CatalogAttrs, CatalogPart};
+        use crate::repository::catalog_writer::write_catalog_part;
+
+        let test_dir = make_tempdir();
+        let repo_path = test_dir.path().join("repo");
+        let mut repo = FileBackend::create(&repo_path, RepositoryVersion::V4).unwrap();
+        let publisher = "test";
+        repo.add_publisher(publisher).unwrap();
+
+        for (stem, version) in [("foo", "1.0"), ("foo", "2.0"), ("foo-bar", "1.0")] {
+            put_manifest(
+                &repo_path,
+                publisher,
+                stem,
+                version,
+                &format!(
+                    "set name=pkg.fmri value=pkg://test/{stem}@{version}\n\
+                     set name=pkg.summary value=\"{stem} package\"\n\
+                     depend fmri=pkg:/library/zlib@1.3 type=require\n"
+                ),
+            );
+        }
+
+        // JSON manifest whose irrelevant file array dwarfs its metadata.
+        let mut json_manifest = Manifest::parse_string(
+            "set name=pkg.fmri value=pkg://test/foo/bar@1.0\n\
+             set name=pkg.summary value=\"foo bar ü\"\n\
+             depend fmri=pkg:/foo@1.0 type=require\n"
+                .to_string(),
+        )
+        .unwrap();
+        json_manifest.files = (0..20_000)
+            .map(|i| crate::actions::File {
+                path: format!("usr/lib/foo/bar/{}.so", i),
+                ..Default::default()
+            })
+            .collect();
+        put_manifest(
+            &repo_path,
+            publisher,
+            "foo/bar",
+            "1.0",
+            &serde_json::to_string(&json_manifest).unwrap(),
+        );
+
+        // Many versions of one stem, each with many facet-locked depends.
+        let incorporation = "consolidation/userland/userland-incorporation";
+        let n_versions = 300;
+        let n_deps = 200;
+        for v in 0..n_versions {
+            let version = format!("0.5.11,5.11-2024.0.0.{}", v);
+            let mut body = format!(
+                "set name=pkg.fmri value=pkg://test/{incorporation}@{version}\n\
+                 set name=pkg.summary value=\"Userland incorporation\"\n\
+                 set name=variant.arch value=i386\n"
+            );
+            for d in 0..n_deps {
+                body.push_str(&format!(
+                    "depend fmri=pkg:/library/lib{d}@1.{v} type=incorporate \
+                     facet.version-lock.library/lib{d}=true\n"
+                ));
+            }
+            put_manifest(&repo_path, publisher, incorporation, &version, &body);
+        }
+
+        // Only pkg.fmri: in the base part, absent from the other two.
+        put_manifest(
+            &repo_path,
+            publisher,
+            "zzz/bare",
+            "1.0",
+            "set name=pkg.fmri value=pkg://test/zzz/bare@1.0\n",
+        );
+
+        repo.rebuild_catalog(publisher, false).unwrap();
+
+        let catalog_dir = FileBackend::construct_catalog_path(&repo_path, publisher);
+        let attrs = CatalogAttrs::load(&catalog_dir.join("catalog.attrs")).unwrap();
+        assert_eq!(attrs.package_count, 5);
+        assert_eq!(attrs.package_version_count, 5 + n_versions);
+
+        for part_name in [
+            "catalog.base.C",
+            "catalog.dependency.C",
+            "catalog.summary.C",
+        ] {
+            let path = catalog_dir.join(part_name);
+            let bytes = fs::read(&path).unwrap();
+            let mut part: CatalogPart = serde_json::from_slice(&bytes).unwrap();
+            let ref_path = test_dir.path().join(format!("{}.ref", part_name));
+            let ref_sig = write_catalog_part(&ref_path, &mut part).unwrap();
+            assert!(
+                fs::read(&ref_path).unwrap() == bytes,
+                "{} differs from its canonical re-serialization",
+                part_name
+            );
+            assert_eq!(
+                attrs.parts[part_name].signature_sha1.as_deref(),
+                Some(ref_sig.as_str()),
+                "{} signature",
+                part_name
+            );
+
+            let stems: Vec<&String> = part.packages[publisher].keys().collect();
+            let text = String::from_utf8(bytes).unwrap();
+            let positions: Vec<usize> = stems
+                .iter()
+                .map(|s| text.find(&format!("\"{}\":[", s)).unwrap())
+                .collect();
+            assert!(
+                positions.windows(2).all(|w| w[0] < w[1]),
+                "{}: stems out of order: {:?}",
+                part_name,
+                stems
+            );
+
+            let has_bare = part.packages[publisher].contains_key("zzz/bare");
+            assert_eq!(has_bare, part_name == "catalog.base.C", "{}", part_name);
+            assert_eq!(
+                part.packages[publisher][incorporation].len(),
+                n_versions,
+                "{}",
+                part_name
+            );
+            let versions = &part.packages[publisher][incorporation];
+            let version_9 = versions
+                .iter()
+                .position(|entry| entry.version.ends_with("2024.0.0.9"))
+                .unwrap();
+            let version_10 = versions
+                .iter()
+                .position(|entry| entry.version.ends_with("2024.0.0.10"))
+                .unwrap();
+            assert!(version_9 < version_10, "{}: pkg5 version order", part_name);
+        }
+
+        // Each depend action carries its facet exactly once.
+        let dep_part = fs::read_to_string(catalog_dir.join("catalog.dependency.C")).unwrap();
+        assert!(dep_part.contains("type=incorporate facet.version-lock.library/lib7=true\""));
+        assert_eq!(
+            dep_part.matches("facet.version-lock.library/lib7=").count(),
+            n_versions
+        );
+
+        // The SQLite shards stream the same huge stem entry by entry.
+        let shard_dir = repo_path.join("shards");
+        crate::repository::sqlite_catalog::build_shards(&catalog_dir, publisher, &shard_dir)
+            .unwrap();
+        let conn = rusqlite::Connection::open(shard_dir.join("active.db")).unwrap();
+        let versions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM packages WHERE stem = ?1",
+                [incorporation],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(versions, n_versions as i64);
+        let deps: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dependencies d JOIN packages p ON p.id = d.pkg_id \
+                 WHERE p.stem = ?1 AND d.dep_type = 'incorporate'",
+                [incorporation],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(deps, (n_versions * n_deps) as i64);
+        let stems: i64 = conn
+            .query_row("SELECT COUNT(DISTINCT stem) FROM packages", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stems, 5);
+    }
 }
