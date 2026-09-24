@@ -57,6 +57,25 @@ IPS_PKG_NAME="package/pkg6/depotd"
 IPS_PUBLISHER_DEFAULT="openindiana.org"
 IPS_BUILD_RELEASE="5.11"
 
+# Oldest supported OpenIndiana: the OS level of the oirepo6 Hipster 2026.04
+# zone, one STEM@VERSION per line, as that zone has them installed (both
+# incorporations and all seven packages pkgdepend resolves the package's
+# dependencies to). build-ips-package.sh resolves the package's dependencies against
+# an image (IPS_BASELINE_IMAGE) that has every one of these at exactly this
+# version, so the minimum versions pkgdepend writes are ones that zone has.
+# Resolving against a newer build host instead made the RC11 package require
+# SUNWcs@0.5.11-2026.0.0.23290, which the 23029 zone cannot install. Change
+# this only when the oldest supported target moves.
+IPS_BASELINE_PINS="consolidation/osnet/osnet-incorporation@0.5.11-2026.0.0.23029
+consolidation/userland/userland-incorporation@0.5.11-2026.0.0.33502
+SUNWcs@0.5.11-2026.0.0.23029
+system/library@0.5.11-2026.0.0.23029
+system/library/math@0.5.11-2026.0.0.23029
+shell/ksh93@93.21.1.20120801-2026.0.0.23029
+compress/xz@5.8.3-2026.0.0.0
+library/security/openssl@1.0.2.21-2026.0.0.18
+system/library/gcc-14-runtime@14.3.0-2026.0.0.1"
+
 release_die() {
   echo "ERROR: $*" >&2
   return 1
@@ -214,6 +233,18 @@ release_ips_timestamp() {
 # release_ips_fmri TIMESTAMP: full FMRI of the depot package.
 release_ips_fmri() {
   echo "pkg://${IPS_PUBLISHER}/${IPS_PKG_NAME}@${IPS_COMPONENT_VERSION},${IPS_BUILD_RELEASE}-${IPS_BRANCH}:$1"
+}
+
+# release_fmri_version FMRI: the release-branch part of FMRI's version, as
+# pkgdepend writes minimum versions: no timestamp and no build release
+# (pkg://p/a@0.5.11,5.11-2026.0.0.1:20260401T000000Z -> 0.5.11-2026.0.0.1).
+# Fails when FMRI has no version.
+release_fmri_version() {
+  case "$1" in *@?*) ;; *) release_die "'$1' has no version"; return 1 ;; esac
+  local v="${1#*@}"
+  v="${v%%:*}"
+  case "${v}" in *,*-*) v="${v%%,*}-${v#*-}" ;; *,*) v="${v%%,*}" ;; esac
+  echo "${v}"
 }
 
 # release_public_repo_url: the repository URL recorded in public provenance.

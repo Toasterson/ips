@@ -7,6 +7,10 @@
 > *Amended 2026-09-24:* the illumos release job is suspended and illumos
 > assets are built by hand; see
 > [ADR-011](011-manual-illumos-release-assets.md).
+>
+> *Amended 2026-09-24:* package dependencies are resolved against a
+> baseline image at the oldest supported OS level, not the build host; see
+> [ADR-012](012-ips-package-dependency-baseline.md).
 
 > Numbered 005 because ADR 004 is claimed by the parallel v1 atomic-import
 > work. Renumber on merge if that changes.

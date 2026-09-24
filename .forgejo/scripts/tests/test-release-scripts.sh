@@ -538,14 +538,80 @@ while [ "$#" -gt 1 ]; do
 done
 sed "${args[@]}" "$1"
 EOF
+# A fake image is a directory holding "installed", one FMRI line per
+# package. The fake pkgdepend accepts only the global -R IMAGE, resolves
+# only with it (the baseline image), and like pkg5 writes as each minimum
+# the version installed in that image; a dependency the image lacks does not
+# resolve. FAKE_RESOLVE_EXTRA adds dependency stems; FAKE_RESOLVE_MINIMUM=
+# STEM@VERSION makes it write that minimum for STEM instead. The fake pkg accepts only the options the build uses (pkg5's
+# spelling: --no-refresh, not --no-refresh-catalogs), refuses any install
+# without -n, and answers list and install -n against the image; install -n
+# fails when the image holds "refuse". Unknown options exit 2, like pkg5.
+# Every pkgdepend and pkg call is logged to ${FAKE_TOOL_LOG}.
 cat >"${fb}/bin/pkgdepend" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+echo "pkgdepend $*" >>"${FAKE_TOOL_LOG}"
+img=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -R) img="$2"; shift 2 ;;
+    -*) echo "pkgdepend: illegal global option -- $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
 case "$1" in
   generate) eval "cat \"\${$#}\"" ;;
-  resolve) { cat "$3"
-    echo 'set name=org.opensolaris.smf.fmri value=svc:/application/pkg/pkg6depotd value=svc:/application/pkg/pkg6depotd:default'
-    echo 'depend fmri=pkg:/system/library@0.5.11 type=require'; } >"$3.res" ;;
+  resolve)
+    [ "$#" -eq 3 ] && [ "$2" = -m ] || { echo "fake pkgdepend: resolve takes -m MANIFEST" >&2; exit 2; }
+    [ -n "${img}" ] || { echo "fake pkgdepend: resolve against the build host" >&2; exit 3; }
+    { cat "$3"
+      echo 'set name=org.opensolaris.smf.fmri value=svc:/application/pkg/pkg6depotd value=svc:/application/pkg/pkg6depotd:default'
+      for stem in SUNWcs system/library shell/ksh93 compress/xz ${FAKE_RESOLVE_EXTRA:-}; do
+        line=$(grep -F "/${stem}@" "${img}/installed") || { echo "pkgdepend: Unable to resolve dependency on ${stem}" >&2; exit 1; }
+        v="${line#*@}"
+        v="${v%%:*}"
+        case "${v}" in *,*-*) v="${v%%,*}-${v#*-}" ;; esac
+        case "${FAKE_RESOLVE_MINIMUM:-}" in "${stem}@"*) v="${FAKE_RESOLVE_MINIMUM#*@}" ;; esac
+        echo "depend fmri=pkg:/${stem}@${v} type=require"
+      done; } >"$3.res" ;;
+  *) exit 2 ;;
+esac
+EOF
+cat >"${fb}/bin/pkg" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "pkg $*" >>"${FAKE_TOOL_LOG}"
+die2() { echo "pkg: $*" >&2; exit 2; }
+[ "$1" = -R ] || die2 "the fake accepts only the global -R IMAGE"
+[ -f "$2/installed" ] || { echo "pkg: $2 is not an image" >&2; exit 1; }
+img="$2"
+shift 2
+sub="$1"
+shift
+dry="" archive=""
+operands=()
+while [ "$#" -gt 0 ]; do
+  case "${sub} $1" in
+    "list -H" | "list -v" | "list -Hv" | "list -vH") ;;
+    "install -n" | "install -nv" | "install -vn") dry=1 ;;
+    "install -v" | "install --no-refresh") ;;
+    "install -g") archive="$2"; shift ;;
+    *" -"*) die2 "${sub}: illegal option -- $1" ;;
+    *) operands+=("$1") ;;
+  esac
+  shift
+done
+[ "${#operands[@]}" -eq 1 ] || die2 "${sub}: expected one package"
+case "${sub}" in
+  list)
+    line=$(grep -F "/${operands[0]}@" "${img}/installed") || { echo "pkg: no packages matching" >&2; exit 1; }
+    echo "${line}  i--" ;;
+  install)
+    [ -n "${dry}" ] || die2 "the fake refuses an install without -n"
+    [ -f "${archive}" ] || die2 "install: -g ${archive} is not an archive"
+    [ ! -e "${img}/refuse" ] || { echo "pkg: No matching version of package/pkg6/depotd can be installed" >&2; exit 1; } ;;
+  *) die2 "unknown subcommand ${sub}" ;;
 esac
 EOF
 cat >"${fb}/bin/pkglint" <<'EOF'
@@ -606,9 +672,31 @@ for f in target/release/pkg6depotd target/release/pkg6repo target/release/pkg6re
 done
 (cd "${fb}/co" && git init -q && git add packaging && \
   GIT_COMMITTER_DATE="2026-09-23T10:21:00Z" git commit -qm fixture)
+# fake_image DIR [STEM@VERSION | -STEM]...: a fake image with every
+# IPS_BASELINE_PINS package installed, like pkg list -Hv prints it (with
+# the build release), except that STEM@VERSION replaces STEM's version and
+# -STEM leaves STEM out.
+fake_image() {
+  local d="$1" pins="${IPS_BASELINE_PINS}" p v
+  shift
+  for p in "$@"; do
+    case "${p}" in
+      -*) pins=$(printf '%s\n' "${pins}" | grep -vF "${p#-}@") ;;
+      *) pins=$(printf '%s\n' "${pins}" | grep -vF "${p%@*}@"; echo "${p}") ;;
+    esac
+  done
+  mkdir -p "${d}"
+  printf '%s\n' "${pins}" | while read -r p; do
+    v="${p#*@}"
+    echo "pkg://openindiana.org/${p%@*}@${v%%-*},5.11-${v#*-}:20260401T000000Z"
+  done >"${d}/installed"
+}
+fake_image "${fb}/baseline"
 fakebuild() { # fakebuild SCRIPT [VAR=VALUE...]: build into ${fb}/dist; prints fmri.env
   rm -rf "${fb}/dist" "${fb}/co/target/ips"
-  (cd "${fb}/co" && unset CARGO_TARGET_DIR && env PATH="${fb}/bin:${PATH}" \
+  : >"${fb}/tools.log"
+  (cd "${fb}/co" && unset CARGO_TARGET_DIR && env PATH="${fb}/bin:${PATH}" FAKE_TOOL_LOG="${fb}/tools.log" \
+    IPS_BASELINE_IMAGE="${fb}/baseline" \
     RELEASE_TAG_OVERRIDE=v1.0.0-rc.3 RELEASE_ALLOW_UNTAGGED=1 "${@:2}" bash "$1" "${fb}/dist") >"${fb}/log" 2>&1 \
     && cat "${fb}/co/target/ips/fmri.env"
 }
@@ -657,6 +745,108 @@ fails_closed "p5p archive's extra package" 'package/other'
 check_not "archive manifest declaring another build release fails the build" \
   fakebuild "${build}" FAKE_ARCHIVE_DECLARES="${want/,5.11-/,5.12-}"
 fails_closed "p5p archive manifest's pkg.fmri" 'the p5p archive manifest declares'
+
+# --- dependencies resolve against the baseline image, never the build host -------
+# RC11 resolved on a newer build host and required SUNWcs@...23290, which the
+# 23029 target zone cannot install.
+eq "the supported baseline is the oirepo6 Hipster 2026.04 OS level" "${IPS_BASELINE_PINS}" \
+  "$(printf '%s\n' consolidation/osnet/osnet-incorporation@0.5.11-2026.0.0.23029 \
+    consolidation/userland/userland-incorporation@0.5.11-2026.0.0.33502 \
+    SUNWcs@0.5.11-2026.0.0.23029 system/library@0.5.11-2026.0.0.23029 system/library/math@0.5.11-2026.0.0.23029 \
+    shell/ksh93@93.21.1.20120801-2026.0.0.23029 \
+    compress/xz@5.8.3-2026.0.0.0 library/security/openssl@1.0.2.21-2026.0.0.18 \
+    system/library/gcc-14-runtime@14.3.0-2026.0.0.1)"
+osnet=consolidation/osnet/osnet-incorporation
+userland=consolidation/userland/userland-incorporation
+eq "fmri version: timestamp dropped" "$(release_fmri_version pkg://p/a@0.5.11-2026.0.0.23029:20260401T000000Z)" 0.5.11-2026.0.0.23029
+eq "fmri version: build release dropped" "$(release_fmri_version pkg://p/a@0.5.11,5.11-2026.0.0.23029:20260401T000000Z)" 0.5.11-2026.0.0.23029
+eq "fmri version: bare release" "$(release_fmri_version pkg:/a@1.0,5.11)" 1.0
+check_not "fmri version: no version fails" release_fmri_version pkg://p/a
+check_not "fmri version: empty version fails" release_fmri_version pkg://p/a@
+fakebuild "${build}" >/dev/null || bad "baseline build failed: $(cat "${fb}/log")"
+# The build's work dir is under git's (resolved) top level: /private/var on macOS.
+fb_work="$(cd "${fb}/co" && git rev-parse --show-toplevel)/target/ips"
+eq "resolve runs against the baseline image only" "$(grep '^pkgdepend .*resolve' "${fb}/tools.log")" \
+  "pkgdepend -R ${fb}/baseline resolve -m ${fb_work}/pkg6depotd.dep"
+check "the archive is dry-run installed into the baseline" grep -qxF \
+  "pkg -R ${fb}/baseline install -nv --no-refresh -g ${fb_work}/pkg6depotd-1.0.0-rc.3-illumos-x86_64.p5p package/pkg6/depotd" \
+  "${fb}/tools.log"
+check_not "pkg(1) never runs outside the baseline image" grep -qE '^pkg ([^-]|-[^R])' "${fb}/tools.log"
+eq "pkg(1) only lists and dry-runs in the baseline image" \
+  "$(grep '^pkg ' "${fb}/tools.log" | grep -cvE "^pkg -R ${fb}/baseline (list -Hv |install -nv )")" 0
+eq "the resolved manifest keeps the baseline's minimum versions" \
+  "$(grep '^depend ' "${fb}/dist/pkg6depotd-1.0.0-rc.3-illumos-x86_64.p5m")" \
+  "$(printf '%s\n' 'depend fmri=pkg:/SUNWcs@0.5.11-2026.0.0.23029 type=require' \
+    'depend fmri=pkg:/system/library@0.5.11-2026.0.0.23029 type=require' \
+    'depend fmri=pkg:/shell/ksh93@93.21.1.20120801-2026.0.0.23029 type=require' \
+    'depend fmri=pkg:/compress/xz@5.8.3-2026.0.0.0 type=require')"
+while read -r pin; do
+  check "the build log names the baseline's ${pin%@*}" grep -qxF "dependency baseline: ${fb}/baseline has ${pin}" "${fb}/log"
+done <<<"${IPS_BASELINE_PINS}"
+# The fakes reject what pkg5 rejects, so a misspelt option cannot pass here.
+check_not "fake pkg rejects --no-refresh-catalogs" env FAKE_TOOL_LOG=/dev/null "${fb}/bin/pkg" -R "${fb}/baseline" \
+  install -nv --no-refresh-catalogs -g "${fb}/co/packaging/ips/pkg6depotd.p5m" package/pkg6/depotd
+check_not "fake pkg rejects an install without -n" env FAKE_TOOL_LOG=/dev/null "${fb}/bin/pkg" -R "${fb}/baseline" \
+  install -v --no-refresh -g "${fb}/co/packaging/ips/pkg6depotd.p5m" package/pkg6/depotd
+check "fake pkg accepts the build's dry run" env FAKE_TOOL_LOG=/dev/null "${fb}/bin/pkg" -R "${fb}/baseline" \
+  install -nv --no-refresh -g "${fb}/co/packaging/ips/pkg6depotd.p5m" package/pkg6/depotd
+check_not "fake pkgdepend rejects an unknown global option" env FAKE_TOOL_LOG=/dev/null "${fb}/bin/pkgdepend" \
+  -D x resolve -m "${fb}/co/packaging/ips/pkg6depotd.p5m"
+check_not "build without IPS_BASELINE_IMAGE fails" fakebuild "${build}" IPS_BASELINE_IMAGE=
+fails_closed "missing baseline" 'IPS_BASELINE_IMAGE is not set'
+check_not "  ... before any pkgdepend run" grep -q '^pkgdepend ' "${fb}/tools.log"
+check_not "build with a missing baseline directory fails" fakebuild "${build}" IPS_BASELINE_IMAGE="${fb}/absent"
+fails_closed "absent baseline directory" "IPS_BASELINE_IMAGE=${fb}/absent is not a directory"
+mkdir -p "${fb}/not-an-image"
+check_not "build with a directory that is no image fails" fakebuild "${build}" IPS_BASELINE_IMAGE="${fb}/not-an-image"
+fails_closed "non-image baseline" 'or it is not a pkg(5) image'
+# baseline_rejected NAME MESSAGE [fake_image ARGS...]: a build against that
+# image fails with MESSAGE before any pkgdepend run.
+baseline_rejected() {
+  rm -rf "${fb}/img"
+  fake_image "${fb}/img" "${@:3}"
+  check_not "build against a baseline with $1 fails" fakebuild "${build}" IPS_BASELINE_IMAGE="${fb}/img"
+  fails_closed "baseline with $1" "$2"
+  check_not "  ... before any pkgdepend run ($1)" grep -q '^pkgdepend ' "${fb}/tools.log"
+}
+baseline_rejected "a newer osnet-incorporation (the RC11 build host)" \
+  "has ${osnet}@0.5.11-2026.0.0.23290, the supported baseline is ${osnet}@0.5.11-2026.0.0.23029" \
+  "${osnet}@0.5.11-2026.0.0.23290"
+baseline_rejected "an older osnet-incorporation" "has ${osnet}@0.5.11-2026.0.0.22800," "${osnet}@0.5.11-2026.0.0.22800"
+baseline_rejected "a newer userland-incorporation" \
+  "has ${userland}@0.5.11-2026.0.0.33800, the supported baseline is ${userland}@0.5.11-2026.0.0.33502" \
+  "${userland}@0.5.11-2026.0.0.33800"
+baseline_rejected "an older userland-incorporation" "has ${userland}@0.5.11-2026.0.0.33000," "${userland}@0.5.11-2026.0.0.33000"
+baseline_rejected "no userland-incorporation" "${userland} is not installed in the baseline image" "-${userland}"
+# A current-hipster image with the right incorporations but a newer userland
+# package would raise that package's minimum past the target's.
+baseline_rejected "a newer dependency than the target's" \
+  "has library/security/openssl@1.0.2.22-2026.0.0.1, the supported baseline is library/security/openssl@1.0.2.21-2026.0.0.18" \
+  "library/security/openssl@1.0.2.22-2026.0.0.1"
+baseline_rejected "a missing pinned dependency" "compress/xz is not installed in the baseline image" "-compress/xz"
+baseline_rejected "a newer shell/ksh93" \
+  "has shell/ksh93@93.21.1.20120801-2026.0.0.23290, the supported baseline is shell/ksh93@93.21.1.20120801-2026.0.0.23029" \
+  "shell/ksh93@93.21.1.20120801-2026.0.0.23290"
+baseline_rejected "no shell/ksh93" "shell/ksh93 is not installed in the baseline image" "-shell/ksh93"
+check_not "a dependency minimum above the baseline's fails the build" \
+  fakebuild "${build}" FAKE_RESOLVE_MINIMUM=system/library@0.5.11-2026.0.0.23290
+fails_closed "dependency minimum mismatch" \
+  "would require system/library@0.5.11-2026.0.0.23290, but the baseline image ${fb}/baseline has system/library@0.5.11-2026.0.0.23029"
+# A dependency not pinned by name (one a later binary picks up, say) is held
+# to the baseline too.
+fake_image "${fb}/baseline" library/zlib@1.3.1-2026.0.0.0
+check "an unpinned dependency at the baseline's version passes" fakebuild "${build}" FAKE_RESOLVE_EXTRA=library/zlib
+check_not "an unpinned dependency minimum above the baseline's fails the build" \
+  fakebuild "${build}" FAKE_RESOLVE_EXTRA=library/zlib FAKE_RESOLVE_MINIMUM=library/zlib@1.3.1-2026.0.0.9
+fails_closed "unpinned dependency minimum mismatch" "would require library/zlib@1.3.1-2026.0.0.9"
+fake_image "${fb}/baseline"
+check_not "an unresolved dependency fails the build" fakebuild "${build}" FAKE_RESOLVE_EXTRA=library/zlib
+fails_closed "unresolved dependency" "could not resolve every dependency against the baseline image ${fb}/baseline"
+touch "${fb}/baseline/refuse"
+check_not "an archive the baseline cannot install fails the build" fakebuild "${build}"
+fails_closed "baseline dry-run install" "does not install into the baseline image ${fb}/baseline"
+rm "${fb}/baseline/refuse"
+check "the baseline build passes again" fakebuild "${build}"
 
 # --- uninstall check is scoped to the repository --------------------------------
 check "uninstall test searches lost+found for repository paths" \
