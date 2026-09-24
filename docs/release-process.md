@@ -178,10 +178,15 @@ tag:
 ```sh
 cargo build --release --locked
 RELEASE_TAG_OVERRIDE=v0.0.0-alpha.0 RELEASE_ALLOW_UNTAGGED=1 \
+  IPS_BASELINE_IMAGE=/ws/toasty/ips-baseline-2026.04 \
   .forgejo/scripts/build-ips-package.sh dist
 ```
 
-This writes only to `target/ips` and `dist`.
+This writes only to `target/ips` and `dist`. `IPS_BASELINE_IMAGE` is
+required. It names a user image at the oldest supported OS level, and the
+package's dependencies are resolved against it rather than against the build
+host. Create it once, as described in `packaging/ips/README.md`, Dependency
+baseline. The build only reads it.
 
 ### Pre-tag pkg5 gate
 
@@ -193,6 +198,7 @@ zone), as an ordinary user, that the native pkg5 client (`pkg(1)`,
 candidate=v1.0.0-rc.11   # replace; must be "v" + Cargo.toml workspace version
 cargo build --workspace --release --locked -j2
 RELEASE_TAG_OVERRIDE="$candidate" RELEASE_ALLOW_UNTAGGED=1 \
+  IPS_BASELINE_IMAGE=/ws/toasty/ips-baseline-2026.04 \
   .forgejo/scripts/build-ips-package.sh dist
 .forgejo/scripts/test-pkg5-unprivileged.sh \
   "dist/pkg6depotd-${candidate#v}-illumos-x86_64.p5p"
@@ -247,9 +253,10 @@ The build runs the same gates as the suspended job, except one:
 | release build, `-j2` | oibuild |
 | nextest inventory (`release_check_test_inventory`) | oibuild |
 | `cargo nextest run --workspace --release --locked`, no filters | oibuild |
-| IPS package build (`build-ips-package.sh`) | oibuild |
+| IPS package build (`build-ips-package.sh`), dependencies resolved against the baseline image, dry-run install into it | oibuild |
 | native pkg5 smoke (`test-pkg5-unprivileged.sh`), no sudo | oibuild |
 | tarball, `SHA256SUMS-illumos-x86_64`, `provenance-illumos-x86_64.json` | oibuild |
+| target-native gate: `pkg install -n -g`, `ldd -r` and `config-test`; required before upload | the oirepo6 zone, by hand, read-only |
 | **live-image install, upgrade, uninstall and SMF (`test-ips-package.sh`)** | **not run** |
 
 The live-image test changes the live system, so it must not run on oibuild.
@@ -260,7 +267,11 @@ that gap open (step 5 of [Cutting a release](#cutting-a-release)).
 ### 1. Build on oibuild
 
 oibuild needs `cargo-nextest` and `jq` on `PATH`, besides the Rust
-toolchain and `package/pkg`. Use a fresh clone of the tag, as an ordinary
+toolchain and `package/pkg`. It also needs the dependency baseline image
+(`packaging/ips/README.md`, Dependency baseline), owned by the build user.
+oibuild runs a newer OS than the oldest target, and a package whose
+dependencies are resolved against oibuild itself cannot be installed on the
+target; that happened with `v1.0.0-rc.11`. Use a fresh clone of the tag, as an ordinary
 user, in a session that survives a disconnect (for example `screen` or
 `tmux`). The build takes a long time at `-j2`. `-j2` keeps the build within the host's memory, and
 illumos `ld` fails without a message when it runs out.
@@ -278,6 +289,7 @@ where `../build-illumos.sh` holds:
 tag="$1"
 export GITHUB_REF="refs/tags/$tag" CARGO_BUILD_JOBS=2
 export FORGE_BASE=https://code.aopc.cloud REPO_OWNER=OpenIndiana REPO_NAME=ips
+export IPS_BASELINE_IMAGE=/ws/toasty/ips-baseline-2026.04
 . .forgejo/scripts/release-lib.sh
 release_init
 release_fetch_tag
@@ -320,6 +332,30 @@ jq -r '.source.tag, .source.commit' dist/provenance-illumos-x86_64.json
 git rev-parse "$tag^{commit}"   # must equal the commit above
 ```
 
+#### Target-native gate
+
+Do not go on to the upload (step 4) until this gate has passed on a
+system at the baseline level, the oirepo6 zone. It is read-only there.
+The build's dry run into the baseline image shows that the package's
+dependencies fit an image with the pinned versions. It cannot show that
+the real target agrees, or that binaries linked on the newer oibuild run on
+the older OS. The release-script self-tests use fake pkg5 tools and show
+neither. Copy the `.p5p` to the zone and keep the output of every command
+below as the gate evidence:
+
+```sh
+p5p=pkg6depotd-<version>-illumos-x86_64.p5p
+pkg list -v consolidation/osnet/osnet-incorporation \
+  consolidation/userland/userland-incorporation   # ...23029 and ...33502
+pkg install -nv -g "$p5p" package/pkg6/depotd      # must succeed; changes nothing
+```
+
+Then take `pkg6depotd`, `pkg6repo` and `pkg6recv` from the release tarball
+checked in step 2. The package stages the same `target/release` files.
+Run `ldd -r` on each: no line may say `not found` or `symbol not found`. Then run `pkg6depotd --config <kdl> config-test` with
+the packaged `pkg6depotd.kdl`; it must exit 0. Any failure stops the
+release. Never update the zone's incorporations to make the package fit.
+
 ### 3. Write the gate statement
 
 Write the builder and gate status to a file, for example
@@ -345,14 +381,19 @@ built and tested by Solstice CI.
 | release build (`-j2`) | passed |
 | nextest inventory | passed |
 | `cargo nextest run --workspace --release --locked` | passed, N tests |
-| IPS package build | passed |
+| IPS package build, baseline `osnet-incorporation@0.5.11-2026.0.0.23029`, `userland-incorporation@0.5.11-2026.0.0.33502` | passed |
 | native pkg5 smoke (`test-pkg5-unprivileged.sh`) | passed |
+| target-native gate on the oirepo6 zone (osnet ...23029, userland ...33502): `pkg install -nv -g` | passed |
+| target-native gate: `ldd -r` of `pkg6depotd`, `pkg6repo`, `pkg6recv` | passed, nothing unresolved |
+| target-native gate: `pkg6depotd config-test` | passed |
 | live-image install/upgrade/uninstall/SMF (`test-ips-package.sh`) | **NOT RUN** |
 ```
 
 ### 4. Upload
 
-Run this in the checkout of the tag from step 2:
+Upload only when the notes show all three target-native gate rows as
+passed, with the evidence kept. The uploader does not check these rows, so
+the maintainer must. Run this in the checkout of the tag from step 2:
 
 ```sh
 RELEASE_AUTH=basic \

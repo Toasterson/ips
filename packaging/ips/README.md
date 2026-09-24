@@ -38,6 +38,121 @@ too. A root-run `pkg6repo retire apply` can leave a root-owned
 `retention/access/fence.lock` that stops the depot from recording
 accesses; see pkg6repo-retire(8).
 
+## Dependency baseline
+
+`pkgdepend resolve` records the version of each dependency that is installed
+in the image it resolves against as the minimum version. For RC11 that image
+was the build host, which was newer than the target, so the package required
+`SUNWcs@0.5.11-2026.0.0.23290`. The oirepo6 Hipster 2026.04 zone is pinned at
+23029 by `osnet-incorporation`, so `pkg install` refused the package, even
+though the binaries run there.
+
+`build-ips-package.sh` therefore resolves against a baseline image, not the
+build host. `IPS_BASELINE_PINS` in `.forgejo/scripts/release-lib.sh` lists
+what the oirepo6 zone has installed, one `STEM@VERSION` per line:
+
+| Package | Target version |
+|---------|----------------|
+| `consolidation/osnet/osnet-incorporation` | 0.5.11-2026.0.0.23029 |
+| `consolidation/userland/userland-incorporation` | 0.5.11-2026.0.0.33502 |
+| `SUNWcs`, `system/library`, `system/library/math` | 0.5.11-2026.0.0.23029 |
+| `shell/ksh93` | 93.21.1.20120801-2026.0.0.23029 |
+| `compress/xz` | 5.8.3-2026.0.0.0 |
+| `library/security/openssl` | 1.0.2.21-2026.0.0.18 |
+| `system/library/gcc-14-runtime` | 14.3.0-2026.0.0.1 |
+
+`IPS_BASELINE_IMAGE` must name the root of a pkg(5) image that has every one
+of them installed at exactly that version. The build fails if the variable
+is unset, if the image is missing, if any pinned package is missing or at
+another version, newer or older, or if a dependency does not resolve there.
+After `pkgdepend resolve`, every versioned dependency must require exactly
+the version the baseline has installed, pinned or not. The build then dry-runs
+`pkg -R "$IPS_BASELINE_IMAGE" install -nv --no-refresh -g <p5p>` of the
+finished archive, and fails if the baseline cannot install it. The baseline
+is only read. Only the minimum versions depend on the baseline: the
+dependency stems, dependency types and variants come from `pkgdepend` as
+before, and no version is removed.
+
+The baseline is dependency-resolution metadata for `pkgdepend` and `pkg
+install -n`, not a runnable OS image. Create it once on the build host, as
+the build user. It is a user image, so no root is needed.
+
+The public Hipster publisher no longer carries
+`userland-incorporation@0.5.11-2026.0.0.33502`, so installing it from there
+fails. Bootstrap it from a baseline-only archive instead: a `.p5p` holding
+that one package, rebuilt from the manifest installed on the target, with
+its version and its `depend` actions (9609 of them) unchanged and no files.
+Its packaging timestamp differs from the original's. It is not an official
+historical archive. Keep it with the build host's tooling, and never add it
+to a repository or serve it to clients. The archive used for
+`/ws/toasty/ips-baseline-2026.04` has SHA-256
+`827682772a3c81ceb737fb1ff0d45077f043b531828b387d23401b8e66b2a54d`; use
+that one where you can. To make a new one from the manifest installed on a
+system at the baseline level (the oirepo6 zone):
+
+```sh
+stem=consolidation/userland/userland-incorporation
+pkg contents -m "$stem" | grep -E '^(set|depend) ' >baseline.p5m
+pkgrepo create -s baseline-repo
+pkgsend -s baseline-repo publish baseline.p5m
+pkgrecv -s baseline-repo -a -d userland-incorporation-33502-baseline.p5p "$stem"
+pkg list -g userland-incorporation-33502-baseline.p5p -afv "$stem"
+```
+
+`pkgsend` keeps the manifest's `pkg.fmri` version and gives it a new
+timestamp. The last `list` must show `0.5.11-2026.0.0.33502`, and
+`grep -c '^depend ' baseline.p5m` must count 9609. Then pin every package
+explicitly. With the bare
+names, a fresh image on current Hipster resolves the userland packages to
+newer versions than the target has, and the build then fails its pin check:
+
+```sh
+base=/ws/toasty/ips-baseline-2026.04
+p5p=/path/to/userland-incorporation-33502-baseline.p5p
+pkg image-create -U -p openindiana.org=https://pkg.openindiana.org/hipster "$base"
+pkg -R "$base" install --no-refresh \
+  consolidation/osnet/osnet-incorporation@0.5.11-2026.0.0.23029 \
+  SUNWcs@0.5.11-2026.0.0.23029 system/library@0.5.11-2026.0.0.23029 \
+  system/library/math@0.5.11-2026.0.0.23029 \
+  shell/ksh93@93.21.1.20120801-2026.0.0.23029 \
+  compress/xz@5.8.3-2026.0.0.0 \
+  library/security/openssl@1.0.2.21-2026.0.0.18 \
+  system/library/gcc-14-runtime@14.3.0-2026.0.0.1
+pkg -R "$base" install --no-refresh -g "$p5p" \
+  consolidation/userland/userland-incorporation@0.5.11-2026.0.0.33502
+pkg -R "$base" list -v consolidation/osnet/osnet-incorporation \
+  consolidation/userland/userland-incorporation SUNWcs system/library \
+  system/library/math shell/ksh93 compress/xz library/security/openssl \
+  system/library/gcc-14-runtime
+```
+
+The `list` must show every pinned version from the table. In a user image
+the first `install` reports `add_drv` failures, because driver actions need
+root, but `pkg` exits 0 and the package metadata is installed. That is
+enough for a resolution baseline; the image does not boot or run anything.
+`image-create` refreshes the public catalog; the `install`s use its cached
+contents and the local archive. The build user must own the image, because the build's
+dry-run install takes the image lock. If a later `pkgdepend resolve` reports
+a file no installed package delivers, install the package that delivers it
+at the target's version (`pkg list -v` on the target), add it to
+`IPS_BASELINE_PINS` in a reviewed commit, and build again.
+
+Then build with the baseline:
+
+```sh
+IPS_BASELINE_IMAGE=/ws/toasty/ips-baseline-2026.04 .forgejo/scripts/build-ips-package.sh dist
+```
+
+The binaries are still compiled on the build host. A newer build host can
+link against a library symbol version the baseline lacks, and the dependency
+checks cannot see that. No upload may happen until the `.p5p` has been
+checked on a system at the baseline level, the oirepo6 zone. There,
+`pkg install -n -g <p5p> package/pkg6/depotd` must succeed, and so must
+`ldd -r` and `config-test` of the extracted binaries. Record the evidence in
+the release notes (`docs/release-process.md`, Target-native gate). Change
+`IPS_BASELINE_PINS` only when the oldest supported target moves. Never
+update the target's incorporations to make a package fit.
+
 ## Operator workflow
 
 ```sh
@@ -157,6 +272,19 @@ before removing it.
     one-package scratch repository. Its OS dependencies (SUNWcs, shells,
     system libraries) cannot resolve there. The live install in
     `test-ips-package.sh` is what checks that dependencies resolve.
+  - Dependencies resolve against `IPS_BASELINE_IMAGE`, and the archive must
+    dry-run install there (see Dependency baseline). The release-script
+    self-tests check the build script's logic with fake pkg5 tools. The
+    fakes reject unknown options (so `--no-refresh-catalogs` fails) and
+    derive the resolved minimum versions from the fake image. Each of these
+    fails the build without leaving an archive in `dist`: a missing or
+    non-image baseline; a newer, older or missing osnet or userland
+    incorporation; a pinned dependency that is newer or missing; a resolved
+    minimum above the baseline's version; an unresolved dependency; and a
+    refused dry run. The fakes do not prove that real pkg5 accepts the
+    commands, and they do not prove that a real image resolves or installs.
+    Only the build on oibuild against the real baseline and the
+    target-native gate show that.
   - Unexpanded `$(NAME)` macros abort the build only in action lines;
     comments are ignored.
   - The four manual pages are installed `0444 root:bin`, byte-identical to
@@ -211,6 +339,7 @@ before removing it.
   candidate=v1.0.0-rc.11   # replace; must be "v" + Cargo.toml workspace version
   cargo build --workspace --release --locked -j2
   RELEASE_TAG_OVERRIDE="$candidate" RELEASE_ALLOW_UNTAGGED=1 \
+    IPS_BASELINE_IMAGE=/ws/toasty/ips-baseline-2026.04 \
     .forgejo/scripts/build-ips-package.sh dist
   .forgejo/scripts/test-pkg5-unprivileged.sh \
     "dist/pkg6depotd-${candidate#v}-illumos-x86_64.p5p"

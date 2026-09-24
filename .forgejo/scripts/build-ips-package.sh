@@ -13,6 +13,16 @@
 #
 # Nothing is installed or changed outside the checkout.
 #
+# IPS_BASELINE_IMAGE (required) is the root of a pkg(5) image at the oldest
+# supported OS level: every IPS_BASELINE_PINS package (release-lib.sh), both
+# incorporations included, must be installed there at exactly its pinned
+# version. Dependencies are resolved against the packages installed there,
+# not against the build host, and every resolved minimum version must equal
+# the version the baseline has; then a pkg install -n into the baseline
+# proves the archive installs there. The baseline is only read: the dry run
+# changes nothing in it. See packaging/ips/README.md, Dependency baseline,
+# for how to create one.
+#
 # Local dry runs on an untagged checkout: RELEASE_TAG_OVERRIDE=v1.2.3-rc.1
 # RELEASE_ALLOW_UNTAGGED=1 (the manifest's info.repository-changeset then
 # records HEAD).
@@ -27,9 +37,32 @@ outdir="$1"
 mkdir -p "${outdir}"
 outdir=$(cd "${outdir}" && pwd)
 
-for tool in pkgmogrify pkgdepend pkglint pkgrepo pkgsend pkgrecv; do
+for tool in pkg pkgmogrify pkgdepend pkglint pkgrepo pkgsend pkgrecv; do
   command -v "${tool}" >/dev/null || release_die "${tool} not found; build on OpenIndiana with package/pkg installed"
 done
+
+# The dependency baseline must exist and be at exactly the supported OS
+# level; a newer image (the build host's own, say) would raise every OS
+# minimum version past what the oldest supported target can install.
+[ -n "${IPS_BASELINE_IMAGE:-}" ] \
+  || release_die "IPS_BASELINE_IMAGE is not set; point it at a pkg(5) image with the IPS_BASELINE_PINS of release-lib.sh (packaging/ips/README.md, Dependency baseline)"
+[ -d "${IPS_BASELINE_IMAGE}" ] || release_die "IPS_BASELINE_IMAGE=${IPS_BASELINE_IMAGE} is not a directory"
+baseline=$(cd "${IPS_BASELINE_IMAGE}" && pwd)
+# baseline_version STEM: the version of STEM installed in the baseline, in
+# the form pkgdepend writes minimum versions.
+baseline_version() {
+  local fmri
+  fmri=$(pkg -R "${baseline}" list -Hv "$1" | awk '{ print $1 }') \
+    || { release_die "$1 is not installed in the baseline image ${baseline}, or it is not a pkg(5) image"; return 1; }
+  release_fmri_version "${fmri}" \
+    || { release_die "cannot read the $1 version of the baseline image ${baseline}"; return 1; }
+}
+while read -r pin; do
+  have=$(baseline_version "${pin%@*}")
+  [ "${have}" = "${pin#*@}" ] \
+    || release_die "baseline image ${baseline} has ${pin%@*}@${have}, the supported baseline is ${pin}"
+  echo "dependency baseline: ${baseline} has ${pin}"
+done <<<"${IPS_BASELINE_PINS}"
 
 release_init
 root=$(git rev-parse --show-toplevel)
@@ -79,11 +112,25 @@ pkgmogrify \
 unexpanded=$(release_unexpanded_macros "${work}/pkg6depotd.mog")
 [ -z "${unexpanded}" ] || release_die "unexpanded macros in the manifest:"$'\n'"${unexpanded}"
 
-# 2. Generate and resolve dependencies (ELF, SMF, #! interpreters) against
-#    the build host's installed packages.
+# 2. Generate dependencies (ELF, SMF, #! interpreters) and resolve them
+#    against the packages installed in the baseline image, never the build
+#    host's: pkgdepend writes each dependency's installed version as the
+#    minimum. A file the baseline delivers from no package is an error.
 pkgdepend generate -md "${proto}" -d "${root}" "${work}/pkg6depotd.mog" > "${work}/pkg6depotd.dep"
-pkgdepend resolve -m "${work}/pkg6depotd.dep"
+pkgdepend -R "${baseline}" resolve -m "${work}/pkg6depotd.dep" \
+  || release_die "pkgdepend could not resolve every dependency against the baseline image ${baseline}"
 resolved="${work}/pkg6depotd.dep.res"
+# Every versioned dependency must require exactly what the baseline has.
+for dep in $(awk '$1 == "depend" { for (i = 2; i <= NF; i++) if ($i ~ /^fmri=/) print substr($i, 6) }' "${resolved}"); do
+  case "${dep}" in *@*) ;; *) continue ;; esac
+  stem="${dep#pkg:/}"
+  stem="${stem#/*/}"
+  stem="${stem%%@*}"
+  min=$(release_fmri_version "${dep}")
+  have=$(baseline_version "${stem}")
+  [ "${min}" = "${have}" ] \
+    || release_die "the package would require ${stem}@${min}, but the baseline image ${baseline} has ${stem}@${have}"
+done
 # pkgdepend derives org.opensolaris.smf.fmri from the SMF manifest; the
 # template must not add its own (pkglint.manifest006 on duplicates).
 n=$(release_smf_fmri_actions "${resolved}")
@@ -168,6 +215,12 @@ archive="${work}/$(release_p5p_name)"
 pkgrecv -s "${repo}" -a -d "${archive}" "${IPS_PKG_NAME}"
 pkgrepo -s "${archive}" list
 check_fmri "${archive}" "p5p archive"
+
+# 6. The archive must install into the baseline: a dry run (-n changes
+#    nothing) against its installed incorporations, with the catalogs it
+#    already has.
+pkg -R "${baseline}" install -nv --no-refresh -g "${archive}" "${IPS_PKG_NAME}" \
+  || release_die "${IPS_FMRI} does not install into the baseline image ${baseline}"
 p5p="${outdir}/$(release_p5p_name)"
 rm -f "${p5p}"
 mv "${archive}" "${p5p}"
