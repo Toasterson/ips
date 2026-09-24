@@ -8,7 +8,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::ser::{Formatter, Serializer};
+use serde_json::ser::{CharEscape, Formatter, Serializer};
 use sha1::{Digest as _, Sha1};
 use tracing::{debug, instrument};
 
@@ -43,6 +43,58 @@ impl Formatter for PythonFormatter {
             writer.write_all(b",")?;
         }
         Ok(())
+    }
+
+    fn write_string_fragment<W: ?Sized + Write>(
+        &mut self,
+        writer: &mut W,
+        fragment: &str,
+    ) -> std::io::Result<()> {
+        // pkg5's rapidjson uses ensure_ascii=True when signing catalogs.
+        // Hashing literal UTF-8 makes summary parts with localized text fail
+        // validation even when the embedded digest matches the file bytes.
+        let mut start = 0;
+        for (index, ch) in fragment.char_indices() {
+            if ch.is_ascii() {
+                continue;
+            }
+            writer.write_all(&fragment.as_bytes()[start..index])?;
+            let mut units = [0u16; 2];
+            for unit in ch.encode_utf16(&mut units).iter() {
+                write!(writer, "\\u{:04X}", unit)?;
+            }
+            start = index + ch.len_utf8();
+        }
+        writer.write_all(&fragment.as_bytes()[start..])
+    }
+
+    fn write_char_escape<W: ?Sized + Write>(
+        &mut self,
+        writer: &mut W,
+        escape: CharEscape,
+    ) -> std::io::Result<()> {
+        let code = match escape {
+            CharEscape::Quote => b'"',
+            CharEscape::ReverseSolidus => b'\\',
+            CharEscape::Solidus => b'/',
+            CharEscape::Backspace => b'b',
+            CharEscape::FormFeed => b'f',
+            CharEscape::LineFeed => b'n',
+            CharEscape::CarriageReturn => b'r',
+            CharEscape::Tab => b't',
+            CharEscape::AsciiControl(byte) => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                return writer.write_all(&[
+                    b'\\',
+                    b'u',
+                    b'0',
+                    b'0',
+                    HEX[(byte >> 4) as usize],
+                    HEX[(byte & 0xf) as usize],
+                ]);
+            }
+        };
+        writer.write_all(&[b'\\', code])
     }
 }
 
@@ -497,6 +549,7 @@ mod tests {
             String::from_utf8_lossy(&stream_bytes),
             String::from_utf8_lossy(&ref_bytes)
         );
+        assert!(stream_bytes.is_ascii(), "pkg5 signs ensure_ascii JSON");
 
         // The signature covers the part without `_SIGNATURE`: the publisher
         // map closed with `}` and a trailing newline.
@@ -521,6 +574,28 @@ mod tests {
         writer.begin_stem("foo").unwrap();
         assert!(writer.finalize(&dir.path().join("catalog.base.C")).is_err());
         assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn unicode_signature_matches_openindiana_pkg5_rapidjson() {
+        let dir = tempfile::tempdir().unwrap();
+        let (signature, bytes) = stream(
+            dir.path(),
+            PUB,
+            &[(
+                "foo",
+                vec![entry_with_actions(
+                    "1.0",
+                    &["set name=pkg.summary value=café 😀\u{1b}"],
+                )],
+            )],
+        );
+        assert_eq!(signature, "f4463180df754f01fe984ccae2e793d2ef9f05cb");
+        assert!(
+            String::from_utf8(bytes)
+                .unwrap()
+                .contains("caf\\u00E9 \\uD83D\\uDE00\\u001B")
+        );
     }
 
     #[test]
