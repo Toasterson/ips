@@ -1,17 +1,23 @@
 # Release process
 
 Releases are made **only by pushing a tag**. The Forgejo workflow
-`.forgejo/workflows/release.yml` builds, tests, packages and uploads.
-Nobody builds or uploads release assets by hand, and no branch push
-produces a release.
+`.forgejo/workflows/release.yml` builds, tests, packages and uploads the
+Linux assets. No branch push produces a release.
+
+For now the illumos release job is suspended: its throwaway-VM package gate
+is not reliable. A maintainer builds the illumos assets from the exact tag
+on an OpenIndiana build host and uploads them with the same upload script,
+together with a statement of which gates ran. The live-image install,
+upgrade, uninstall and SMF test does not run, and the release body says so.
+`docs/release-process.md` in the repository has the procedure.
 
 ## Accepted tags
 
 | Tag | Forgejo release | IPS version |
 |-----|-----------------|-------------|
-| `vX.Y.Z-alpha.N` | pre-release, published automatically once complete | `X.Y.Z,5.11-0.1.N` |
-| `vX.Y.Z-beta.N` | pre-release, published automatically once complete | `X.Y.Z,5.11-0.2.N` |
-| `vX.Y.Z-rc.N` | pre-release, published automatically once complete | `X.Y.Z,5.11-0.3.N` |
+| `vX.Y.Z-alpha.N` | pre-release, published automatically once both platforms' assets are present | `X.Y.Z,5.11-0.1.N` |
+| `vX.Y.Z-beta.N` | pre-release, published automatically once both platforms' assets are present | `X.Y.Z,5.11-0.2.N` |
+| `vX.Y.Z-rc.N` | pre-release, published automatically once both platforms' assets are present | `X.Y.Z,5.11-0.3.N` |
 | `vX.Y.Z` | stays a draft; a maintainer publishes it | `X.Y.Z,5.11-1` |
 
 Any other `v*` tag fails the first step.
@@ -28,23 +34,28 @@ Any other `v*` tag fails the first step.
    git push origin v1.0.0-rc.1
    ```
 
-3. The `linux` and `illumos` jobs run independently. Each one does the
-   following:
+3. The `linux` job does the following. A maintainer runs the same steps
+   for illumos by hand, except the live-image package test:
    1. Proves that the tag, `HEAD`, the runner commit and the tag on
       origin name the same commit, and that every crate version equals
       the tag. A moved or deleted tag fails.
    2. Runs the release script self-tests and checks this book (the
-      `linux` job only; see [The book check](#the-book-check)).
+      Linux only; see [The book check](#the-book-check)).
    3. Builds the release profile.
    4. Checks the test inventory, then runs
       `cargo nextest run --workspace --release --locked` with no filters.
-   5. Packages the build. The `illumos` job also builds the IPS package
-      and installs, upgrades and removes it on its throwaway VM.
+   5. Packages the build. On illumos this includes the IPS package and the
+      unprivileged pkg5 client smoke. The live-image install, upgrade and
+      uninstall test does not run while the illumos job is suspended.
    6. Writes `SHA256SUMS-<platform>` and `provenance-<platform>.json`,
-      then uploads.
+      then uploads. The illumos upload first writes the builder and gate
+      statement into the draft release body.
 4. **Pre-release:** leaves draft when the second platform's assets
-   arrive. **Stable:** check the provenance and checksums, then publish
-   the draft in the Forgejo UI.
+   arrive. **Stable:** check the provenance and checksums, read the
+   illumos gate statement, then publish the draft in the Forgejo UI. Do
+   not publish a stable release while the live-image test is marked
+   **NOT RUN**, unless it has been run or the owner accepts the gap in
+   the release body.
 
 A version-bump commit must come first: a tag on code with another version
 fails verification. Never move a published tag.
@@ -73,18 +84,19 @@ $ jq .source provenance-illumos-x86_64.json
 
 ## Immutable assets and re-runs
 
-CI never deletes or replaces an asset.
+The upload script never deletes or replaces an asset.
 
 | Existing asset | Result |
 |----------------|--------|
 | Identical bytes | Skipped. |
-| Different bytes | The job fails. |
+| Different bytes | The upload fails. |
 | Absent, release still a draft | Uploaded. |
-| Absent, release already published | The job fails. |
+| Absent, release already published | The upload fails. |
 
-Linux re-runs are clean. An illumos re-run fails once its `.p5p` is
-uploaded, because the archive embeds its publication time. To rebuild,
-delete that platform's assets from the **draft**, then re-run the job.
+Linux re-runs are clean. An illumos rebuild fails to upload once its
+`.p5p` is on the release, because the archive embeds its publication time.
+To rebuild, delete that platform's assets from the **draft**, then re-run
+the Linux job or rebuild and upload the illumos assets.
 
 ## The book check
 

@@ -145,8 +145,11 @@ before removing it.
   issuance, renewal and reload against a mock CA and mock Cloudflare and
   Gandi APIs. They never contact a real CA.
 - On illumos, the SMF manifest validates against the illumos DTD
-  (`svccfg validate`). CI runs the build and then `test-ips-package.sh` on a
-  throwaway VM:
+  (`svccfg validate`). `test-ips-package.sh` runs after the build on a
+  throwaway VM. It does not run at the moment: the illumos release job that
+  ran it is suspended (ADR-011), and it must not run on a shared build host.
+  The illumos release assets are built by hand and their release body marks
+  this test **NOT RUN** (`docs/release-process.md`). When it runs, it checks:
   - `pkgdepend generate` adds `org.opensolaris.smf.fmri` from the SMF
     manifest. The template must not set it: pkglint rejects duplicates with
     `manifest006`. The build checks that exactly one copy is generated.
@@ -199,7 +202,7 @@ before removing it.
     `/var/pkg6depotd` is never written, so the later upgrade and uninstall
     checks see the operator repository unchanged. The comparison and snapshot
     helpers are tested offline by `test-release-scripts.sh`. The smoke itself runs
-    only on the tag-triggered illumos release VM.
+    only inside `test-ips-package.sh`, which currently runs nowhere.
 - Before tagging, as an ordinary user on an OpenIndiana build host, the
   pre-tag pkg5 gate runs the same client checks without root, SMF or the live
   image:
@@ -217,8 +220,8 @@ before removing it.
   to cut, matching `version` in `[workspace.package]` of `Cargo.toml`. The
   `.p5p` is a local dry-run package built from the current `HEAD`, not a
   release asset, and a previous release's `.p5p` does not test the code about
-  to be tagged. The tagged CI run still builds the release assets and runs the
-  live-image test.
+  to be tagged. After tagging, the illumos release assets are built by hand
+  from the tag (`docs/release-process.md`); the live-image test does not run.
 
   It imports the `.p5p` and a dummy owned by the running user with the
   checkout's `target/release/pkg6repo`, runs `target/release/pkg6depotd` in
@@ -226,5 +229,6 @@ before removing it.
   (`pkg image-create -U`). Steps 1 and 4 to 6 above apply, in that user
   image; the negative control and the config switches do not, as there is
   no SMF instance. It is a fast gate before the tag, not a replacement for the
-  live-image test above, which still runs on the Solstice release VM. See
-  `docs/release-process.md`, Pre-tag pkg5 gate.
+  live-image test above, which needs a disposable VM and does not run while the
+  illumos release job is suspended. See `docs/release-process.md`, Pre-tag pkg5
+  gate.

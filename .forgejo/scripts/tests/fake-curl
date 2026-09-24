@@ -5,6 +5,13 @@
 #   blobs/<id>/<name>
 # Supports exactly the calls upload-release-assets.sh makes.
 #
+# Each call's credential kind goes to $FAKE_FORGE_STATE/auth and its full argv
+# to $FAKE_FORGE_STATE/argv, so tests can prove which credentials were used and
+# that no secret was passed on the command line. Kinds: token (-H), basic (a
+# "user" line on a --config - stdin config equal to $FAKE_FORGE_BASIC), basic-
+# wrong (any other user line), env-leak (RELEASE_BASIC_* reached curl's
+# environment), none. The Basic value itself is compared, never stored.
+#
 # Fault injection: FAKE_FORGE_FAIL_LIST=1 makes the release list return 500.
 # Every call is counted in $FAKE_FORGE_STATE/calls; after 200 calls the fake
 # answers the release list with [] so a retry-forever bug ends the loop and
@@ -17,13 +24,30 @@ state="${FAKE_FORGE_STATE:?}"
 calls=$(( $(cat "${state}/calls" 2>/dev/null || echo 0) + 1 ))
 echo "${calls}" > "${state}/calls"
 
-out=/dev/stdout write_out="" method=GET data="" attach="" url="" fail_http=0
+printf '%s\n' "$*" >> "${state}/argv"
+out=/dev/stdout write_out="" method=GET data="" attach="" url="" fail_http=0 auth=none
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     -w) write_out="$2"; shift 2 ;;
     -X) method="$2"; shift 2 ;;
-    -H) shift 2 ;;
+    -H) case "$2" in "Authorization: token "?*) auth=token ;; esac; shift 2 ;;
+    --config|-K)
+      [ "$2" = - ] || { echo "fake-curl: only --config - is faked" >&2; exit 2; }
+      while IFS= read -r line; do
+        case "${line}" in
+          'user = "'*'"')
+            quoted="${line#user = \"}"; quoted="${quoted%\"}" cred="" i=0
+            while [ "${i}" -lt "${#quoted}" ]; do
+              c="${quoted:i:1}"
+              if [ "${c}" = '\' ]; then i=$((i + 1)); c="${quoted:i:1}"; fi
+              cred="${cred}${c}" i=$((i + 1))
+            done
+            if [ "${cred}" = "${FAKE_FORGE_BASIC-}" ]; then auth=basic; else auth=basic-wrong; fi
+            ;;
+        esac
+      done
+      shift 2 ;;
     -d) data="$2"; shift 2 ;;
     -F) attach="${2#attachment=@}"; shift 2 ;;
     -*f*) fail_http=1; shift ;;
@@ -32,6 +56,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -n "${RELEASE_BASIC_USER+x}${RELEASE_BASIC_PASSWORD+x}" ]; then auth=env-leak; fi
+echo "${auth}" >> "${state}/auth"
 status=200
 body=""
 rel="${state}/releases.json"

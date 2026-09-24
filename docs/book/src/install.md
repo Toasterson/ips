@@ -2,8 +2,9 @@
 
 ## The package
 
-The illumos release job builds `pkg://openindiana.org/package/pkg6/depotd`.
-It is published as the release asset
+A maintainer builds `pkg://openindiana.org/package/pkg6/depotd` by hand on
+illumos for each release; the Solstice illumos release job is suspended
+(ADR-011, `docs/release-process.md`). It is published as the release asset
 `pkg6depotd-<version>-illumos-x86_64.p5p`.
 
 | Delivered | Path |

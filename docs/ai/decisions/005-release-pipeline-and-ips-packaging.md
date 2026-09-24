@@ -4,6 +4,10 @@
 **Status:** Proposed
 **Issues:** [#41](https://code.aopc.cloud/OpenIndiana/ips/issues/41), [#25](https://code.aopc.cloud/OpenIndiana/ips/issues/25), [#8](https://code.aopc.cloud/OpenIndiana/ips/issues/8)
 
+> *Amended 2026-09-24:* the illumos release job is suspended and illumos
+> assets are built by hand; see
+> [ADR-011](011-manual-illumos-release-assets.md).
+
 > Numbered 005 because ADR 004 is claimed by the parallel v1 atomic-import
 > work. Renumber on merge if that changes.
 

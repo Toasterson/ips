@@ -178,9 +178,21 @@ check_not "archive checkout (no .git) fails" bash -c "cd '${tmp}' && GITHUB_REF=
 # --- uploader: draft/prerelease/immutability against a fake Forgejo -----------
 mkdir -p "${tmp}/bin"
 ln -s "${tests}/fake-curl" "${tmp}/bin/curl"
+# illumos assets are built by hand and need a builder/gate statement.
+printf 'illumos-x86_64: built on oibuild by hand.\nLive-image install/upgrade/uninstall/SMF: NOT RUN.\n' > "${tmp}/notes.md"
 upload() { # upload STATE TAG PLATFORM DIR
+  # UPLOAD_NOTES, UPLOAD_AUTH, UPLOAD_BASIC_USER, UPLOAD_BASIC_PASSWORD,
+  # UPLOAD_FORGEJO_TOKEN and UPLOAD_RELEASE_TOKEN override the defaults: CI's
+  # FORGEJO_TOKEN, and notes for illumos only. FAKE_FORGE_BASIC tells
+  # fake-curl the expected pair.
+  local notes="${UPLOAD_NOTES-}"
+  [ "$3" != illumos-x86_64 ] || notes="${UPLOAD_NOTES-${tmp}/notes.md}"
   (cd "${ci}" && PATH="${tmp}/bin:${PATH}" FAKE_FORGE_STATE="$1" GITHUB_REF="refs/tags/$2" \
-    FORGE_BASE=http://forge.invalid REPO_OWNER=o REPO_NAME=r FORGEJO_TOKEN=x RELEASE_TOKEN='' \
+    FORGE_BASE=http://forge.invalid REPO_OWNER=o REPO_NAME=r \
+    FORGEJO_TOKEN="${UPLOAD_FORGEJO_TOKEN-x}" RELEASE_TOKEN="${UPLOAD_RELEASE_TOKEN-}" \
+    RELEASE_AUTH="${UPLOAD_AUTH-}" \
+    RELEASE_BASIC_USER="${UPLOAD_BASIC_USER-}" RELEASE_BASIC_PASSWORD="${UPLOAD_BASIC_PASSWORD-}" \
+    FAKE_FORGE_BASIC="${UPLOAD_BASIC_USER-}:${UPLOAD_BASIC_PASSWORD-}" RELEASE_NOTES_FILE="${notes}" \
     "${scripts}/upload-release-assets.sh" "$3" "$4")
 }
 make_assets() { # make_assets TAG PLATFORM DIR [salt]
@@ -206,6 +218,20 @@ make_assets v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos2" rebuilt
 check_not "different bytes are refused" upload "${st}" v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos2"
 check_not "nothing was ever deleted" grep -q DELETE "${st}/log"
 eq "uploads happened once per asset" "$(grep -c '^POST' "${st}/log")" 8
+# The notes reach the draft body before the first illumos asset, and the
+# publish comes last.
+notes_at=$(grep -n '^PATCH .*"body"' "${st}/log" | head -1 | cut -d: -f1)
+first_illumos=$(grep -n '^POST .*illumos' "${st}/log" | head -1 | cut -d: -f1)
+publish_at=$(grep -n '^PATCH .*"draft": false' "${st}/log" | head -1 | cut -d: -f1)
+check "notes written before the first illumos asset" [ -n "${notes_at}" ] && [ "${notes_at}" -lt "${first_illumos}" ]
+last_asset=$(grep -n '^POST' "${st}/log" | tail -1 | cut -d: -f1)
+check "pre-release published after the last asset" [ "${publish_at}" -gt "${last_asset}" ]
+case "$(rel_field "${st}" v1.2.3-rc.2 .body)" in
+  *"Built from tag"*"Live-image install/upgrade/uninstall/SMF: NOT RUN."*) ok ;;
+  *) bad "release body lacks the generated text and the notes" ;;
+esac
+eq "notes written once" "$(grep -c '^PATCH .*"body"' "${st}/log")" 1
+eq "CI path authenticated with the token on every call" "$(sort -u "${st}/auth")" token
 
 # A stable tag on the same commit: complete, but never leaves draft.
 (cd "${work}" && git tag v1.2.4 "${tagged}" && git push -q origin v1.2.4)
@@ -217,7 +243,8 @@ check "stable: linux uploads" upload "${st}" v1.2.4 linux-x86_64 "${tmp}/ga/linu
 check "stable: illumos uploads" upload "${st}" v1.2.4 illumos-x86_64 "${tmp}/ga/illumos"
 eq "stable is not a prerelease" "$(rel_field "${st}" v1.2.4 .prerelease)" false
 eq "complete stable release stays draft" "$(rel_field "${st}" v1.2.4 .draft)" true
-check_not "stable was never patched" grep -q PATCH "${st}/log"
+check_not "stable was never taken out of draft" grep -q '^PATCH .*"draft"' "${st}/log"
+eq "stable: only the notes were patched" "$(grep -c '^PATCH' "${st}/log")" 1
 
 # A release someone already published by hand gets no new assets.
 st="${tmp}/forge-published"
@@ -270,6 +297,141 @@ jq 'map(.draft = true)' "${st}/releases.json" > "${st}/r" && mv "${st}/r" "${st}
 check "finalize: identical re-run" upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux"
 eq "re-run publishes the complete pre-release" "$(rel_field "${st}" v1.2.3-rc.2 .draft)" false
 eq "re-run uploaded nothing new" "$(grep -c '^POST' "${st}/log")" 8
+
+with_env() { # with_env VAR=VALUE... -- CMD...: run CMD (a function too) with VARs set
+  (while [ "$1" != -- ]; do export "$1"; shift; done; shift; "$@")
+}
+
+# illumos assets are refused without a builder/gate statement; nothing moves.
+st="${tmp}/forge-nonotes"
+mkdir -p "${st}"
+check_not "illumos without RELEASE_NOTES_FILE is refused" with_env UPLOAD_NOTES='' -- upload "${st}" v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos"
+check_not "empty notes file is refused" with_env UPLOAD_NOTES=/dev/null -- upload "${st}" v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos"
+check_not "no release call without notes" [ -s "${st}/calls" ]
+
+# The notes must give the live-image/SMF gate result, NOT RUN or passed, on
+# a line naming both; checked before any call.
+st="${tmp}/forge-gate"
+mkdir -p "${st}"
+gate_notes() { printf '### illumos-x86_64\n\nBuilt by hand on oibuild.\n%s\n' "$1" > "${tmp}/gate-notes.md"; }
+gate_notes 'Release build: passed.'
+check_not "notes without a live-image/SMF line are refused" with_env UPLOAD_NOTES="${tmp}/gate-notes.md" -- upload "${st}" v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos"
+gate_notes 'Live-image install/upgrade/uninstall/SMF: see below.'
+check_not "a live-image/SMF line without a verdict is refused" with_env UPLOAD_NOTES="${tmp}/gate-notes.md" -- upload "${st}" v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos"
+gate_notes 'Live-image install and SMF: passed, NOT RUN on upgrade.'
+check_not "a line with both verdicts is refused" with_env UPLOAD_NOTES="${tmp}/gate-notes.md" -- upload "${st}" v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos"
+gate_notes "$(printf '| live-image SMF | passed |\n| live-image SMF | **NOT RUN** |')"
+check_not "conflicting verdict lines are refused" with_env UPLOAD_NOTES="${tmp}/gate-notes.md" -- upload "${st}" v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos"
+check_not "no release call without a gate verdict" [ -s "${st}/calls" ]
+# The v1.0.0-rc.11 wording, the documented table row and a passed run are
+# accepted, and the upload goes through.
+n=0
+for line in 'Live-image IPS install, upgrade, uninstall and SMF lifecycle validation: NOT RUN in the oibuild validation' \
+  '| live-image install/upgrade/uninstall/SMF (`test-ips-package.sh`) | **NOT RUN** |' \
+  'Live-image install/upgrade/uninstall/SMF on a disposable VM: passed.'; do
+  n=$((n + 1))
+  st="${tmp}/forge-gate-ok${n}"
+  mkdir -p "${st}"
+  gate_notes "${line}"
+  check "gate verdict accepted: ${line}" with_env UPLOAD_NOTES="${tmp}/gate-notes.md" -- upload "${st}" v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos"
+done
+
+# A published release's body is never changed: the script reaches the
+# release (list, then its assets) and stops without a write.
+st="${tmp}/forge-pub-body"
+mkdir -p "${st}"
+echo '[{"id":1,"tag_name":"v1.2.3-rc.2","draft":false,"prerelease":true,"body":"old","assets":[]}]' > "${st}/releases.json"
+check_not "notes on a published release are refused" upload "${st}" v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos"
+check "published: release list requested" grep -qF -- "-X GET http://forge.invalid/api/v1/repos/o/r/releases?limit=50&page=1" "${st}/argv"
+check "published: its assets requested" grep -qF -- "-X GET http://forge.invalid/api/v1/repos/o/r/releases/1/assets" "${st}/argv"
+check_not "published: no PATCH or POST sent" grep -qE -- '-X (PATCH|POST) ' "${st}/argv"
+check_not "published: nothing written" [ -e "${st}/log" ]
+eq "published body untouched" "$(rel_field "${st}" v1.2.3-rc.2 .body)" old
+
+# A draft that an earlier CI run created still says "Built by Solstice CI".
+# Its body is replaced with the generated text plus the disclosure before
+# the first illumos asset goes up.
+st="${tmp}/forge-ci-body"
+mkdir -p "${st}"
+echo '[{"id":1,"tag_name":"v1.2.3-rc.2","draft":true,"prerelease":true,"body":"Built by Solstice CI from tag `v1.2.3-rc.2`.","assets":[]}]' > "${st}/releases.json"
+check "CI draft body: illumos uploads" upload "${st}" v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos"
+notes_at=$(grep -n '^PATCH .*"body"' "${st}/log" | head -1 | cut -d: -f1)
+first_illumos=$(grep -n '^POST .*illumos' "${st}/log" | head -1 | cut -d: -f1)
+check "CI draft body: replaced before the first illumos asset" [ -n "${notes_at}" ] && [ -n "${first_illumos}" ] && [ "${notes_at}" -lt "${first_illumos}" ]
+case "$(rel_field "${st}" v1.2.3-rc.2 .body)" in
+  *"Built by Solstice CI"*) bad "CI draft body: stale Solstice claim kept" ;;
+  *"Built from tag"*"Live-image install/upgrade/uninstall/SMF: NOT RUN."*) ok ;;
+  *) bad "CI draft body: lacks the generated text and the disclosure" ;;
+esac
+eq "CI draft body: still a draft" "$(rel_field "${st}" v1.2.3-rc.2 .draft)" true
+
+# Local maintainer path: HTTP Basic from two environment variables. It wins
+# over a stray FORGEJO_TOKEN; the pair reaches curl only on stdin, never its
+# argv, its environment, the output or a file. The password carries the two
+# characters curl config strings escape. Everything stays in ${tmp}.
+basic_pw='s3cr3t-"basic\pw'
+st="${tmp}/forge-basic"
+mkdir -p "${st}"
+out=$(UPLOAD_BASIC_USER=maint UPLOAD_BASIC_PASSWORD="${basic_pw}" UPLOAD_FORGEJO_TOKEN=stray-token \
+  upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux" 2>&1) && ok || bad "basic: linux upload failed: ${out}"
+out2=$(UPLOAD_BASIC_USER=maint UPLOAD_BASIC_PASSWORD="${basic_pw}" UPLOAD_FORGEJO_TOKEN=stray-token \
+  upload "${st}" v1.2.3-rc.2 illumos-x86_64 "${tmp}/rc/illumos" 2>&1) && ok || bad "basic: illumos upload failed: ${out2}"
+out="${out}${out2}"
+eq "basic: pre-release published" "$(rel_field "${st}" v1.2.3-rc.2 .draft)" false
+eq "basic: every call sent the pair on stdin, none leaked into curl's env" "$(sort -u "${st}/auth")" basic
+check_not "basic: password not on curl argv" grep -qF "s3cr3t" "${st}/argv"
+check_not "basic: stray token not used" grep -qF stray-token "${st}/argv"
+check_not "basic: password in no state file" grep -rqF "s3cr3t" "${st}"
+case "${out}" in *s3cr3t*) bad "basic: password printed" ;; *) ok ;; esac
+if command -v base64 >/dev/null; then
+  b64=$(printf 'maint:%s' "${basic_pw}" | base64 | tr -d '\n')
+  check_not "basic: base64 credentials not on curl argv" grep -qF "${b64}" "${st}/argv"
+  case "${out}" in *"${b64}"*) bad "basic: base64 credentials printed" ;; *) ok ;; esac
+fi
+st="${tmp}/forge-basic-half"
+mkdir -p "${st}"
+check_not "basic: user without password is refused" with_env UPLOAD_BASIC_USER=maint -- upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux"
+check_not "basic: password without user is refused" with_env UPLOAD_BASIC_PASSWORD=pw -- upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux"
+check_not "basic: user with ':' is refused" with_env UPLOAD_BASIC_USER=a:b UPLOAD_BASIC_PASSWORD=pw -- upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux"
+check_not "basic: no call with an incomplete pair" [ -s "${st}/calls" ]
+
+# RELEASE_AUTH=basic (the documented maintainer command): a pair that came
+# out empty, for example two failed 1Password reads, is refused even with a
+# token in the environment; it never falls back.
+st="${tmp}/forge-auth-basic-empty"
+mkdir -p "${st}"
+check_not "RELEASE_AUTH=basic: empty pair refused despite FORGEJO_TOKEN" with_env UPLOAD_AUTH=basic UPLOAD_FORGEJO_TOKEN=stray UPLOAD_RELEASE_TOKEN=stray -- upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux"
+check_not "RELEASE_AUTH=basic: user alone refused" with_env UPLOAD_AUTH=basic UPLOAD_BASIC_USER=maint -- upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux"
+check_not "RELEASE_AUTH=basic: password alone refused" with_env UPLOAD_AUTH=basic UPLOAD_BASIC_PASSWORD=pw -- upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux"
+check_not "RELEASE_AUTH: unknown mode refused" with_env UPLOAD_AUTH=token -- upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux"
+check_not "RELEASE_AUTH=basic: no call when refused" [ -s "${st}/calls" ]
+# With a pair it uploads with Basic only. Spies on dirname, git and jq, the
+# script's first child processes, prove none inherits the pair.
+mkdir -p "${tmp}/spy"
+for t in dirname git jq; do
+  printf '#!/bin/sh
+if [ -n "${RELEASE_BASIC_USER+x}${RELEASE_BASIC_PASSWORD+x}" ]; then echo %s >> "${FAKE_FORGE_STATE}/child-leak"; fi
+exec %s "$@"
+' \
+    "${t}" "$(command -v "${t}")" > "${tmp}/spy/${t}"
+  chmod +x "${tmp}/spy/${t}"
+done
+st="${tmp}/forge-auth-basic"
+mkdir -p "${st}"
+check "RELEASE_AUTH=basic: pair uploads" with_env PATH="${tmp}/spy:${PATH}" UPLOAD_AUTH=basic UPLOAD_BASIC_USER=maint UPLOAD_BASIC_PASSWORD=pw UPLOAD_FORGEJO_TOKEN=stray-token -- upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux"
+eq "RELEASE_AUTH=basic: Basic on every call" "$(sort -u "${st}/auth")" basic
+check_not "RELEASE_AUTH=basic: stray token not used" grep -qF stray-token "${st}/argv"
+check_not "RELEASE_AUTH=basic: no child inherited the pair" [ -e "${st}/child-leak" ]
+
+# The repository secret RELEASE_TOKEN alone still works, and no credential
+# at all is refused.
+st="${tmp}/forge-release-token"
+mkdir -p "${st}"
+check "RELEASE_TOKEN alone uploads" with_env UPLOAD_FORGEJO_TOKEN='' UPLOAD_RELEASE_TOKEN=rt -- upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux"
+eq "RELEASE_TOKEN: token auth" "$(sort -u "${st}/auth")" token
+st="${tmp}/forge-nocreds"
+mkdir -p "${st}"
+check_not "no credentials are refused" with_env UPLOAD_FORGEJO_TOKEN='' -- upload "${st}" v1.2.3-rc.2 linux-x86_64 "${tmp}/rc/linux"
 
 # Provenance is a function of source and toolchain only: two runs with
 # different runner context write identical bytes, and the second run's
@@ -998,7 +1160,9 @@ awk '
   /run: \|$/ { want = 1; next }
   want { if ($1 != "set" || $2 != "-euo" || $3 != "pipefail") { print "step at line " NR " lacks set -euo pipefail"; bad = 1 }; want = 0 }
   END { exit bad }' "${wf_all}" >"${tmp}/strict.out" && ok || bad "$(cat "${tmp}/strict.out")"
-for job in linux illumos; do
+# The illumos release job is suspended until its throwaway-VM gate is
+# repaired; illumos assets are built by hand (docs/release-process.md).
+for job in linux; do
   body=$(awk -v j="  ${job}:" '$0 == j { f = 1; next } f && /^  [a-z]/ { f = 0 } f' "${wf}")
   for gate in release_verify_commit release_verify_cargo_version test-release-scripts.sh \
     "cargo nextest list --workspace --release --locked --message-format json" release_check_test_inventory \

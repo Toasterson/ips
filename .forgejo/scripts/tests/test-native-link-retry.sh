@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Self-tests for the illumos "Build test targets" steps in ci.yml and
-# release.yml: the step scripts are cut out of the workflows verbatim and
-# run against a fake cargo and stub host tools. Offline; runs on macOS
-# (bash 3.2), Linux and illumos.
+# Self-tests for the illumos "Build (test targets)" step in ci.yml: the step
+# script is cut out of the workflow verbatim and run against a fake cargo and
+# stub host tools. release.yml has no illumos job while it is suspended
+# (ADR-011); its manual build (docs/release-process.md) does its own -j2
+# build and -j1 retry by hand. Offline; runs on macOS (bash 3.2), Linux and
+# illumos.
 #
 # Usage: .forgejo/scripts/tests/test-native-link-retry.sh
 set -euo pipefail
@@ -62,12 +64,9 @@ run_step() {
   calls=$(tr '\n' ' ' < "${dir}/calls" 2>/dev/null || true)
 }
 
-for wf in ci release; do
+for wf in ci; do
   file="${root}/.forgejo/workflows/${wf}.yml"
-  case "${wf}" in
-    ci) step="Build (test targets)" ;;
-    release) step="Build test targets (release profile)" ;;
-  esac
+  step="Build (test targets)"
   script="${tmp}/${wf}.sh"
   step_script "${file}" illumos "${step}" > "${script}"
   if [ ! -s "${script}" ]; then bad "${wf}: step '${step}' not found"; continue; fi
@@ -98,9 +97,9 @@ for wf in ci release; do
   has "${wf} compile error: diagnostic kept" "${out}" "mismatched types"
 done
 
-# Every cargo build in the illumos jobs is capped; only the test-target
-# steps retry, and nothing else uses -j1.
-for wf in ci release; do
+# Every cargo build in the ci.yml illumos job is capped; only the
+# test-target step retries, and nothing else uses -j1.
+for wf in ci; do
   body=$(awk '$0 == "  illumos:" { f = 1; next } f && /^  [a-z]/ { f = 0 } f' \
     "${root}/.forgejo/workflows/${wf}.yml" | grep -v '^ *#')
   uncapped=$(printf '%s\n' "${body}" | grep -E 'cargo (build|test) ' | grep -vE ' -j[12]( |;|$)' || true)
@@ -109,6 +108,13 @@ for wf in ci release; do
   eq "${wf}: nextest build capped" "$(printf '%s\n' "${body}" | grep -c 'export CARGO_BUILD_JOBS=2')" \
     "$(printf '%s\n' "${body}" | grep -cE 'cargo nextest (list|run)')"
 done
+
+# If release.yml gets its illumos job back, this test must cover it again.
+if grep -q '^  illumos:$' "${root}/.forgejo/workflows/release.yml"; then
+  bad "release.yml has an illumos job again; add it to the loops above"
+else
+  ok
+fi
 
 echo "native link retry tests: ${pass} passed, ${failed} failed"
 [ "${failed}" -eq 0 ]
