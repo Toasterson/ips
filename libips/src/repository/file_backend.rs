@@ -2491,10 +2491,12 @@ impl FileBackend {
 
     /// Rebuild catalog for a publisher using a batched algorithm.
     ///
-    /// Batching currently streams package processing while accumulating in-memory
-    /// structures for the three catalog parts and optional update log, and emits
-    /// progress spans per batch. Future work may flush partial structures to
-    /// disk, but the public API is stable.
+    /// Each package version is read and its base, dependency and summary
+    /// entries are streamed straight into the part files, so memory is
+    /// bounded by one manifest's catalog metadata plus the package list,
+    /// however many versions a stem has. The optional update log is still
+    /// accumulated in memory for the whole publisher. `opts.batch_size`
+    /// only controls progress reporting.
     pub fn rebuild_catalog_batched(
         &self,
         publisher: &str,
@@ -2546,16 +2548,18 @@ impl FileBackend {
             publisher,
         )?;
 
-        // Per-stem buffers — flushed when the stem changes. Bounded by the
-        // number of versions a single stem can have (small).
+        // Each version's entries are serialized to the part files as soon as
+        // its manifest has been read; only the current stem's name survives
+        // between versions. One stem can have thousands of versions with
+        // ~8,000 depend actions each (userland-incorporation), so buffering
+        // even a single stem's versions is not memory-bounded.
         let mut current_stem: Option<String> = None;
-        let mut base_buf: Vec<crate::repository::catalog::PackageVersionEntry> = Vec::new();
-        let mut dep_buf: Vec<crate::repository::catalog::PackageVersionEntry> = Vec::new();
-        let mut summary_buf: Vec<crate::repository::catalog::PackageVersionEntry> = Vec::new();
 
         // Update log accumulator — only populated when create_update_log
-        // is set. The current callers in this codebase pass false; if
-        // that ever changes for a large publisher, this will need its own
+        // is set. It keeps every version's dependency and summary actions
+        // until the end, so that path is NOT memory-bounded. Generation
+        // rebuilds and the other callers in this codebase pass false; a
+        // large publisher needing an update log would need its own
         // streaming writer.
         let mut update_entries: Vec<(
             Fmri,
@@ -2567,37 +2571,23 @@ impl FileBackend {
         let mut package_count: usize = 0;
         let mut package_version_count: usize = 0;
 
-        // Process each package in deterministic order (by FMRI string).
-        // FMRI-string sort clusters all versions of a stem consecutively,
-        // which is what the per-stem flush below relies on.
-        packages.sort_by(|a, b| a.fmri.to_string().cmp(&b.fmri.to_string()));
+        // Process packages in the parts' canonical order: stems ascending by
+        // bytes (the BTreeMap key order write_catalog_part produces and pkg5
+        // re-serializes when checking signatures), with all versions of a
+        // stem consecutive. Sorting whole FMRI strings is wrong for prefix
+        // stems: `pkg://p/foo/bar@1` sorts before `pkg://p/foo@1` because
+        // '/' < '@', while the part keys must go `foo` < `foo/bar`. The
+        // streaming writer rejects out-of-order stems.
+        packages.sort_by_cached_key(|p| {
+            let version = p.fmri.version();
+            (
+                p.fmri.stem().to_string(),
+                super::catalog::catalog_version_key(&version),
+            )
+        });
 
         let mut processed_in_batch = 0usize;
         let mut batch_no = 0usize;
-
-        let flush_stem =
-            |stem: &str,
-             base_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
-             dep_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
-             summary_buf: &mut Vec<crate::repository::catalog::PackageVersionEntry>,
-             base_writer: &mut catalog_writer::StreamingCatalogPartWriter,
-             dep_writer: &mut catalog_writer::StreamingCatalogPartWriter,
-             summary_writer: &mut catalog_writer::StreamingCatalogPartWriter|
-             -> Result<()> {
-                if !base_buf.is_empty() {
-                    base_writer.write_stem(stem, base_buf)?;
-                    base_buf.clear();
-                }
-                if !dep_buf.is_empty() {
-                    dep_writer.write_stem(stem, dep_buf)?;
-                    dep_buf.clear();
-                }
-                if !summary_buf.is_empty() {
-                    summary_writer.write_stem(stem, summary_buf)?;
-                    summary_buf.clear();
-                }
-                Ok(())
-            };
 
         for package in packages {
             let fmri = &package.fmri;
@@ -2671,153 +2661,74 @@ impl FileBackend {
             };
 
             tracing::trace!(fmri = %fmri, "catalog rebuild: extracting metadata");
-            let (attributes, dependencies) = Manifest::extract_metadata(&manifest_path)?;
-            let manifest = {
-                let mut m = Manifest::new();
-                m.attributes = attributes;
-                m.dependencies = dependencies;
-                m
-            };
+            let (attributes, dependencies) = Manifest::extract_metadata(&manifest_path)
+                .map_err(|e| RepositoryError::Other(format!(
+                    "cannot extract catalog metadata from {} ({}): {}; restore or republish this manifest",
+                    fmri,
+                    manifest_path.display(),
+                    e
+                )))?;
 
-            // Flush previous stem's accumulated version entries when we
-            // hit a new stem. base/dep/summary are written in lockstep so
-            // their stem keys stay in the same order on disk.
-            let stem_owned = stem.to_string();
+            // Close the previous stem and open this one on all three parts.
+            // They advance in lockstep so their stem keys share one order;
+            // a stem with no entries in a part is omitted from that part.
             if current_stem.as_deref() != Some(stem) {
-                if let Some(prev) = current_stem.take() {
-                    flush_stem(
-                        &prev,
-                        &mut base_buf,
-                        &mut dep_buf,
-                        &mut summary_buf,
-                        &mut base_writer,
-                        &mut dep_writer,
-                        &mut summary_writer,
-                    )?;
+                let parts = [&mut base_writer, &mut dep_writer, &mut summary_writer];
+                let had_stem = current_stem.is_some();
+                for part in parts {
+                    if had_stem {
+                        part.end_stem()?;
+                    }
+                    part.begin_stem(stem)?;
                 }
-                current_stem = Some(stem_owned.clone());
+                current_stem = Some(stem.to_string());
                 package_count += 1;
             }
 
             // Base entry: just version + signature.
-            base_buf.push(crate::repository::catalog::PackageVersionEntry {
-                version: fmri.version().to_string(),
+            base_writer.write_entry(&crate::repository::catalog::PackageVersionEntry {
+                version: version.clone(),
                 actions: None,
                 signature_sha1: Some(signature.clone()),
-            });
+            })?;
 
             tracing::trace!(
                 fmri = %fmri,
-                deps = manifest.dependencies.len(),
-                attrs = manifest.attributes.len(),
+                deps = dependencies.len(),
+                attrs = attributes.len(),
                 "catalog rebuild: extracting catalog actions"
             );
 
-            // Extract dependency actions
-            let mut dependency_actions = Vec::new();
-            for dep in &manifest.dependencies {
-                if let Some(dep_fmri) = &dep.fmri {
-                    let mut action =
-                        format!("depend fmri={} type={}", dep_fmri, dep.dependency_type);
-
-                    // Add predicate for conditional dependencies
-                    if let Some(predicate_fmri) = &dep.predicate {
-                        action.push_str(&format!(" predicate={}", predicate_fmri));
-                    }
-
-                    // Add root-image if present
-                    if !dep.root_image.is_empty() {
-                        action.push_str(&format!(" root-image={}", dep.root_image));
-                    }
-
-                    // Add any optional properties
-                    for prop in &dep.optional {
-                        action.push_str(&format!(
-                            " {}={}",
-                            prop.key,
-                            quote_action_value(&prop.value)
-                        ));
-                    }
-
-                    // Add facets
-                    for (facet_name, facet) in &dep.facets {
-                        action.push_str(&format!(
-                            " facet.{}={}",
-                            facet_name,
-                            quote_action_value(&facet.value)
-                        ));
-                    }
-
-                    // Add any optional properties
-                    for prop in &dep.optional {
-                        action.push_str(&format!(
-                            " {}={}",
-                            prop.key,
-                            quote_action_value(&prop.value)
-                        ));
-                    }
-
-                    // Add facets
-                    for (facet_name, facet) in &dep.facets {
-                        action.push_str(&format!(
-                            " facet.{}={}",
-                            facet_name,
-                            quote_action_value(&facet.value)
-                        ));
-                    }
-
-                    dependency_actions.push(action);
-                }
-            }
-
-            // Set actions that belong in the dependency part (variants, facets,
-            // pkg.depend.*, pkg.obsolete, pkg.renamed), as pkg5 groups them
-            for attr in &manifest.attributes {
-                if is_dependency_part_attr(&attr.key) {
-                    let values_str = attr
-                        .values
+            // Dependency part: depend actions, then the set actions pkg5
+            // groups with them (variants, facets, pkg.depend.*,
+            // pkg.obsolete, pkg.renamed).
+            let dependency_actions: Vec<String> = dependencies
+                .iter()
+                .filter_map(catalog_depend_action)
+                .chain(
+                    attributes
                         .iter()
-                        .map(|s| quote_action_value(s))
-                        .collect::<Vec<_>>()
-                        .join(" value=");
-                    dependency_actions.push(format!("set name={} value={}", attr.key, values_str));
-                }
-            }
+                        .filter(|attr| is_dependency_part_attr(&attr.key))
+                        .map(catalog_set_action),
+                )
+                .collect();
+            drop(dependencies);
+            let dependency_actions =
+                write_actions_entry(&mut dep_writer, &version, dependency_actions)?;
 
-            // Add to dependency entries if there are dependency actions
-            if !dependency_actions.is_empty() {
-                dep_buf.push(crate::repository::catalog::PackageVersionEntry {
-                    version: fmri.version().to_string(),
-                    actions: Some(dependency_actions.clone()),
-                    signature_sha1: None,
-                });
-            }
-
-            // Extract summary actions (all remaining set actions)
-            let mut summary_actions = Vec::new();
-            for attr in &manifest.attributes {
-                if !is_dependency_part_attr(&attr.key)
-                    && attr.key != "pkg.fmri"
-                    && attr.key != "fmri"
-                {
-                    let values_str = attr
-                        .values
-                        .iter()
-                        .map(|s| quote_action_value(s))
-                        .collect::<Vec<_>>()
-                        .join(" value=");
-                    summary_actions.push(format!("set name={} value={}", attr.key, values_str));
-                }
-            }
-
-            // Add to summary entries if there are summary actions
-            if !summary_actions.is_empty() {
-                summary_buf.push(crate::repository::catalog::PackageVersionEntry {
-                    version: fmri.version().to_string(),
-                    actions: Some(summary_actions.clone()),
-                    signature_sha1: None,
-                });
-            }
+            // Summary part: all remaining set actions.
+            let summary_actions: Vec<String> = attributes
+                .iter()
+                .filter(|attr| {
+                    !is_dependency_part_attr(&attr.key)
+                        && attr.key != "pkg.fmri"
+                        && attr.key != "fmri"
+                })
+                .map(catalog_set_action)
+                .collect();
+            drop(attributes);
+            let summary_actions =
+                write_actions_entry(&mut summary_writer, &version, summary_actions)?;
 
             // Prepare update entry if needed
             if create_update_log {
@@ -2856,18 +2767,11 @@ impl FileBackend {
             }
         }
 
-        // Flush the last stem's buffers, if any, then close out the part
-        // streams.
-        if let Some(prev) = current_stem.take() {
-            flush_stem(
-                &prev,
-                &mut base_buf,
-                &mut dep_buf,
-                &mut summary_buf,
-                &mut base_writer,
-                &mut dep_writer,
-                &mut summary_writer,
-            )?;
+        // Close the last stem, if any, then close out the part streams.
+        if current_stem.is_some() {
+            for part in [&mut base_writer, &mut dep_writer, &mut summary_writer] {
+                part.end_stem()?;
+            }
         }
 
         debug!("Writing base part to: {}", base_part_path.display());
@@ -3451,6 +3355,67 @@ fn write_file_atomically(path: &Path, content: &[u8]) -> Result<()> {
         to: path.to_path_buf(),
         source: e,
     })
+}
+
+/// Render a `depend` action as rebuild stores it in catalog.dependency.C.
+/// Dependencies without an fmri are left out of the catalog.
+fn catalog_depend_action(dep: &crate::actions::Dependency) -> Option<String> {
+    use std::fmt::Write as _;
+
+    let dep_fmri = dep.fmri.as_ref()?;
+    let mut action = format!("depend fmri={} type={}", dep_fmri, dep.dependency_type);
+    if let Some(predicate_fmri) = &dep.predicate {
+        let _ = write!(action, " predicate={}", predicate_fmri);
+    }
+    if !dep.root_image.is_empty() {
+        let _ = write!(action, " root-image={}", dep.root_image);
+    }
+    for prop in &dep.optional {
+        let _ = write!(action, " {}={}", prop.key, quote_action_value(&prop.value));
+    }
+    // Facets live in a HashMap; sort them so rebuilds are reproducible.
+    let mut facets: Vec<_> = dep.facets.iter().collect();
+    facets.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    for (facet_name, facet) in facets {
+        let _ = write!(
+            action,
+            " facet.{}={}",
+            facet_name,
+            quote_action_value(&facet.value)
+        );
+    }
+    Some(action)
+}
+
+/// Render a `set` attribute as a catalog action string.
+fn catalog_set_action(attr: &crate::actions::Attr) -> String {
+    let values_str = attr
+        .values
+        .iter()
+        .map(|s| quote_action_value(s))
+        .collect::<Vec<_>>()
+        .join(" value=");
+    format!("set name={} value={}", attr.key, values_str)
+}
+
+/// Stream one version's action entry into a dependency/summary part, unless
+/// it has no actions (pkg5 lists only versions with actions there). Hands
+/// the actions back so the update log can reuse them without a clone.
+fn write_actions_entry(
+    writer: &mut catalog_writer::StreamingCatalogPartWriter,
+    version: &str,
+    actions: Vec<String>,
+) -> Result<Vec<String>> {
+    if actions.is_empty() {
+        return Ok(actions);
+    }
+    let entry = crate::repository::catalog::PackageVersionEntry {
+        version: version.to_string(),
+        actions: Some(actions),
+        signature_sha1: None,
+    };
+    writer.write_entry(&entry)?;
+    Ok(entry.actions.unwrap_or_default())
 }
 
 fn is_dependency_part_attr(key: &str) -> bool {

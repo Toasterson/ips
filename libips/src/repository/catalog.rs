@@ -14,6 +14,13 @@ use std::time::SystemTime;
 use thiserror::Error;
 
 use crate::fmri::Fmri;
+use crate::repository::retention::version::Pkg5Version;
+
+/// Sort pkg5 catalog versions numerically, with stable text ordering for
+/// versions that cannot be parsed by the pkg5 comparator.
+pub(crate) fn catalog_version_key(text: &str) -> (Option<Pkg5Version>, String) {
+    (Pkg5Version::parse(text), text.to_string())
+}
 
 /// Errors that can occur in catalog operations
 #[derive(Debug, Error, Diagnostic)]
@@ -336,7 +343,7 @@ impl CatalogPart {
         });
 
         // Sort versions (should be in ascending order)
-        stem_versions.sort_by(|a, b| a.version.cmp(&b.version));
+        stem_versions.sort_by_cached_key(|entry| catalog_version_key(&entry.version));
     }
 
     /// Save a catalog part to a file
@@ -808,6 +815,20 @@ impl CatalogManager {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn catalog_part_orders_versions_like_pkg5() {
+        let mut part = CatalogPart::new();
+        for version in ["1.10", "1.9", "1.2"] {
+            let fmri = Fmri::parse(&format!("pkg://test/foo@{version}")).unwrap();
+            part.add_package("test", &fmri, None, None);
+        }
+        let versions: Vec<&str> = part.packages["test"]["foo"]
+            .iter()
+            .map(|entry| entry.version.as_str())
+            .collect();
+        assert_eq!(versions, ["1.2", "1.9", "1.10"]);
+    }
 
     #[test]
     fn test_load_sample_catalog() {
