@@ -300,7 +300,8 @@ pub use generation::{
 };
 pub use obsoleted::{ObsoletedExport, ObsoletedPackageManager, ObsoletedPackageMetadata};
 pub use pkg5_import::{
-    DEFAULT_MAX_ARCHIVE_ENTRIES, Pkg5ImportError, Pkg5ImportOptions, Pkg5ImportOutcome, import_pkg5,
+    DEFAULT_MAX_ARCHIVE_ENTRIES, DEFAULT_MAX_IMPORT_MANIFEST_BYTES, DEFAULT_MAX_IMPORT_MANIFESTS,
+    Pkg5ImportError, Pkg5ImportOptions, Pkg5ImportOutcome, import_pkg5,
 };
 pub use progress::{NoopProgressReporter, ProgressInfo, ProgressReporter};
 pub use rest_backend::RestBackend;

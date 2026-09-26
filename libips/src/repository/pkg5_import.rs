@@ -12,18 +12,35 @@
 //!    a receipt for it, the import is a no-op (this covers a crash between
 //!    commit and acknowledgement).
 //! 2. Every manifest is parsed and every referenced payload is located and
-//!    verified against its digest before anything is written.
+//!    verified against its digest before anything is written. The batch is
+//!    held in memory, so a source whose selected publishers exceed the
+//!    manifest count or byte budget is rejected as a whole before payloads
+//!    or a catalog generation are written.
 //! 3. A package whose exact FMRI is already published is skipped if the
 //!    manifest bytes are identical, and rejects the whole batch otherwise.
+//!    A skipped package's payload that has gone missing from the repository
+//!    is verified and restored from the source, so retrying a directory
+//!    import repairs the repository ([`Pkg5ImportOutcome::Repaired`], no new
+//!    generation) and is a no-op once it is whole. Retrying an archive whose
+//!    receipt is current returns `AlreadyImported` without looking at
+//!    payloads.
 //! 4. New payloads go to the shared content-addressed store (unreferenced
 //!    until the switch), manifests and rebuilt catalogs to a staged
 //!    generation, which is then published atomically together with the
-//!    import receipt.
+//!    import receipt. Restored payloads go to the same shared store, but
+//!    published manifests already reference them, so they are served as
+//!    soon as they are written, before any metadata switch.
 //!
 //! Manifests are stored byte-for-byte as pkg5 published them and payloads
 //! under the names the manifests reference, so pkg5 clients see exactly the
 //! upstream content. `pkg.obsolete` and `pkg.renamed` packages are published
 //! like any other package, as in pkg5.
+//!
+//! Besides version 4 repositories and archives, a directory may be a flat
+//! version 3 repository (top-level `cfg_cache`, `pkg/` and `file/`) of the
+//! one publisher its `cfg_cache` names. Its manifests often lack `pkg.fmri`,
+//! so each is identified by its strictly decoded `pkg/<stem>/<version>`
+//! path; a `pkg.fmri` it does have must agree with that path.
 
 use super::generation::{
     FailPoint, GenerationError, GenerationReason, GenerationStore, ImportReceipt,
@@ -39,6 +56,7 @@ use sha2::Digest as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -50,7 +68,9 @@ pub enum Pkg5ImportError {
     #[error("{path} is not a pkg5 repository or .p5p archive")]
     #[diagnostic(
         code(ips::pkg5_import::not_pkg5),
-        help("Pass a .p5p archive, or a directory containing pkg5.repository and publisher/")
+        help(
+            "Pass a .p5p archive, a directory containing pkg5.repository and publisher/, or a flat version 3 repository directory containing cfg_cache, pkg/ and file/"
+        )
     )]
     NotPkg5Source { path: PathBuf },
 
@@ -69,6 +89,25 @@ pub enum Pkg5ImportError {
         )
     )]
     ArchiveLimit { path: PathBuf, detail: String },
+
+    #[error(
+        "{path}: the selected publishers hold at least {manifests} manifest file(s) and {bytes} manifest byte(s), above the in-memory import budget of {max_manifests} manifest files and {max_bytes} manifest bytes; no packages were imported"
+    )]
+    #[diagnostic(
+        code(ips::pkg5_import::manifest_budget),
+        help(
+            "One import holds selected manifests in memory. This batch exceeded the limit before any packages were imported. Use a bounded historical importer or a narrower --publisher selection, or raise the limits explicitly with pkg6repo import-pkg5 --max-import-manifests / --max-import-manifest-bytes after provisioning memory for the whole batch"
+        )
+    )]
+    ManifestBudget {
+        path: PathBuf,
+        /// Manifest files seen when the batch was rejected.
+        manifests: u64,
+        /// Manifest bytes seen (including the file that crossed the limit).
+        bytes: u64,
+        max_manifests: u64,
+        max_bytes: u64,
+    },
 
     #[error("I/O error at {path}: {source}")]
     #[diagnostic(
@@ -193,12 +232,24 @@ pub struct Pkg5ImportOptions {
     /// protected snapshot and no imported package needs them. `None`
     /// excludes nothing.
     pub policy: Option<Policy>,
+    /// Most manifest files the selected publishers may hold. The whole batch
+    /// is held in memory, so a larger source is rejected before publication.
+    pub max_import_manifests: NonZeroU64,
+    /// Most manifest bytes, summed over the selected publishers.
+    pub max_import_manifest_bytes: NonZeroU64,
 }
 
 /// Default for [`Pkg5ImportOptions::max_archive_entries`]: far above a full
 /// OpenIndiana publication (payload files plus manifests and directories),
 /// low enough to stop an archive of empty entries exhausting inodes.
 pub const DEFAULT_MAX_ARCHIVE_ENTRIES: u64 = 20_000_000;
+
+/// Default for [`Pkg5ImportOptions::max_import_manifests`]: a CI run's
+/// publication, not a historical repository.
+pub const DEFAULT_MAX_IMPORT_MANIFESTS: NonZeroU64 = NonZeroU64::new(10_000).unwrap();
+
+/// Default for [`Pkg5ImportOptions::max_import_manifest_bytes`]: 64 MiB.
+pub const DEFAULT_MAX_IMPORT_MANIFEST_BYTES: NonZeroU64 = NonZeroU64::new(64 << 20).unwrap();
 
 impl Default for Pkg5ImportOptions {
     fn default() -> Self {
@@ -210,6 +261,8 @@ impl Default for Pkg5ImportOptions {
             max_archive_entries: DEFAULT_MAX_ARCHIVE_ENTRIES,
             max_extract_bytes: None,
             policy: None,
+            max_import_manifests: DEFAULT_MAX_IMPORT_MANIFESTS,
+            max_import_manifest_bytes: DEFAULT_MAX_IMPORT_MANIFEST_BYTES,
         }
     }
 }
@@ -223,6 +276,14 @@ pub enum Pkg5ImportOutcome {
     AlreadyImported(ImportReceipt),
     /// A directory source contained only already-published packages.
     NothingToImport { skipped: Vec<String> },
+    /// A directory source contained only already-published packages, some
+    /// of whose payloads were missing from the repository and have been
+    /// restored from the source. No generation was published.
+    Repaired {
+        /// Digests of the restored payloads.
+        repaired: Vec<String>,
+        skipped: Vec<String>,
+    },
 }
 
 /// A package read from the source.
@@ -310,14 +371,11 @@ fn import_locked(
     } else {
         source.to_path_buf()
     };
-    validate_source_tree(&root)?;
-    if !root.join("pkg5.repository").is_file() && !root.join("pkg5.index.0.gz").is_file() {
-        return Err(Pkg5ImportError::NotPkg5Source {
-            path: source.to_path_buf(),
-        });
-    }
-
-    let available = list_publishers(&root)?;
+    let layout = detect_layout(&root, source, is_archive)?;
+    let available = match &layout {
+        SourceLayout::V4 => list_publishers(&root)?,
+        SourceLayout::V3 { publisher } => vec![publisher.clone()],
+    };
     let selected: Vec<String> = match &options.publishers {
         Some(sel) => {
             for p in sel {
@@ -342,16 +400,33 @@ fn import_locked(
         });
     }
 
-    // Phase 1: read and validate every manifest.
+    // Phase 1: read and validate every manifest, within one memory budget
+    // shared by all selected publishers.
     let mut problems = Vec::new();
     let mut packages = Vec::new();
+    let mut budget = ManifestBudget::new(
+        source,
+        options.max_import_manifests,
+        options.max_import_manifest_bytes,
+    );
     for publisher in &selected {
-        scan_publisher(&root, publisher, &mut packages, &mut problems)?;
+        scan_publisher(
+            &root,
+            &layout,
+            publisher,
+            &mut budget,
+            &mut packages,
+            &mut problems,
+        )?;
     }
 
     // Phase 2: classify against the published generation and within the batch.
+    // An already-published package keeps only the payloads it references
+    // that have gone missing from the repository, not its manifest.
+    let repo = store.repo().to_path_buf();
     let mut conflicts = Vec::new();
     let mut skipped = Vec::new();
+    let mut wanted: BTreeMap<(String, String), WantedPayload> = BTreeMap::new();
     let mut to_add: Vec<SourcePackage> = Vec::new();
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     for pkg in packages {
@@ -368,7 +443,17 @@ fn import_locked(
         let published =
             store.current_manifest_path(&pkg.publisher, pkg.fmri.stem(), &pkg.fmri.version());
         match fs::read(&published) {
-            Ok(existing) if existing == pkg.manifest => skipped.push(key),
+            Ok(existing) if existing == pkg.manifest => {
+                for (hash, pinned) in pkg.payloads {
+                    if stored_payload(&repo, &pkg.publisher, &hash).is_some() {
+                        continue;
+                    }
+                    let w = wanted.entry((pkg.publisher.clone(), hash)).or_default();
+                    w.published.push(key.clone());
+                    w.pinned.extend(pinned);
+                }
+                skipped.push(key);
+            }
             Ok(_) => conflicts.push(format!(
                 "{}: a different manifest is already published",
                 key
@@ -405,34 +490,42 @@ fn import_locked(
 
     // Phase 3: every payload a new manifest references must be servable to
     // pkg5 clients, from a verified copy already in the repository or from
-    // the source.
-    let repo = store.repo().to_path_buf();
-    let mut wanted: BTreeMap<(String, String), (Vec<String>, BTreeSet<CompressedDigest>)> =
-        BTreeMap::new();
-    for pkg in &to_add {
+    // the source. A payload of a published package that has gone missing
+    // from the repository is restored from the source, so retrying an
+    // import repairs it. Copies only published packages reference were
+    // verified when they were published and are not re-hashed.
+    for (idx, pkg) in to_add.iter().enumerate() {
         for (hash, pinned) in &pkg.payloads {
-            let (fmris, all_pinned) = wanted
+            let w = wanted
                 .entry((pkg.publisher.clone(), hash.clone()))
                 .or_default();
-            fmris.push(pkg.fmri.to_string());
-            all_pinned.extend(pinned.iter().cloned());
+            w.new.push(idx);
+            w.pinned.extend(pinned.iter().cloned());
         }
     }
     let mut moves: Vec<PayloadMove> = Vec::new();
-    for ((publisher, hash), (fmris, pinned)) in &wanted {
-        let who = fmris.join(", ");
-        // The copy the depot serves this publisher: its own, else the
-        // global one. An existing copy is reused only if pkg5 clients can
-        // install it, and is never replaced: pkg6 packages may reference
-        // the same digest in their own encoding (LZ4), and a publisher copy
-        // added next to a global one would change what they are served.
-        let dest = FileBackend::construct_file_path_with_publisher(&repo, publisher, hash);
-        let global = FileBackend::construct_file_path(&repo, hash);
-        if let Some(stored) = [&dest, &global].into_iter().find(|p| p.exists()) {
-            if let Err(why) = check_wire_payload(stored, hash, pinned) {
+    let mut repaired: Vec<String> = Vec::new();
+    for ((publisher, hash), w) in &wanted {
+        let who = || {
+            w.new
+                .iter()
+                .map(|&i| to_add[i].fmri.to_string())
+                .chain(w.published.iter().cloned())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let pinned = &w.pinned;
+        // An existing copy is reused only if pkg5 clients can install it,
+        // and is never replaced: pkg6 packages may reference the same digest
+        // in their own encoding (LZ4), and a publisher copy added next to a
+        // global one would change what they are served.
+        if let Some(stored) = stored_payload(&repo, publisher, hash) {
+            if !w.new.is_empty()
+                && let Err(why) = check_wire_payload(&stored, hash, pinned)
+            {
                 problems.push(format!(
                     "{}: payload {}: the repository already stores it at {} in a form pkg5 clients cannot install ({}); it is never replaced",
-                    who,
+                    who(),
                     hash,
                     stored.display(),
                     why
@@ -440,32 +533,54 @@ fn import_locked(
             }
             continue;
         }
-        match find_source_payload(&root, publisher, hash) {
+        let dest = FileBackend::construct_file_path_with_publisher(&repo, publisher, hash);
+        match find_source_payload(&layout.file_dir(&root, publisher), hash) {
             Some(src) => match verify_source_payload(&src, hash, pinned) {
-                Ok(encoding) => moves.push(PayloadMove {
-                    src,
-                    dest,
-                    hash: hash.clone(),
-                    pinned: pinned.clone(),
-                    encoding,
-                }),
-                Err(why) => problems.push(format!("{}: payload {}: {}", who, hash, why)),
+                Ok(encoding) => {
+                    if !w.published.is_empty() {
+                        repaired.push(hash.clone());
+                    }
+                    moves.push(PayloadMove {
+                        src,
+                        dest,
+                        hash: hash.clone(),
+                        pinned: pinned.clone(),
+                        encoding,
+                    })
+                }
+                Err(why) => problems.push(format!("{}: payload {}: {}", who(), hash, why)),
             },
             None => problems.push(format!(
                 "{}: payload {} is missing from the source and the repository",
-                who, hash
+                who(),
+                hash
             )),
         }
     }
+    drop(wanted);
     if !problems.is_empty() {
         return Err(Pkg5ImportError::InvalidSource { problems });
     }
-
-    if to_add.is_empty() && archive_sha256.is_none() {
-        return Ok(Pkg5ImportOutcome::NothingToImport { skipped });
+    if !repaired.is_empty() {
+        warn!(
+            count = repaired.len(),
+            "restoring payloads of published packages missing from the repository"
+        );
     }
 
-    // Phase 4: store payloads. They stay unreferenced until the switch.
+    if to_add.is_empty() && archive_sha256.is_none() {
+        if repaired.is_empty() {
+            return Ok(Pkg5ImportOutcome::NothingToImport { skipped });
+        }
+        // Only published packages were missing payloads: restoring them
+        // changes no metadata, so no generation is staged.
+        store_payloads(&moves, is_archive)?;
+        info!(count = repaired.len(), "restored missing payloads");
+        return Ok(Pkg5ImportOutcome::Repaired { repaired, skipped });
+    }
+
+    // Phase 4: store payloads. New ones stay unreferenced until the switch;
+    // restored ones are served as soon as they are written.
     store_payloads(&moves, is_archive)?;
     if options.fail_point == Some(FailPoint::AfterPayloads) {
         return Err(GenerationError::InjectedFailure(FailPoint::AfterPayloads).into());
@@ -544,6 +659,7 @@ fn import_locked(
         generation = %receipt.generation,
         added = receipt.added.len(),
         skipped = receipt.skipped.len(),
+        repaired = repaired.len(),
         "pkg5 import committed"
     );
     Ok(Pkg5ImportOutcome::Committed(receipt))
@@ -730,18 +846,240 @@ fn extract_archive(
     Ok(())
 }
 
-/// Reject symlinks and special files anywhere below the source's
-/// `publisher/` tree. A linked directory would make the importer read
-/// manifests or move payloads belonging to another tree.
-fn validate_source_tree(root: &Path) -> Result<()> {
-    let base = root.join("publisher");
-    if fs::symlink_metadata(&base).is_ok_and(|m| !m.is_dir()) {
+/// On-disk layout of a pkg5 source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SourceLayout {
+    /// pkg5 repository version 4 (and `.p5p`): `pkg5.repository` or
+    /// `pkg5.index.0.gz`, and `publisher/<prefix>/{pkg,file}`.
+    V4,
+    /// Flat pkg5 repository version 3: top-level `cfg_cache`, `pkg/` and
+    /// `file/` of the single publisher `cfg_cache` configures. Its
+    /// manifests may lack `pkg.fmri`; their identity is their path.
+    V3 { publisher: String },
+}
+
+impl SourceLayout {
+    fn publisher_dir(&self, root: &Path, publisher: &str) -> PathBuf {
+        match self {
+            SourceLayout::V4 => root.join("publisher").join(publisher),
+            SourceLayout::V3 { .. } => root.to_path_buf(),
+        }
+    }
+
+    fn pkg_dir(&self, root: &Path, publisher: &str) -> PathBuf {
+        self.publisher_dir(root, publisher).join("pkg")
+    }
+
+    fn file_dir(&self, root: &Path, publisher: &str) -> PathBuf {
+        self.publisher_dir(root, publisher).join("file")
+    }
+}
+
+const V4_MARKERS: [&str; 3] = ["pkg5.repository", "pkg5.index.0.gz", "publisher"];
+const V3_MARKERS: [&str; 3] = ["cfg_cache", "pkg", "file"];
+
+/// Recognize the source's layout and reject symlinks and special files in
+/// the trees it will read, before reading any of them. A tree with both
+/// version 3 and version 4 entries is ambiguous and rejected. Archives are
+/// always version 4.
+fn detect_layout(root: &Path, source: &Path, is_archive: bool) -> Result<SourceLayout> {
+    let present = |names: [&'static str; 3]| -> Vec<&'static str> {
+        names
+            .into_iter()
+            .filter(|n| fs::symlink_metadata(root.join(n)).is_ok())
+            .collect()
+    };
+    let not_pkg5 = || Pkg5ImportError::NotPkg5Source {
+        path: source.to_path_buf(),
+    };
+    let v4 = present(V4_MARKERS);
+    let v3 = present(V3_MARKERS);
+    if !v4.is_empty() && !v3.is_empty() {
         return Err(Pkg5ImportError::InvalidSource {
-            problems: vec!["publisher: not a directory".to_string()],
+            problems: vec![format!(
+                "mixed repository layout: version 3 entries ({}) next to version 4 entries ({}); import each layout from its own directory",
+                v3.join(", "),
+                v4.join(", ")
+            )],
         });
     }
+    if v3.is_empty() || is_archive {
+        let base = root.join("publisher");
+        if fs::symlink_metadata(&base).is_ok_and(|m| !m.is_dir()) {
+            return Err(Pkg5ImportError::InvalidSource {
+                problems: vec!["publisher: not a directory".to_string()],
+            });
+        }
+        reject_links_below(root, &base)?;
+        if !root.join("pkg5.repository").is_file() && !root.join("pkg5.index.0.gz").is_file() {
+            return Err(not_pkg5());
+        }
+        return Ok(SourceLayout::V4);
+    }
+
     let mut problems = Vec::new();
-    for entry in walkdir::WalkDir::new(&base).follow_links(false) {
+    let cfg = root.join("cfg_cache");
+    match fs::symlink_metadata(&cfg) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => problems.push("cfg_cache: not a regular file".to_string()),
+        Err(_) => problems.push("cfg_cache: missing".to_string()),
+    }
+    for dir in ["pkg", "file"] {
+        match fs::symlink_metadata(root.join(dir)) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => problems.push(format!("{}: not a directory", dir)),
+            Err(_) => problems.push(format!("{}: missing", dir)),
+        }
+    }
+    if !problems.is_empty() {
+        return Err(Pkg5ImportError::InvalidSource { problems });
+    }
+    reject_links_below(root, &root.join("pkg"))?;
+    reject_links_below(root, &root.join("file"))?;
+    let publisher =
+        v3_publisher(&fs::read(&cfg).at(&cfg)?).map_err(|why| Pkg5ImportError::InvalidSource {
+            problems: vec![format!("cfg_cache: {}", why)],
+        })?;
+    Ok(SourceLayout::V3 { publisher })
+}
+
+/// The publisher prefix of a version 3 `cfg_cache` (a Python ConfigParser
+/// file): exactly one `prefix` in exactly one `[publisher]` section, a valid
+/// publisher name.
+fn v3_publisher(cfg: &[u8]) -> std::result::Result<String, String> {
+    let text = std::str::from_utf8(cfg).map_err(|_| "not UTF-8".to_string())?;
+    let mut section: Option<&str> = None;
+    let mut publisher_sections = 0;
+    let mut prefixes = Vec::new();
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('[') {
+            let name = name
+                .strip_suffix(']')
+                .ok_or_else(|| format!("line {}: malformed section header", n + 1))?;
+            if name == "publisher" {
+                publisher_sections += 1;
+            }
+            section = Some(name);
+            continue;
+        }
+        if section != Some("publisher") {
+            continue;
+        }
+        // ConfigParser reads an indented line as the continuation of the
+        // previous value.
+        if raw.starts_with(char::is_whitespace) {
+            return Err(format!(
+                "line {}: continuation lines are not supported in [publisher]",
+                n + 1
+            ));
+        }
+        let (key, value) = line
+            .find([':', '='])
+            .map(|i| (&line[..i], &line[i + 1..]))
+            .ok_or_else(|| format!("line {}: expected key = value", n + 1))?;
+        if key.trim().eq_ignore_ascii_case("prefix") {
+            prefixes.push(value.trim());
+        }
+    }
+    if publisher_sections != 1 {
+        return Err(format!(
+            "expected exactly one [publisher] section, found {}",
+            publisher_sections
+        ));
+    }
+    match prefixes.as_slice() {
+        [] => Err("[publisher] has no prefix".to_string()),
+        [p] if p.is_empty() || *p == "None" => Err("[publisher] prefix is not set".to_string()),
+        [p] if !super::generation::is_valid_publisher_name(p) => Err(format!(
+            "[publisher] prefix {:?} is not a valid publisher name",
+            p
+        )),
+        [p] => Ok(p.to_string()),
+        _ => Err("[publisher] sets prefix more than once".to_string()),
+    }
+}
+
+/// Decode one percent-encoded path component of a version 3 manifest path,
+/// as pkg5's `urllib.quote(s, "")` wrote it: every `%` starts a two-digit
+/// hex escape, `+` is a literal plus, and the result must be UTF-8 without
+/// control characters.
+fn decode_path_component(name: &std::ffi::OsStr) -> std::result::Result<String, String> {
+    let s = name
+        .to_str()
+        .ok_or_else(|| "name is not UTF-8".to_string())?;
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes
+                .get(i + 1..i + 3)
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or_else(|| "malformed percent escape".to_string())?;
+            out.push(u8::from_str_radix(hex, 16).expect("two hex digits"));
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let decoded = String::from_utf8(out).map_err(|_| "decodes to invalid UTF-8".to_string())?;
+    if decoded.chars().any(char::is_control) {
+        return Err("decodes to a name with control characters".to_string());
+    }
+    Ok(decoded)
+}
+
+/// The FMRI a version 3 manifest's path names: `pkg/<stem>/<version>`,
+/// both percent-encoded.
+fn v3_path_fmri(
+    publisher: &str,
+    stem_name: &std::ffi::OsStr,
+    version_name: &std::ffi::OsStr,
+) -> std::result::Result<Fmri, String> {
+    let stem = decode_path_component(stem_name).map_err(|e| format!("package directory: {}", e))?;
+    let version =
+        decode_path_component(version_name).map_err(|e| format!("version file name: {}", e))?;
+    // Only the ASCII characters pkg5 allows in package names, so the stem
+    // round-trips through FileBackend's path encoding unchanged.
+    let safe_segment = |c: &str| {
+        !matches!(c, "" | "." | "..")
+            && c.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+'))
+    };
+    if !stem.split('/').all(safe_segment) {
+        return Err(format!(
+            "package directory decodes to invalid name {:?}",
+            stem
+        ));
+    }
+    if version.is_empty() || version.contains(['/', '@']) {
+        return Err(format!(
+            "version file name decodes to invalid version {:?}",
+            version
+        ));
+    }
+    let parsed = crate::fmri::Version::parse(&version)
+        .map_err(|e| format!("invalid version {:?}: {}", version, e))?;
+    let fmri = Fmri::parse(&format!("pkg://{}/{}@{}", publisher, stem, version))
+        .map_err(|e| format!("invalid FMRI for {}@{}: {}", stem, version, e))?;
+    if fmri.stem() != stem || fmri.version.as_ref() != Some(&parsed) {
+        return Err(format!("{}@{} is not a valid FMRI", stem, version));
+    }
+    Ok(fmri)
+}
+
+/// Reject symlinks and special files anywhere below `base`. A linked
+/// directory would make the importer read manifests or move payloads
+/// belonging to another tree.
+fn reject_links_below(root: &Path, base: &Path) -> Result<()> {
+    let mut problems = Vec::new();
+    for entry in walkdir::WalkDir::new(base).follow_links(false) {
         let entry = match entry {
             Ok(e) => e,
             Err(e) if e.io_error().map(|io| io.kind()) == Some(io::ErrorKind::NotFound) => {
@@ -749,7 +1087,7 @@ fn validate_source_tree(root: &Path) -> Result<()> {
             }
             Err(e) => {
                 return Err(Pkg5ImportError::Io {
-                    path: base.clone(),
+                    path: base.to_path_buf(),
                     source: e.into(),
                 });
             }
@@ -801,13 +1139,90 @@ fn list_publishers(root: &Path) -> Result<Vec<String>> {
     Ok(publishers)
 }
 
+/// Bounds how many manifest files and bytes one import holds in memory.
+/// Every candidate manifest counts, before it is parsed, excluded or
+/// deduplicated, so the whole batch is rejected before its size matters.
+struct ManifestBudget<'a> {
+    source: &'a Path,
+    max_manifests: u64,
+    max_bytes: u64,
+    manifests: u64,
+    /// Always at most `max_bytes`.
+    bytes: u64,
+}
+
+impl<'a> ManifestBudget<'a> {
+    fn new(source: &'a Path, max_manifests: NonZeroU64, max_bytes: NonZeroU64) -> Self {
+        Self {
+            source,
+            max_manifests: max_manifests.get(),
+            max_bytes: max_bytes.get(),
+            manifests: 0,
+            bytes: 0,
+        }
+    }
+
+    fn exceeded(&self, bytes: u64) -> Pkg5ImportError {
+        Pkg5ImportError::ManifestBudget {
+            path: self.source.to_path_buf(),
+            manifests: self.manifests,
+            bytes,
+            max_manifests: self.max_manifests,
+            max_bytes: self.max_bytes,
+        }
+    }
+
+    /// Count one more manifest file.
+    fn count(&mut self) -> Result<()> {
+        self.manifests = self.manifests.checked_add(1).unwrap_or(u64::MAX);
+        if self.manifests > self.max_manifests {
+            return Err(self.exceeded(self.bytes));
+        }
+        Ok(())
+    }
+
+    /// Read a counted manifest if it fits the remaining bytes: its size is
+    /// checked before allocating, and the read stops one byte past the
+    /// remaining budget, so a file that grows after the size check is caught
+    /// without reading it whole.
+    fn read(&mut self, path: &Path) -> Result<Vec<u8>> {
+        let file = File::open(path).at(path)?;
+        let len = file.metadata().at(path)?.len();
+        self.read_from(file, len).at(path)?
+    }
+
+    /// Read `reader`, whose metadata claims `len` bytes. The outer result is
+    /// the I/O outcome, the inner one the budget's verdict.
+    fn read_from(&mut self, reader: impl Read, len: u64) -> io::Result<Result<Vec<u8>>> {
+        let remaining = self.max_bytes.saturating_sub(self.bytes);
+        if len > remaining {
+            return Ok(Err(self.exceeded(self.bytes.saturating_add(len))));
+        }
+        // len <= remaining <= max_bytes, which the caller chose to allow.
+        let mut buf = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+        reader
+            .take(remaining.saturating_add(1))
+            .read_to_end(&mut buf)?;
+        let n = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+        match self.bytes.checked_add(n).filter(|&b| b <= self.max_bytes) {
+            Some(total) => {
+                self.bytes = total;
+                Ok(Ok(buf))
+            }
+            None => Ok(Err(self.exceeded(self.bytes.saturating_add(n)))),
+        }
+    }
+}
+
 fn scan_publisher(
     root: &Path,
+    layout: &SourceLayout,
     publisher: &str,
+    budget: &mut ManifestBudget,
     packages: &mut Vec<SourcePackage>,
     problems: &mut Vec<String>,
 ) -> Result<()> {
-    let pkg_dir = root.join("publisher").join(publisher).join("pkg");
+    let pkg_dir = layout.pkg_dir(root, publisher);
     let stems = match fs::read_dir(&pkg_dir) {
         Ok(it) => it,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -821,6 +1236,9 @@ fn scan_publisher(
         let stem_path = stem.path();
         for ver in fs::read_dir(&stem_path).at(&stem_path)? {
             let ver = ver.at(&stem_path)?;
+            // Every entry counts, even one that is then reported as a
+            // problem: problems are held in memory too.
+            budget.count()?;
             let path = ver.path();
             let ft = ver.file_type().at(&stem_path)?;
             if !ft.is_file() {
@@ -830,19 +1248,34 @@ fn scan_publisher(
                 ));
                 continue;
             }
-            let bytes = fs::read(&path).at(&path)?;
-            match read_package(publisher, &bytes) {
+            let rel = || {
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string()
+            };
+            // A version 3 manifest is identified by its path.
+            let path_fmri = match layout {
+                SourceLayout::V4 => None,
+                SourceLayout::V3 { .. } => {
+                    match v3_path_fmri(publisher, &stem.file_name(), &ver.file_name()) {
+                        Ok(fmri) => Some(fmri),
+                        Err(why) => {
+                            problems.push(format!("{}: {}", rel(), why));
+                            continue;
+                        }
+                    }
+                }
+            };
+            let bytes = budget.read(&path)?;
+            match read_package(publisher, &bytes, path_fmri.as_ref()) {
                 Ok((fmri, payloads)) => packages.push(SourcePackage {
                     publisher: publisher.to_string(),
                     fmri,
                     manifest: bytes,
                     payloads,
                 }),
-                Err(why) => problems.push(format!(
-                    "{}: {}",
-                    path.strip_prefix(root).unwrap_or(&path).display(),
-                    why
-                )),
+                Err(why) => problems.push(format!("{}: {}", rel(), why)),
             }
         }
     }
@@ -850,42 +1283,78 @@ fn scan_publisher(
 }
 
 /// Parse a pkg5 manifest: its FMRI (qualified with `publisher`) and the
-/// digests of every payload it references.
-fn read_package(publisher: &str, bytes: &[u8]) -> std::result::Result<(Fmri, Payloads), String> {
+/// digests of every payload it references. `path_fmri` is the identity a
+/// version 3 manifest's path gives it: used when the manifest has no
+/// `pkg.fmri`, which must otherwise agree with it. Comments never identify
+/// a package.
+fn read_package(
+    publisher: &str,
+    bytes: &[u8],
+    path_fmri: Option<&Fmri>,
+) -> std::result::Result<(Fmri, Payloads), String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "manifest is not UTF-8".to_string())?;
     if text.trim_start().starts_with('{') {
         return Err("manifest is JSON, expected a pkg5 text manifest".to_string());
     }
-    let owned = text.to_string();
-    // The action parser panics on some malformed payload fields; contain it.
-    let manifest = std::panic::catch_unwind(move || Manifest::parse_string(owned))
-        .map_err(|_| "manifest could not be parsed".to_string())?
-        .map_err(|e| format!("manifest could not be parsed: {}", e))?;
+    // The grammar needs at least one action; a version 3 manifest may hold
+    // only its comment header.
+    let actionless = text.lines().all(|l| {
+        let l = l.trim_start();
+        l.is_empty() || l.starts_with('#')
+    });
+    // Its header is what makes it a manifest: an empty file is not one.
+    if path_fmri.is_some() && text.trim().is_empty() {
+        return Err("manifest is empty".to_string());
+    }
+    let manifest = if actionless {
+        Manifest::new()
+    } else {
+        let owned = text.to_string();
+        // The action parser panics on some malformed payload fields; contain it.
+        std::panic::catch_unwind(move || Manifest::parse_string(owned))
+            .map_err(|_| "manifest could not be parsed".to_string())?
+            .map_err(|e| format!("manifest could not be parsed: {}", e))?
+    };
 
-    let fmri_str = manifest
+    let explicit = manifest
         .attributes
         .iter()
         .find(|a| a.key == "pkg.fmri")
-        .and_then(|a| a.values.first())
-        .ok_or_else(|| "manifest has no pkg.fmri".to_string())?;
-    let mut fmri =
-        Fmri::parse(fmri_str).map_err(|e| format!("invalid pkg.fmri {}: {}", fmri_str, e))?;
-    if fmri.version.is_none() {
-        return Err(format!("pkg.fmri {} has no version", fmri_str));
-    }
-    // The stem and version each become one path component in the repository.
-    if matches!(fmri.stem(), "" | "." | "..") {
-        return Err(format!("pkg.fmri {} has an invalid package name", fmri_str));
-    }
-    match &fmri.publisher {
-        Some(p) if p != publisher => {
-            return Err(format!(
-                "pkg.fmri {} names publisher {} but is stored under {}",
-                fmri_str, p, publisher
-            ));
+        .and_then(|a| a.values.first());
+    let fmri = match (explicit, path_fmri) {
+        (Some(fmri_str), _) => {
+            let mut fmri = Fmri::parse(fmri_str)
+                .map_err(|e| format!("invalid pkg.fmri {}: {}", fmri_str, e))?;
+            if fmri.version.is_none() {
+                return Err(format!("pkg.fmri {} has no version", fmri_str));
+            }
+            // The stem and version each become one path component in the
+            // repository.
+            if matches!(fmri.stem(), "" | "." | "..") {
+                return Err(format!("pkg.fmri {} has an invalid package name", fmri_str));
+            }
+            match &fmri.publisher {
+                Some(p) if p != publisher => {
+                    return Err(format!(
+                        "pkg.fmri {} names publisher {} but is stored under {}",
+                        fmri_str, p, publisher
+                    ));
+                }
+                _ => fmri.publisher = Some(publisher.to_string()),
+            }
+            if let Some(by_path) = path_fmri
+                && (fmri.stem() != by_path.stem() || fmri.version != by_path.version)
+            {
+                return Err(format!(
+                    "pkg.fmri {} does not match the FMRI its path names, {}",
+                    fmri_str, by_path
+                ));
+            }
+            fmri
         }
-        _ => fmri.publisher = Some(publisher.to_string()),
-    }
+        (None, Some(by_path)) => by_path.clone(),
+        (None, None) => return Err("manifest has no pkg.fmri".to_string()),
+    };
 
     let mut payloads: Payloads = BTreeMap::new();
     let mut add = |h: &str, pinned: Vec<CompressedDigest>| -> std::result::Result<(), String> {
@@ -997,8 +1466,7 @@ fn is_payload_hash(h: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn find_source_payload(root: &Path, publisher: &str, hash: &str) -> Option<PathBuf> {
-    let file_dir = root.join("publisher").join(publisher).join("file");
+fn find_source_payload(file_dir: &Path, hash: &str) -> Option<PathBuf> {
     [
         file_dir.join(&hash[0..2]).join(hash),
         // pkg5's original V0 layout (file_layout/layout.py).
@@ -1177,6 +1645,29 @@ fn verify_source_payload(
     }
 }
 
+/// The copy of a payload the depot serves `publisher`: its own, else the
+/// global one.
+fn stored_payload(repo: &Path, publisher: &str, hash: &str) -> Option<PathBuf> {
+    [
+        FileBackend::construct_file_path_with_publisher(repo, publisher, hash),
+        FileBackend::construct_file_path(repo, hash),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
+}
+
+/// A payload of one publisher the import needs: referenced by a new
+/// package, or by a published one while missing from the repository.
+#[derive(Default)]
+struct WantedPayload {
+    /// Indices into the new packages referencing it.
+    new: Vec<usize>,
+    /// Published packages referencing it; only recorded while it is missing.
+    published: Vec<String>,
+    /// Compressed digests any of them pins.
+    pinned: BTreeSet<CompressedDigest>,
+}
+
 /// A verified source payload and where it goes.
 struct PayloadMove {
     src: PathBuf,
@@ -1293,7 +1784,7 @@ mod tests {
             h = HASH,
             h2 = "1".repeat(40)
         );
-        let (fmri, payloads) = read_package("test", manifest.as_bytes()).unwrap();
+        let (fmri, payloads) = read_package("test", manifest.as_bytes(), None).unwrap();
         assert_eq!(fmri.stem(), "web/hello");
         assert_eq!(fmri.publisher.as_deref(), Some("test"));
         assert_eq!(fmri.version(), "1.0,5.11-2024.0.0.0:20240101T000000Z");
@@ -1305,16 +1796,173 @@ mod tests {
     fn rejects_foreign_publisher_and_missing_version() {
         let m = "set name=pkg.fmri value=pkg://other/hello@1.0\n";
         assert!(
-            read_package("test", m.as_bytes())
+            read_package("test", m.as_bytes(), None)
                 .unwrap_err()
                 .contains("names publisher")
         );
         let m = "set name=pkg.fmri value=pkg://test/hello\n";
         assert!(
-            read_package("test", m.as_bytes())
+            read_package("test", m.as_bytes(), None)
                 .unwrap_err()
                 .contains("no version")
         );
+    }
+
+    #[test]
+    fn v3_path_names_the_package_and_comments_do_not() {
+        use std::ffi::OsStr;
+        let by_path = v3_path_fmri(
+            "opensolaris.org",
+            OsStr::new("library%2Fc++"),
+            OsStr::new("0.5.11%2C5.11-0.111%3A20090518T184618Z"),
+        )
+        .unwrap();
+        assert_eq!(by_path.stem(), "library/c++");
+        assert_eq!(by_path.version(), "0.5.11,5.11-0.111:20090518T184618Z");
+
+        let m =
+            "# pkg:/library/other@0.5.11,5.11-0.111\ndir path=usr group=sys mode=0755 owner=root\n";
+        let (fmri, _) = read_package("opensolaris.org", m.as_bytes(), Some(&by_path)).unwrap();
+        assert_eq!(fmri, by_path);
+        let m = "# pkg:/library/c++@0.5.11,5.11-0.111\n";
+        let (fmri, payloads) =
+            read_package("opensolaris.org", m.as_bytes(), Some(&by_path)).unwrap();
+        assert_eq!(fmri, by_path);
+        assert!(payloads.is_empty());
+        assert!(
+            read_package("opensolaris.org", m.as_bytes(), None)
+                .unwrap_err()
+                .contains("no pkg.fmri")
+        );
+        for m in ["", " \n\t\n"] {
+            assert!(
+                read_package("opensolaris.org", m.as_bytes(), Some(&by_path))
+                    .unwrap_err()
+                    .contains("manifest is empty"),
+                "{m:?}"
+            );
+        }
+
+        let m = "set name=pkg.fmri value=pkg:/library/c++@0.5.11,5.11-0.111:20090518T184618Z\n";
+        let (fmri, _) = read_package("opensolaris.org", m.as_bytes(), Some(&by_path)).unwrap();
+        assert_eq!(fmri, by_path);
+        for m in [
+            "set name=pkg.fmri value=pkg:/library/c++@0.5.11,5.11-0.111\n",
+            "set name=pkg.fmri value=pkg:/library/other@0.5.11,5.11-0.111:20090518T184618Z\n",
+        ] {
+            assert!(
+                read_package("opensolaris.org", m.as_bytes(), Some(&by_path))
+                    .unwrap_err()
+                    .contains("does not match"),
+                "{m}"
+            );
+        }
+    }
+
+    #[test]
+    fn v3_path_components_are_decoded_strictly() {
+        use std::ffi::OsStr;
+        let v = OsStr::new("1.0");
+        for stem in [
+            "bad%2",
+            "bad%zz",
+            "%FF",
+            "a%2F..%2Fb",
+            "%2Fabs",
+            "a%2F",
+            "ctl%0A",
+            "a%40b",
+            "a%5Cb",
+            "a%20b",
+            "a%25b",
+            "caf%C3%A9",
+            "a%2F.",
+            "a%2F%2Fb",
+            "a%3Ab",
+        ] {
+            assert!(v3_path_fmri("p", OsStr::new(stem), v).is_err(), "{stem}");
+        }
+        for stem in ["SUNWcs", "library%2Fc++", "a_b.c-d%2Fe+f"] {
+            assert!(v3_path_fmri("p", OsStr::new(stem), v).is_ok(), "{stem}");
+        }
+        for ver in ["", "1.0%3", "1.0%2Fx", "%00", "not a version"] {
+            assert!(
+                v3_path_fmri("p", OsStr::new("a"), OsStr::new(ver)).is_err(),
+                "{ver}"
+            );
+        }
+        assert_eq!(
+            decode_path_component(OsStr::new("a+b%20c")).unwrap(),
+            "a+b c"
+        );
+    }
+
+    #[test]
+    fn v3_cfg_cache_names_exactly_one_valid_publisher() {
+        let ok = "[publisher]\nalias = None\nprefix = opensolaris.org\n\n[repository]\nname = x\n";
+        assert_eq!(v3_publisher(ok.as_bytes()).unwrap(), "opensolaris.org");
+        for bad in [
+            "[repository]\nname = x\n",
+            "[publisher]\nalias = x\n",
+            "[publisher]\nprefix =\n",
+            "[publisher]\nprefix = None\n",
+            "[publisher]\nprefix = a\nprefix = b\n",
+            "[publisher]\nprefix = a\n[publisher]\nprefix = a\n",
+            "[publisher]\nprefix = ../x\n",
+            "[publisher]\nprefix = a\n  b\n",
+            "[publisher\nprefix = a\n",
+        ] {
+            assert!(v3_publisher(bad.as_bytes()).is_err(), "{bad}");
+        }
+        assert!(v3_publisher(b"[publisher]\nprefix = \xff\n").is_err());
+    }
+
+    #[test]
+    fn manifest_budget_catches_claims_and_growth_past_the_limit() {
+        let nz = |n| NonZeroU64::new(n).unwrap();
+        let src = Path::new("src");
+        let mut budget = ManifestBudget::new(src, nz(2), nz(10));
+        // Exactly the byte limit fits.
+        assert_eq!(
+            budget.read_from(&[1u8; 6][..], 6).unwrap().unwrap().len(),
+            6
+        );
+        assert_eq!(
+            budget.read_from(&[2u8; 4][..], 4).unwrap().unwrap().len(),
+            4
+        );
+        // Once full, even an empty claim that turns out to grow is caught
+        // after reading one byte past the limit, not the whole file.
+        let grown = [3u8; 1 << 20];
+        let mut reader = &grown[..];
+        match budget.read_from(&mut reader, 0).unwrap() {
+            Err(Pkg5ImportError::ManifestBudget {
+                bytes, max_bytes, ..
+            }) => assert_eq!((bytes, max_bytes), (11, 10)),
+            other => panic!("expected growth to be caught, got {other:?}"),
+        }
+        assert_eq!(reader.len(), grown.len() - 1);
+
+        // A claim over the remaining bytes is refused before reading.
+        let mut budget = ManifestBudget::new(src, nz(2), nz(10));
+        let mut reader = &grown[..];
+        match budget.read_from(&mut reader, u64::MAX).unwrap() {
+            Err(Pkg5ImportError::ManifestBudget { bytes, .. }) => assert_eq!(bytes, u64::MAX),
+            other => panic!("expected the claim to be refused, got {other:?}"),
+        }
+        assert_eq!(reader.len(), grown.len());
+
+        // The count limit admits exactly max_manifests files.
+        budget.count().unwrap();
+        budget.count().unwrap();
+        match budget.count() {
+            Err(Pkg5ImportError::ManifestBudget {
+                manifests,
+                max_manifests,
+                ..
+            }) => assert_eq!((manifests, max_manifests), (3, 2)),
+            other => panic!("expected the count limit, got {other:?}"),
+        }
     }
 
     #[test]

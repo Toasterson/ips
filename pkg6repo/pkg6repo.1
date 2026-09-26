@@ -3,7 +3,7 @@
 .\" License, v. 2.0. If a copy of the MPL was not distributed with this
 .\" file, You can obtain one at https://mozilla.org/MPL/2.0/.
 .\"
-.Dd September 23, 2026
+.Dd September 26, 2026
 .Dt PKG6REPO 1
 .Os
 .Sh NAME
@@ -73,6 +73,8 @@
 .Op Fl -adopt-existing
 .Op Fl -max-archive-entries Ar n
 .Op Fl -max-extract-bytes Ar n
+.Op Fl -max-import-manifests Ar n
+.Op Fl -max-import-manifest-bytes Ar n
 .Op Fl -policy Ar file
 .Nm
 .Cm retire
@@ -201,12 +203,35 @@ the result is published as a new generation.
 Import a pkg5 repository directory or
 .Pa .p5p
 archive.
+Version 4 directories have
+.Pa pkg5.repository
+and
+.Pa publisher/ ;
+flat version 3 directories have
+.Pa cfg_cache ,
+.Pa pkg/
+and
+.Pa file/ .
+The version 3 publisher is read from
+.Pa cfg_cache .
 All packages of the selected publishers, by default all in
 .Ar source ,
 become visible in one generation switch, or none do.
 Importing an archive that was already imported changes nothing.
+Retrying a directory source with already published packages can restore
+missing payloads without changing the catalog generation.
 An exact FMRI that is already published with a different manifest rejects
 the whole import.
+.Fl -max-import-manifests
+and
+.Fl -max-import-manifest-bytes
+limit the manifest files held in memory for one import, by default to
+10,000 files and 64 MiB.
+Both values must be positive.
+An import exceeding either limit fails without publishing its batch;
+raising a limit does not split the batch.
+Historical repositories too large for the available memory require a
+bounded import procedure.
 .Fl -adopt-existing
 converts a repository in the older layout; run it while readers are
 stopped.

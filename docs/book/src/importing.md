@@ -20,6 +20,8 @@ FMRIs.
 | `--adopt-existing` | Convert a populated repository from the pre-generation layout. See [Adopting an existing repository](#adopting-an-existing-repository). |
 | `--max-archive-entries` | Limit on files and directories unpacked. Default 20,000,000. |
 | `--max-extract-bytes` | Limit on unpacked file bytes. Default: the archive's own size. |
+| `--max-import-manifests` | Limit on selected manifest files held by one import. Default 10,000. |
+| `--max-import-manifest-bytes` | Limit on selected manifest bytes held by one import. Default 64 MiB. |
 
 ## All or nothing
 
@@ -29,11 +31,15 @@ visible in one step, or none does.
 1. **Validate.** The archive is unpacked in-process into a scratch
    directory. Only regular files and directories with plain relative paths
    are accepted: links, devices, absolute paths or `..` reject the
-   archive. For a directory source, any link or special file under
-   `publisher/` rejects it. Every manifest must parse and carry a
-   versioned `pkg.fmri` that matches its publisher directory. Every
+   archive. For a V4 directory source, any link or special file under
+   `publisher/` rejects it. A flat V3 source uses top-level `cfg_cache`,
+   `pkg/` and `file/`; links and special files there reject it. V4
+   manifests must carry a versioned `pkg.fmri`. V3 manifests may instead
+   take their identity from the encoded path and `cfg_cache` publisher;
+   an explicit `pkg.fmri` must match. Every
    payload referenced by `file`, `license` and `signature` actions must be
-   present and match its digest.
+   present and match its digest. The selected manifest count and bytes must
+   fit the import budget, or the whole batch is rejected.
 2. **Stage.** Payloads are stored under the names pkg5 clients request.
    Manifests, v1 catalog parts and SQLite shards for all publishers are
    written to `generations/.staging-<id>` and fsynced.
@@ -58,6 +64,7 @@ generation keeps a complete snapshot.
 | Same archive (same SHA-256) imported again | No-op, reported as already imported. Also covers a crash after the switch but before your CI saw success. |
 | Package whose exact FMRI is already published with identical bytes | Skipped; the rest of the batch is imported. |
 | Directory source whose packages are all published | No-op, "nothing to import". |
+| Directory retry finds a missing payload of an identical published package | Restores the verified blob and reports `Repaired`; no new metadata generation is made. |
 | Exact FMRI already published with **different** bytes | Whole batch rejected with `ips::pkg5_import::conflict`, listing every conflicting FMRI. Nothing is written. |
 | Same exact FMRI twice in one batch with different bytes | Rejected the same way. |
 | Another writer holds the lock | Waits for it. |
@@ -137,6 +144,10 @@ Inspect and move such directories by hand.
   still emits `hash`.
 - Each import rebuilds the catalogs of the changed publishers in full. It
   also costs one hard link per published manifest.
+- The current importer holds one whole batch in memory. The default
+  10,000-manifest and 64 MiB manifest-byte limits reject oversized sources
+  before package content is published. Explicit overrides are possible,
+  but neither limit splits a batch or guarantees a fixed peak RSS.
 - Payload temporaries `.<hash>.import` left by a crash inside
   `publisher/<pub>/file/` are harmless and never served, but are not
   cleaned up yet.

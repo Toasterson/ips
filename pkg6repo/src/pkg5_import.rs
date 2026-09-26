@@ -44,6 +44,16 @@ impl Pkg5Importer {
                     skipped.len()
                 );
             }
+            Pkg5ImportOutcome::Repaired { repaired, skipped } => {
+                info!(
+                    "All {} packages are already published; restored {} missing payload(s) from the source, no new generation",
+                    skipped.len(),
+                    repaired.len()
+                );
+                for h in repaired {
+                    info!("    {}", h);
+                }
+            }
         }
         Ok(outcome)
     }

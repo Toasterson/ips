@@ -377,6 +377,16 @@ enum Commands {
         #[clap(long)]
         max_extract_bytes: Option<u64>,
 
+        /// Most manifest files the selected publishers may hold. The whole
+        /// batch is held in memory; raise this only after provisioning
+        /// memory for it
+        #[clap(long, default_value_t = libips::repository::DEFAULT_MAX_IMPORT_MANIFESTS)]
+        max_import_manifests: std::num::NonZeroU64,
+
+        /// Most manifest bytes the selected publishers may hold in total
+        #[clap(long, default_value_t = libips::repository::DEFAULT_MAX_IMPORT_MANIFEST_BYTES)]
+        max_import_manifest_bytes: std::num::NonZeroU64,
+
         /// Policy whose `import { exclude ... }` and `keep` rules apply
         /// (default: <destination>/policy.kdl if present)
         #[clap(long)]
@@ -1001,6 +1011,8 @@ fn run() -> Result<()> {
             adopt_existing,
             max_archive_entries,
             max_extract_bytes,
+            max_import_manifests,
+            max_import_manifest_bytes,
             policy,
         } => {
             info!(
@@ -1016,6 +1028,8 @@ fn run() -> Result<()> {
                 adopt_existing: *adopt_existing,
                 max_archive_entries: *max_archive_entries,
                 max_extract_bytes: *max_extract_bytes,
+                max_import_manifests: *max_import_manifests,
+                max_import_manifest_bytes: *max_import_manifest_bytes,
                 policy: Some(policy),
                 ..Default::default()
             })?;

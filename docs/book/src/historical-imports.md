@@ -15,9 +15,13 @@ $ pkgrecv -s https://pkg.openindiana.org/hipster -d /var/tmp/hipster-2020.10.p5p
     -a -r 'pkg://openindiana.org/entire@2020.10'
 ```
 
-Alternatively, copy a pkg5 filesystem repository, the directory with
-`pkg5.repository` and `publisher/`, onto the depot host. Rsync it from a
-backup, or unpack it from ISO media.
+Alternatively, use a pkg5 filesystem repository. Version 4 repositories
+contain `pkg5.repository` and `publisher/`; flat version 3 repositories
+contain `cfg_cache`, `pkg/` and `file/`. The V3 publisher comes from
+`cfg_cache`, and source manifest bytes are preserved. The separate
+OpenSolaris `legacy` V3 repository has publisher `opensolaris.org`; it is
+not an OpenIndiana Hipster archive. The final repository must contain it
+as a separate publisher.
 
 ## Importing
 
@@ -29,9 +33,11 @@ backup, or unpack it from ISO media.
 
 The rules of [Atomic p5p imports](importing.md) apply unchanged:
 
-- **Batches are atomic.** Split a large history into several archives if
-  you want smaller steps. Each one is its own atomic batch and its own
-  receipt.
+- **Batches are atomic.** Each archive or directory import is one batch.
+  The current importer rejects a source above 10,000 selected manifests
+  or 64 MiB of selected manifest bytes by default. Override those limits
+  only after checking memory for the entire batch. A resumable bounded
+  historical importer is still required for whole large NFS sources.
 - **Order does not matter.** Importing older versions after newer ones is
   fine: the catalog holds every published version, and pkg5 version
   ordering picks the newest.
@@ -40,13 +46,23 @@ The rules of [Atomic p5p imports](importing.md) apply unchanged:
   whole archive. Such a difference is typically a republished manifest
   that kept its timestamp, and the conflict error names it.
 - **Directory sources are re-runnable.** A second run over the same
-  directory reports "nothing to import". Receipts are keyed by archive
-  SHA-256, so only `.p5p` sources get one.
+  directory reports "nothing to import" if it is complete, or restores
+  verified payloads missing from already published packages without a new
+  catalog generation. Receipts are keyed by archive SHA-256, so only
+  `.p5p` sources get one.
 - **Use `-p` to choose publishers.** Repeat it to import only some of
   the source's publishers.
-- **Raise the limits for very large sources.** Use
-  `--max-archive-entries` and `--max-extract-bytes`. Limit errors have
-  the code `ips::pkg5_import::archive_limit`.
+- **Inspect limit failures.** `--max-archive-entries` and
+  `--max-extract-bytes` bound archive unpacking. The independent
+  `--max-import-manifests` and `--max-import-manifest-bytes` bound selected
+  manifest input; exceeding them fails with
+  `ips::pkg5_import::manifest_budget` before package publication.
+
+Do not divide a source with import exclusions into independent batches and
+assume each batch's dependency check protects the whole history. A package
+in a later batch may require one excluded earlier. Exclusion preflight for
+bounded historical imports must cover the entire selected source before the
+first batch is published.
 
 ## Checking the result
 

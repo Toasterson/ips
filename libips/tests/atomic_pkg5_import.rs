@@ -9,7 +9,7 @@ use libips::repository::{
     FailPoint, FileBackend, GenerationError, GenerationStore, Pkg5ImportError, Pkg5ImportOptions,
     Pkg5ImportOutcome, ReadableRepository, RepositoryVersion, WritableRepository, import_pkg5,
 };
-use pkg5_fixture::{Pkg, gzip, make_p5p, sha1_hex, write_pkg5_repo};
+use pkg5_fixture::{Pkg, gzip, make_p5p, quote, sha1_hex, write_pkg5_repo};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -567,6 +567,539 @@ fn directory_source_and_generation_retention() {
         generation_dirs(&repo)
     );
     assert_eq!(catalog_entries(&repo, "beta").len(), 5);
+}
+
+#[test]
+fn directory_retry_restores_a_missing_payload_of_a_published_package() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    let pkgs = base_pkgs();
+    let src = write_pkg5_repo(&tmp.path().join("src"), &pkgs);
+    import(&repo, &src).unwrap();
+    let h = pkgs[0].payload_hashes()[0].clone();
+    let blob = FileBackend::construct_file_path_with_publisher(&repo, "alpha", &h);
+    let served = fs::read(&blob).unwrap();
+    let generation = current_generation(&repo);
+    let before = visible_state(&repo, &["alpha", "beta"]);
+
+    let generations = generation_dirs(&repo);
+
+    fs::remove_file(&blob).unwrap();
+    match import(&repo, &src).unwrap() {
+        Pkg5ImportOutcome::Repaired { repaired, skipped } => {
+            assert_eq!(repaired, vec![h.clone()]);
+            assert_eq!(skipped.len(), 3);
+        }
+        other => panic!("expected the missing payload to be restored, got {other:?}"),
+    }
+    assert_eq!(fs::read(&blob).unwrap(), served);
+    // Restoring a payload changes no metadata: no generation is staged.
+    assert_eq!(current_generation(&repo), generation);
+    assert_eq!(generation_dirs(&repo), generations);
+    assert_eq!(visible_state(&repo, &["alpha", "beta"]), before);
+
+    match import(&repo, &src).unwrap() {
+        Pkg5ImportOutcome::NothingToImport { skipped } => assert_eq!(skipped.len(), 3),
+        other => panic!("expected a whole repository to make the retry a no-op, got {other:?}"),
+    }
+    assert_eq!(current_generation(&repo), generation);
+    assert_eq!(generation_dirs(&repo), generations);
+    assert_eq!(fs::read(&blob).unwrap(), served);
+}
+
+#[test]
+fn directory_retry_fails_when_a_missing_payload_is_not_in_the_source() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    let pkgs = base_pkgs();
+    let src = write_pkg5_repo(&tmp.path().join("src"), &pkgs);
+    import(&repo, &src).unwrap();
+    let h = pkgs[0].payload_hashes()[0].clone();
+    let blob = FileBackend::construct_file_path_with_publisher(&repo, "alpha", &h);
+    let generation = current_generation(&repo);
+    let generations = generation_dirs(&repo);
+    let before = visible_state(&repo, &["alpha", "beta"]);
+
+    fs::remove_file(&blob).unwrap();
+    fs::remove_file(src.join("publisher/alpha/file").join(&h[0..2]).join(&h)).unwrap();
+    match import(&repo, &src) {
+        Err(Pkg5ImportError::InvalidSource { problems }) => {
+            assert!(
+                problems.iter().any(|p| p.contains(&h)
+                    && p.contains(&pkgs[0].stem)
+                    && p.contains("missing from the source and the repository")),
+                "{problems:?}"
+            );
+        }
+        other => panic!("expected the unrepairable payload to be reported, got {other:?}"),
+    }
+    assert!(!blob.exists());
+    assert_eq!(current_generation(&repo), generation);
+    assert_eq!(generation_dirs(&repo), generations);
+    assert_eq!(visible_state(&repo, &["alpha", "beta"]), before);
+}
+
+#[test]
+fn directory_import_with_new_packages_also_restores_missing_payloads() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    let mut pkgs = base_pkgs();
+    import(&repo, &write_pkg5_repo(&tmp.path().join("src1"), &pkgs)).unwrap();
+    let h = pkgs[2].payload_hashes()[0].clone();
+    let blob = FileBackend::construct_file_path_with_publisher(&repo, "beta", &h);
+    let served = fs::read(&blob).unwrap();
+    let generation = current_generation(&repo);
+
+    fs::remove_file(&blob).unwrap();
+    let fresh = Pkg::new("alpha", "web/new");
+    pkgs.push(fresh.clone());
+    let src = write_pkg5_repo(&tmp.path().join("src2"), &pkgs);
+    match import(&repo, &src).unwrap() {
+        Pkg5ImportOutcome::Committed(r) => {
+            assert_eq!(r.added.len(), 1, "{r:?}");
+            assert!(r.added[0].contains(&fresh.stem), "{r:?}");
+            assert_eq!(r.skipped.len(), 3);
+        }
+        other => panic!("expected the new package to be committed, got {other:?}"),
+    }
+    assert_ne!(current_generation(&repo), generation);
+    assert_eq!(fs::read(&blob).unwrap(), served);
+
+    let committed = current_generation(&repo);
+    match import(&repo, &src).unwrap() {
+        Pkg5ImportOutcome::NothingToImport { skipped } => assert_eq!(skipped.len(), 4),
+        other => panic!("expected the retry to be a no-op, got {other:?}"),
+    }
+    assert_eq!(current_generation(&repo), committed);
+}
+
+const V3_PREFIX: &str = "opensolaris.org";
+const V3_VERSION: &str = "0.5.11,5.11-0.111:20090518T184618Z";
+
+fn v3_pkg(stem: &str) -> Pkg {
+    Pkg::new(V3_PREFIX, stem).version(V3_VERSION)
+}
+
+/// A manifest as the legacy version 3 repository holds it: a comment
+/// header naming the package without its timestamp, and `pkg.fmri` only if
+/// `with_fmri`.
+fn v3_manifest(pkg: &Pkg, with_fmri: bool) -> String {
+    let untimed = pkg.version.split(':').next().unwrap();
+    let mut m = format!("# pkg:/{}@{}\n", pkg.stem, untimed);
+    for line in pkg.manifest().lines() {
+        if !with_fmri && line.starts_with("set name=pkg.fmri ") {
+            continue;
+        }
+        m.push_str(line);
+        m.push('\n');
+    }
+    m
+}
+
+/// A flat pkg5 version 3 repository: top-level cfg_cache, pkg/, file/.
+fn write_v3_repo(root: &Path, prefix: &str) -> PathBuf {
+    for d in ["pkg", "file", "catalog"] {
+        fs::create_dir_all(root.join(d)).unwrap();
+    }
+    fs::write(
+        root.join("cfg_cache"),
+        format!("[publisher]\nalias = None\nprefix = {prefix}\n\n[repository]\nname = Legacy\n"),
+    )
+    .unwrap();
+    root.to_path_buf()
+}
+
+/// Store `manifest` under `pkg/<stem_name>/<version_name>` (already
+/// encoded) and the package's payloads under `file/`.
+fn add_v3(root: &Path, pkg: &Pkg, stem_name: &str, version_name: &str, manifest: &str) {
+    let dir = root.join("pkg").join(stem_name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(version_name), manifest).unwrap();
+    for (_, content) in &pkg.files {
+        let h = sha1_hex(content);
+        let fdir = root.join("file").join(&h[0..2]);
+        fs::create_dir_all(&fdir).unwrap();
+        fs::write(fdir.join(&h), gzip(content)).unwrap();
+    }
+}
+
+fn add_v3_pkg(root: &Path, pkg: &Pkg, with_fmri: bool) {
+    add_v3(
+        root,
+        pkg,
+        &quote(&pkg.stem),
+        &quote(&pkg.version),
+        &v3_manifest(pkg, with_fmri),
+    );
+}
+
+fn invalid_source(result: Result<Pkg5ImportOutcome, Pkg5ImportError>) -> Vec<String> {
+    match result {
+        Err(Pkg5ImportError::InvalidSource { problems }) => problems,
+        other => panic!("expected an invalid source, got {other:?}"),
+    }
+}
+
+#[test]
+fn flat_v3_source_is_identified_by_path_and_config() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    let src = write_v3_repo(&tmp.path().join("legacy"), V3_PREFIX);
+    let cs = v3_pkg("SUNWcs");
+    let explicit = v3_pkg("web/server");
+    let plus = v3_pkg("library/c++");
+    let empty = v3_pkg("legacy/empty").obsolete();
+    add_v3_pkg(&src, &cs, false);
+    add_v3_pkg(&src, &explicit, true);
+    // pkg5 quotes `+`, but a literal `+` in a name is a plus, not a space.
+    add_v3(
+        &src,
+        &plus,
+        "library%2Fc++",
+        &quote(V3_VERSION),
+        &v3_manifest(&plus, false),
+    );
+    let comment_only = "# pkg:/legacy/empty@0.5.11,5.11-0.111\n";
+    add_v3(
+        &src,
+        &empty,
+        &quote(&empty.stem),
+        &quote(V3_VERSION),
+        comment_only,
+    );
+
+    let pkgs = [&cs, &explicit, &plus, &empty];
+    match import(&repo, &src).unwrap() {
+        Pkg5ImportOutcome::Committed(r) => {
+            let mut expected: Vec<String> = pkgs.iter().map(|p| p.fmri()).collect();
+            expected.sort();
+            let mut added = r.added.clone();
+            added.sort();
+            assert_eq!(added, expected);
+            assert_eq!(r.publishers, vec![V3_PREFIX]);
+        }
+        other => panic!("expected the V3 source to be committed, got {other:?}"),
+    }
+    // Versions keep the timestamp the path gives, not the comment's.
+    let mut entries: Vec<String> = pkgs.iter().map(|p| entry(p)).collect();
+    entries.sort();
+    assert_eq!(catalog_entries(&repo, V3_PREFIX), entries);
+    pkg5_refresh(&repo, V3_PREFIX, || {}).unwrap();
+
+    // Byte-exact manifests, comments included, and verified payloads.
+    assert_eq!(
+        fs::read_to_string(manifest_path(&repo, &cs)).unwrap(),
+        v3_manifest(&cs, false)
+    );
+    assert_eq!(
+        fs::read_to_string(manifest_path(&repo, &explicit)).unwrap(),
+        v3_manifest(&explicit, true)
+    );
+    assert_eq!(
+        fs::read_to_string(manifest_path(&repo, &empty)).unwrap(),
+        comment_only
+    );
+    for pkg in [&cs, &explicit, &plus] {
+        for h in pkg.payload_hashes() {
+            let blob = FileBackend::construct_file_path_with_publisher(&repo, V3_PREFIX, &h);
+            assert_eq!(fs::read(blob).unwrap(), gzip(&pkg.files[0].1));
+        }
+    }
+
+    // A retry is a no-op.
+    let generation = current_generation(&repo);
+    let before = visible_state(&repo, &[V3_PREFIX]);
+    match import(&repo, &src).unwrap() {
+        Pkg5ImportOutcome::NothingToImport { skipped } => assert_eq!(skipped.len(), 4),
+        other => panic!("expected the retry to be a no-op, got {other:?}"),
+    }
+    assert_eq!(current_generation(&repo), generation);
+    assert_eq!(visible_state(&repo, &[V3_PREFIX]), before);
+}
+
+#[test]
+fn flat_v3_explicit_fmri_must_agree_with_its_path() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    let src = write_v3_repo(&tmp.path().join("legacy"), V3_PREFIX);
+    let pkg = v3_pkg("web/server");
+    let other = v3_pkg("web/other");
+    // The manifest names web/other but is stored as web/server.
+    add_v3(
+        &src,
+        &pkg,
+        &quote(&pkg.stem),
+        &quote(&pkg.version),
+        &v3_manifest(&other, true),
+    );
+    let problems = invalid_source(import(&repo, &src));
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("does not match") && p.contains(&other.fmri())),
+        "{problems:?}"
+    );
+    assert!(catalog_entries(&repo, V3_PREFIX).is_empty());
+}
+
+#[test]
+fn flat_v3_and_v4_publishers_stay_independent() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    let oi = Pkg::new("openindiana.org", "web/server");
+    import(
+        &repo,
+        &write_pkg5_repo(&tmp.path().join("hipster"), &[oi.clone()]),
+    )
+    .unwrap();
+    let oi_before = visible_state(&repo, &["openindiana.org"]);
+
+    // Same stem, other publisher.
+    let legacy = v3_pkg("web/server");
+    let src = write_v3_repo(&tmp.path().join("legacy"), V3_PREFIX);
+    add_v3_pkg(&src, &legacy, false);
+    match import(&repo, &src).unwrap() {
+        Pkg5ImportOutcome::Committed(r) => {
+            assert_eq!(r.added, vec![legacy.fmri()]);
+            assert_eq!(r.publishers, vec![V3_PREFIX]);
+        }
+        other => panic!("expected the V3 source to be committed, got {other:?}"),
+    }
+    assert_eq!(catalog_entries(&repo, V3_PREFIX), vec![entry(&legacy)]);
+    assert_eq!(catalog_entries(&repo, "openindiana.org"), vec![entry(&oi)]);
+    assert_eq!(visible_state(&repo, &["openindiana.org"]), oi_before);
+    let backend = FileBackend::open(&repo).unwrap();
+    for p in ["openindiana.org", V3_PREFIX] {
+        assert!(backend.config.publishers.contains(&p.to_string()), "{p}");
+    }
+}
+
+#[test]
+fn flat_v3_bad_config_is_rejected() {
+    let bad = [
+        "[repository]\nname = x\n",
+        "[publisher]\nalias = x\n",
+        "[publisher]\nprefix =\n",
+        "[publisher]\nprefix = None\n",
+        "[publisher]\nprefix = a.org\nprefix = b.org\n",
+        "[publisher]\nprefix = a.org\n[publisher]\nprefix = a.org\n",
+        "[publisher]\nprefix = ../escape\n",
+    ];
+    for (i, cfg) in bad.iter().enumerate() {
+        let tmp = TempDir::new().unwrap();
+        let src = write_v3_repo(&tmp.path().join("legacy"), V3_PREFIX);
+        add_v3_pkg(&src, &v3_pkg("SUNWcs"), false);
+        fs::write(src.join("cfg_cache"), cfg).unwrap();
+        let problems = invalid_source(import(&tmp.path().join("repo"), &src));
+        assert!(
+            problems.iter().any(|p| p.starts_with("cfg_cache:")),
+            "case {i}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn flat_v3_bad_paths_are_rejected() {
+    let pkg = v3_pkg("SUNWcs");
+    let version = quote(V3_VERSION);
+    let version = version.as_str();
+    let cases = [
+        ("bad%2", version),
+        ("bad%zz", version),
+        ("%FF", version),
+        ("a%2F..%2Fb", version),
+        ("%2Fabs", version),
+        ("ctl%0A", version),
+        ("back%5Cslash", version),
+        ("with%20space", version),
+        ("per%25cent", version),
+        ("caf%C3%A9", version),
+        ("a%2F.%2Fb", version),
+        ("SUNWcs", "0.5.11%2C5.11-0.111%3"),
+        ("SUNWcs", "0.5.11%2F..%2Fx"),
+        ("SUNWcs", "not%20a%20version"),
+    ];
+    for (stem_name, version_name) in cases {
+        let tmp = TempDir::new().unwrap();
+        let src = write_v3_repo(&tmp.path().join("legacy"), V3_PREFIX);
+        add_v3(
+            &src,
+            &pkg,
+            stem_name,
+            version_name,
+            &v3_manifest(&pkg, false),
+        );
+        let repo = tmp.path().join("repo");
+        let problems = invalid_source(import(&repo, &src));
+        assert!(
+            problems.iter().any(|p| p.contains(stem_name)),
+            "{stem_name}/{version_name}: {problems:?}"
+        );
+        assert!(catalog_entries(&repo, V3_PREFIX).is_empty());
+    }
+}
+
+#[test]
+fn flat_v3_empty_manifests_are_rejected() {
+    let pkg = v3_pkg("SUNWcs");
+    for manifest in ["", " \n\t\n"] {
+        let tmp = TempDir::new().unwrap();
+        let src = write_v3_repo(&tmp.path().join("legacy"), V3_PREFIX);
+        add_v3(
+            &src,
+            &pkg,
+            &quote(&pkg.stem),
+            &quote(&pkg.version),
+            manifest,
+        );
+        let repo = tmp.path().join("repo");
+        let problems = invalid_source(import(&repo, &src));
+        assert!(
+            problems.iter().any(|p| p.contains("manifest is empty")),
+            "{manifest:?}: {problems:?}"
+        );
+        assert!(catalog_entries(&repo, V3_PREFIX).is_empty());
+    }
+}
+
+#[test]
+fn flat_v3_two_level_payload_layout_is_read() {
+    let tmp = TempDir::new().unwrap();
+    let src = write_v3_repo(&tmp.path().join("legacy"), V3_PREFIX);
+    let pkg = v3_pkg("SUNWcs");
+    add_v3_pkg(&src, &pkg, false);
+    // Older pkg5 stored payloads as file/<first2>/<next6>/<hash>.
+    for h in pkg.payload_hashes() {
+        let flat = src.join("file").join(&h[0..2]).join(&h);
+        let nested = src.join("file").join(&h[0..2]).join(&h[2..8]);
+        fs::create_dir_all(&nested).unwrap();
+        fs::rename(&flat, nested.join(&h)).unwrap();
+    }
+    let repo = tmp.path().join("repo");
+    match import(&repo, &src).unwrap() {
+        Pkg5ImportOutcome::Committed(r) => assert_eq!(r.added, vec![pkg.fmri()]),
+        other => panic!("expected the V3 source to be committed, got {other:?}"),
+    }
+    assert_eq!(catalog_entries(&repo, V3_PREFIX), vec![entry(&pkg)]);
+    for h in pkg.payload_hashes() {
+        let blob = FileBackend::construct_file_path_with_publisher(&repo, V3_PREFIX, &h);
+        assert_eq!(fs::read(blob).unwrap(), gzip(&pkg.files[0].1));
+    }
+}
+
+#[test]
+fn flat_v3_incomplete_or_mixed_trees_are_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let pkg = v3_pkg("SUNWcs");
+    let fresh = || {
+        let dir = TempDir::new_in(tmp.path()).unwrap().keep();
+        let src = write_v3_repo(&dir, V3_PREFIX);
+        add_v3_pkg(&src, &pkg, false);
+        src
+    };
+
+    // Mixed with version 4 entries.
+    let src = fresh();
+    fs::write(src.join("pkg5.repository"), "[repository]\nversion = 4\n").unwrap();
+    let problems = invalid_source(import(&tmp.path().join("r1"), &src));
+    assert!(problems.iter().any(|p| p.contains("mixed")), "{problems:?}");
+    let src = fresh();
+    fs::create_dir_all(src.join("publisher").join(V3_PREFIX).join("pkg")).unwrap();
+    let problems = invalid_source(import(&tmp.path().join("r2"), &src));
+    assert!(problems.iter().any(|p| p.contains("mixed")), "{problems:?}");
+
+    // Incomplete: no file/ directory, cfg_cache not a regular file.
+    let src = fresh();
+    fs::remove_dir_all(src.join("file")).unwrap();
+    let problems = invalid_source(import(&tmp.path().join("r3"), &src));
+    assert!(
+        problems.iter().any(|p| p == "file: missing"),
+        "{problems:?}"
+    );
+    let src = fresh();
+    fs::remove_file(src.join("cfg_cache")).unwrap();
+    fs::create_dir(src.join("cfg_cache")).unwrap();
+    let problems = invalid_source(import(&tmp.path().join("r4"), &src));
+    assert!(
+        problems
+            .iter()
+            .any(|p| p == "cfg_cache: not a regular file"),
+        "{problems:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn flat_v3_links_and_missing_payloads_are_rejected() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let pkg = v3_pkg("SUNWcs");
+    let fresh = || {
+        let dir = TempDir::new_in(tmp.path()).unwrap().keep();
+        let src = write_v3_repo(&dir, V3_PREFIX);
+        add_v3_pkg(&src, &pkg, false);
+        src
+    };
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("cfg"), "[publisher]\nprefix = other.org\n").unwrap();
+
+    let cases: Vec<(&str, Box<dyn Fn(&Path) + '_>)> = vec![
+        (
+            "cfg_cache",
+            Box::new(|s: &Path| {
+                fs::remove_file(s.join("cfg_cache")).unwrap();
+                symlink(outside.join("cfg"), s.join("cfg_cache")).unwrap();
+            }),
+        ),
+        (
+            "file",
+            Box::new(|s: &Path| {
+                fs::rename(s.join("file"), outside.join("file")).unwrap();
+                symlink(outside.join("file"), s.join("file")).unwrap();
+            }),
+        ),
+        (
+            "pkg/linked",
+            Box::new(|s: &Path| symlink(&outside, s.join("pkg/linked")).unwrap()),
+        ),
+        (
+            "file/",
+            Box::new(|s: &Path| {
+                let h = pkg.payload_hashes()[0].clone();
+                let blob = s.join("file").join(&h[0..2]).join(&h);
+                let moved = outside.join(&h);
+                fs::rename(&blob, &moved).unwrap();
+                symlink(&moved, &blob).unwrap();
+            }),
+        ),
+    ];
+    for (i, (what, break_it)) in cases.iter().enumerate() {
+        let src = fresh();
+        break_it(src.as_path());
+        let repo = tmp.path().join(format!("repo{i}"));
+        let problems = invalid_source(import(&repo, &src));
+        assert!(
+            problems.iter().any(|p| p.starts_with(what)),
+            "{what}: {problems:?}"
+        );
+        assert!(catalog_entries(&repo, V3_PREFIX).is_empty());
+        assert!(catalog_entries(&repo, "other.org").is_empty());
+    }
+
+    // A payload the manifest references but the source lacks.
+    let src = fresh();
+    let h = pkg.payload_hashes()[0].clone();
+    fs::remove_file(src.join("file").join(&h[0..2]).join(&h)).unwrap();
+    let repo = tmp.path().join("missing");
+    let problems = invalid_source(import(&repo, &src));
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains(&h) && p.contains("missing from the source and the repository")),
+        "{problems:?}"
+    );
+    assert!(catalog_entries(&repo, V3_PREFIX).is_empty());
 }
 
 fn shard_rows(repo: &Path, publisher: &str, db: &str, sql: &str) -> Vec<String> {
@@ -1179,6 +1712,140 @@ fn extraction_limits_stop_oversized_archives_before_changes() {
     assert!(matches!(
         import(&repo, &run2).unwrap(),
         Pkg5ImportOutcome::Committed(_)
+    ));
+}
+
+/// Total size of the manifest files below `pkg_dirs`.
+fn manifest_bytes(pkg_dirs: &[PathBuf]) -> u64 {
+    pkg_dirs
+        .iter()
+        .flat_map(|d| walkdir::WalkDir::new(d).into_iter().map(Result::unwrap))
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.metadata().unwrap().len())
+        .sum()
+}
+
+fn budget(manifests: u64, bytes: u64) -> Pkg5ImportOptions {
+    Pkg5ImportOptions {
+        max_import_manifests: manifests.try_into().unwrap(),
+        max_import_manifest_bytes: bytes.try_into().unwrap(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn manifest_budget_rejects_the_whole_batch_for_every_source_layout() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    import(&repo, &make_p5p(tmp.path(), "run1", &base_pkgs())).unwrap();
+
+    // Three new packages of one publisher in each layout.
+    let pkgs = |prefix: &str| -> Vec<Pkg> {
+        (0..3)
+            .map(|i| Pkg::new("alpha", &format!("{prefix}/pkg{i}")))
+            .collect()
+    };
+    let v4_dir = write_pkg5_repo(&tmp.path().join("v4"), &pkgs("dir"));
+    let p5p = make_p5p(tmp.path(), "big", &pkgs("archive"));
+    let v3_dir = write_v3_repo(&tmp.path().join("legacy"), V3_PREFIX);
+    for i in 0..3 {
+        add_v3_pkg(&v3_dir, &v3_pkg(&format!("SUNWflat{i}")), false);
+    }
+    let v4_bytes = manifest_bytes(&[v4_dir.join("publisher/alpha/pkg")]);
+    let p5p_bytes = manifest_bytes(&[tmp.path().join("big.src/publisher/alpha/pkg")]);
+    let v3_bytes = manifest_bytes(&[v3_dir.join("pkg")]);
+    let sources = [(v4_dir, v4_bytes), (p5p, p5p_bytes), (v3_dir, v3_bytes)];
+
+    for (source, total) in &sources {
+        let generation = current_generation(&repo);
+        let before = visible_state(&repo, &["alpha", "beta", V3_PREFIX]);
+        for (options, expect_manifests, expect_bytes) in [
+            // One manifest file too many, whatever its size.
+            (budget(2, u64::MAX), 3, None),
+            // One byte too many: the last file read crosses the limit.
+            (budget(3, total - 1), 3, Some(*total)),
+        ] {
+            let err = import_pkg5(&repo, source, &options).unwrap_err();
+            let text = err.to_string();
+            match err {
+                Pkg5ImportError::ManifestBudget {
+                    path,
+                    manifests,
+                    bytes,
+                    max_manifests,
+                    max_bytes,
+                } => {
+                    assert_eq!(&path, source);
+                    assert_eq!(manifests, expect_manifests);
+                    if let Some(b) = expect_bytes {
+                        assert_eq!(bytes, b);
+                    }
+                    assert_eq!(max_manifests, options.max_import_manifests.get());
+                    assert_eq!(max_bytes, options.max_import_manifest_bytes.get());
+                }
+                other => panic!(
+                    "{}: expected the budget to stop it, got {other:?}",
+                    source.display()
+                ),
+            }
+            assert!(text.contains("no packages were imported"), "{text}");
+            assert!(text.contains(&source.display().to_string()), "{text}");
+            assert_eq!(current_generation(&repo), generation);
+            assert_eq!(visible_state(&repo, &["alpha", "beta", V3_PREFIX]), before);
+            assert!(generation_dirs(&repo).iter().all(|n| !n.starts_with('.')));
+        }
+
+        // Exactly at both limits, the batch is imported.
+        match import_pkg5(&repo, source, &budget(3, *total)).unwrap() {
+            Pkg5ImportOutcome::Committed(r) => assert_eq!(r.added.len(), 3),
+            other => panic!(
+                "{}: expected a commit at the limits, got {other:?}",
+                source.display()
+            ),
+        }
+    }
+}
+
+#[test]
+fn manifest_budget_spans_selected_publishers_only_and_spares_receipts() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    let archive = make_p5p(
+        tmp.path(),
+        "run1",
+        &[
+            Pkg::new("alpha", "web/one"),
+            Pkg::new("alpha", "web/two"),
+            Pkg::new("beta", "library/one"),
+            Pkg::new("beta", "library/two"),
+        ],
+    );
+    let only_alpha = Pkg5ImportOptions {
+        publishers: Some(vec!["alpha".to_string()]),
+        ..budget(2, u64::MAX)
+    };
+    assert!(matches!(
+        import_pkg5(&repo, &archive, &only_alpha).unwrap(),
+        Pkg5ImportOutcome::Committed(_)
+    ));
+
+    // All publishers share one budget: alpha's two fit, beta's push past it.
+    let generation = current_generation(&repo);
+    match import_pkg5(&repo, &archive, &budget(2, u64::MAX)) {
+        Err(Pkg5ImportError::ManifestBudget { manifests: 3, .. }) => {}
+        other => panic!("expected the shared budget to stop it, got {other:?}"),
+    }
+    assert_eq!(current_generation(&repo), generation);
+    assert!(catalog_entries(&repo, "beta").is_empty());
+
+    // Once committed, a retry takes the receipt fast path without scanning.
+    assert!(matches!(
+        import(&repo, &archive).unwrap(),
+        Pkg5ImportOutcome::Committed(_)
+    ));
+    assert!(matches!(
+        import_pkg5(&repo, &archive, &budget(1, 1)).unwrap(),
+        Pkg5ImportOutcome::AlreadyImported(_)
     ));
 }
 
